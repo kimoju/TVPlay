@@ -214,14 +214,25 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         settings.connection.wirelessEnabled = wireless
 
         if (!skipPermissionPrompt) {
-            val missingPermissions = if (wireless) {
-                WirelessPermissions.missing(
-                    context = this,
-                    wirelessMode = settings.connection.wirelessHotspotMode,
-                )
-            } else {
-                WiredPermissions.missing(this)
-            }
+            val missingPermissions = buildList {
+                if (wireless) {
+                    addAll(
+                        WirelessPermissions.missing(
+                            context = this@TvWorkbenchActivity,
+                            wirelessMode = settings.connection.wirelessHotspotMode,
+                        ),
+                    )
+                } else {
+                    addAll(WiredPermissions.missing(this@TvWorkbenchActivity))
+                }
+                if (
+                    settings.audio.microphoneEnabled &&
+                    checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    add(android.Manifest.permission.RECORD_AUDIO)
+                }
+            }.distinct()
             if (missingPermissions.isNotEmpty()) {
                 val requestStarted = runCatching {
                     requestPermissions(missingPermissions.toTypedArray(), REQUEST_PROJECTION_PERMISSIONS)

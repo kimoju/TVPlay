@@ -2,10 +2,17 @@ package app.tvplay.config
 
 import android.Manifest
 import android.os.Build
+import app.tvplay.engine.av.DisplaySafeAreaRect
 import app.tvplay.engine.av.PhysicalSizeBasis
+import app.tvplay.engine.av.TvDisplaySpec
+import app.tvplay.engine.session.TvTransportMode
 import app.tvplay.engine.session.TvWirelessMode
+import app.tvplay.remote.CarPlayNightMode
+import app.tvplay.ui.theme.AppAppearance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -67,5 +74,79 @@ class TvConfigTest {
         assertTrue(repository.audio.disableAudioOutput)
         assertTrue(repository.audio.microphoneEnabled)
         assertEquals("Living Room TV", repository.identity.oemLabel)
+    }
+
+    @Test
+    fun mfiAssetInstallerExtractsOfflineMfiAssetsAndBuildsCompleteSessionAndStreamConfigs() {
+        val context = RuntimeEnvironment.getApplication()
+        var signatureCount = 0
+        val provider = MfiAssetInstaller.loadProvider(context) { count ->
+            signatureCount = count
+        }
+        assertTrue(MfiAssetInstaller.directory(context).isDirectory)
+        assertTrue(provider.readCertificate().isNotEmpty())
+        val sig = provider.signChallenge(ByteArray(32) { (it + 1).toByte() })
+        assertEquals(64, sig.size)
+        assertEquals(32, signatureCount)
+
+        TvPreferencesStore.saveRightHandDrive(context, true)
+        TvPreferencesStore.saveOemLabel(context, "客厅电视")
+        val display = TvDisplaySpec(widthPixels = 1920, heightPixels = 1080, fps = 60, primaryInputDevice = 3)
+        val streamConfig = MfiAssetInstaller.buildStreamServerConfig(context, main = display)
+        assertTrue(streamConfig.rightHandDrive)
+        assertEquals("客厅电视", streamConfig.oemLabel)
+        assertTrue(streamConfig.icons.isNotEmpty())
+        assertTrue(streamConfig.icons.first().data.isNotEmpty())
+
+        val sessionConfig = MfiAssetInstaller.buildSessionConfig(
+            context = context,
+            transport = TvTransportMode.WIRED,
+        )
+        assertEquals(TvTransportMode.WIRED, sessionConfig.transport)
+        assertEquals(6, sessionConfig.hostMac.size)
+        assertEquals("TVPlay", sessionConfig.identification.name)
+    }
+
+    @Test
+    fun tvPreferencesStoreRoundTripsAllDisplayAudioAndSafeAreaSettings() {
+        val context = RuntimeEnvironment.getApplication()
+        TvPreferencesStore.saveDisplayScalePercent(context, 115)
+        assertEquals(115, TvPreferencesStore.loadDisplayScalePercent(context))
+
+        TvPreferencesStore.saveUiScalePercent(context, 85)
+        assertEquals(85, TvPreferencesStore.loadUiScalePercent(context))
+
+        TvPreferencesStore.saveVideoSurfaceType(context, VideoSurfaceType.SURFACE_VIEW)
+        assertEquals(VideoSurfaceType.SURFACE_VIEW, TvPreferencesStore.loadVideoSurfaceType(context))
+
+        TvPreferencesStore.saveCarPlayNightMode(context, CarPlayNightMode.NIGHT)
+        assertEquals(CarPlayNightMode.NIGHT, TvPreferencesStore.loadCarPlayNightMode(context))
+
+        TvPreferencesStore.saveAppAppearance(context, AppAppearance.LIGHT)
+        assertEquals(AppAppearance.LIGHT, TvPreferencesStore.loadAppAppearance(context))
+
+        val chosenPreset = WaitingScreenColorPreset.entries.last()
+        TvPreferencesStore.saveWaitingScreenColorPreset(context, chosenPreset)
+        assertEquals(
+            chosenPreset,
+            TvPreferencesStore.loadWaitingScreenColorPreset(context),
+        )
+        assertNotNull(TvPreferencesStore.loadWaitingScreenColors(context))
+
+        val rect = DisplaySafeAreaRect(left = 20, top = 10, right = 1900, bottom = 1070)
+        TvPreferencesStore.saveSafeAreaRect(context, 1920, 1080, rect)
+        assertEquals(rect, TvPreferencesStore.loadSafeAreaRect(context, 1920, 1080))
+        TvPreferencesStore.clearSafeAreaRect(context, 1920, 1080)
+        assertNull(TvPreferencesStore.loadSafeAreaRect(context, 1920, 1080))
+
+        val wirelessBuf = app.tvplay.engine.av.MediaAudioBuffer.sanitizeWireless(400)
+        val wiredBuf = app.tvplay.engine.av.MediaAudioBuffer.sanitizeWired(200)
+        TvPreferencesStore.saveMediaBufferMillis(context, wireless = true, millis = wirelessBuf)
+        TvPreferencesStore.saveMediaBufferMillis(context, wireless = false, millis = wiredBuf)
+        assertEquals(wirelessBuf, TvPreferencesStore.loadMediaBufferMillis(context, wireless = true))
+        assertEquals(wiredBuf, TvPreferencesStore.loadMediaBufferMillis(context, wireless = false))
+
+        TvPreferencesStore.clearLockdownRecord(context)
+        assertNull(TvPreferencesStore.loadLockdownRecord(context))
     }
 }

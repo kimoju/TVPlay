@@ -26,12 +26,22 @@ class BootAutoStartReceiver : BroadcastReceiver() {
         ) {
             return
         }
-        if (!TvPreferencesStore.loadAutoStartOnBoot(context)) return
-        context.startActivity(
-            CarPlayScreen.intent(context)
-                .putExtra("wireless", TvPreferencesStore.loadAutoConnectWireless(context))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-        )
+        val enabled = TvPreferencesStore.loadAutoStartOnBoot(context)
+        StartupDiagnosticSnapshot.received(context, enabled)
+        if (!enabled) return
+        runCatching {
+            context.startActivity(
+                CarPlayScreen.intent(context)
+                    .putExtra("wireless", TvPreferencesStore.loadAutoConnectWireless(context))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            )
+            StartupDiagnosticSnapshot.launchResult(context, null)
+        }.onFailure { error ->
+            StartupDiagnosticSnapshot.launchResult(
+                context,
+                error as? RuntimeException ?: RuntimeException(error),
+            )
+        }
     }
 }
 

@@ -166,7 +166,11 @@ class TvStageActivity : Activity() {
         val previousWireless = TvPreferencesStore.loadWirelessEnabled(this)
         applyLaunchIntentMode(intent)
         val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
-        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED || previousWireless != currentWireless) {
+        if (
+            intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED ||
+            previousWireless != currentWireless ||
+            PendingReconnect.isPending()
+        ) {
             reconnectNow()
         }
     }
@@ -430,6 +434,11 @@ class TvStageActivity : Activity() {
     private fun startOrAttachSession() {
         PendingReconnect.clear()
         waitingBindings.reconnectBannerView.visibility = View.GONE
+        if (sessionEngine != null) {
+            stopActiveSession()
+        } else if (CarPlayBackgroundSession.hasSession()) {
+            CarPlayBackgroundSession.stop {}
+        }
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
 
@@ -459,7 +468,8 @@ class TvStageActivity : Activity() {
         sessionHevc = hevc
         val videoSync = TvPreferencesStore.loadVideoSyncEnabled(this)
         val disableAudio = TvPreferencesStore.loadDisableAudioOutput(this)
-        val micEnabled = TvPreferencesStore.loadMicrophoneEnabled(this)
+        val micEnabled = TvPreferencesStore.loadMicrophoneEnabled(this) &&
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val bufferedAudio = TvPreferencesStore.loadMainBufferedAudio(this)
 
         val metrics = resources.displayMetrics
@@ -488,6 +498,22 @@ class TvStageActivity : Activity() {
         )
         displaySpec = DisplayScaleMath.applyPercent(displaySpec, scalePercent)
         displaySpec = UiDensityScale.apply(displaySpec, uiScale)
+        val disableSafeArea = TvPreferencesStore.loadMainDisplayDisableSafeArea(this)
+        val safeAreaDrawOutside = TvPreferencesStore.loadSafeAreaDrawOutside(this)
+        displaySpec = displaySpec.copy(
+            safeArea = if (disableSafeArea) {
+                null
+            } else {
+                DisplaySafeAreaMath.toInsets(
+                    mapping = TvPreferencesStore.loadSafeAreaRect(this, rawW, rawH),
+                    activityWidthPixels = rawW,
+                    activityHeightPixels = rawH,
+                    displayWidthPixels = displaySpec.widthPixels,
+                    displayHeightPixels = displaySpec.heightPixels,
+                )
+            },
+            safeAreaDrawOutside = safeAreaDrawOutside,
+        )
         sessionDisplay = CarPlaySessionDisplay(
             width = displaySpec.widthPixels,
             height = displaySpec.heightPixels,
@@ -578,6 +604,7 @@ class TvStageActivity : Activity() {
         val sessionListener = object : AirPlaySessionListener {
             override fun onSessionActive(session: AirPlaySession) {
                 activeAirPlaySession = session
+                CarPlayBackgroundSession.active = true
                 val nightMode = resolveNightMode()
                 session.setNightMode(nightMode)
                 mainHandler.post {
@@ -601,6 +628,7 @@ class TvStageActivity : Activity() {
                 if (activeAirPlaySession === session) {
                     activeAirPlaySession = null
                 }
+                CarPlayBackgroundSession.active = false
                 mainHandler.post {
                     streamingActive = false
                     firstFrameRendered = false
@@ -644,6 +672,7 @@ class TvStageActivity : Activity() {
             display = initialDisplay,
         ) { done ->
             stopActiveSession()
+            TvSessionForegroundService.stop(this@TvStageActivity)
             done()
         }
         if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
@@ -895,12 +924,20 @@ class TvStageActivity : Activity() {
     }
 
     private fun returnToWorkbench() {
+        if (!streamingActive) {
+            cancelScheduledReconnect()
+            stopActiveSession()
+            TvSessionForegroundService.stop(this)
+        }
         startActivity(
             Intent(this, TvWorkbenchActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("page", "home")
             },
         )
-        finish()
+        if (!streamingActive) {
+            finish()
+        }
     }
 
     private fun disconnectAndExit() {
@@ -913,6 +950,8 @@ class TvStageActivity : Activity() {
     private fun stopActiveSession() {
         val currentEngine = sessionEngine
         activeAirPlaySession = null
+        streamingActive = false
+        firstFrameRendered = false
         TvMediaKeyRouter.release(this)
         currentEngine?.close()
         sessionEngine = null

@@ -203,6 +203,7 @@ object MfiAssetInstaller {
         oemLabel: String = TvPreferencesStore.loadOemLabel(context),
         icons: List<TvIconAsset> = loadDefaultIcons(context),
         mainBufferedAudio: Boolean = TvPreferencesStore.loadMainBufferedAudio(context),
+        rightHandDrive: Boolean = TvPreferencesStore.loadRightHandDrive(context),
     ): TvStreamServerConfig {
         val resolvedManufacturer = manufacturer.trim().ifBlank { TvPreferencesStore.DEFAULT_MANUFACTURER }
         val resolvedModel = model.trim().ifBlank { TvPreferencesStore.DEFAULT_MODEL }
@@ -225,6 +226,7 @@ object MfiAssetInstaller {
             oemLabel = resolvedOemLabel,
             icons = resolvedIcons,
             mainBufferedAudio = mainBufferedAudio,
+            rightHandDrive = rightHandDrive,
         )
     }
 

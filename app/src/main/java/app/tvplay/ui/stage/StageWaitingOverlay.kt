@@ -55,6 +55,7 @@ object StageWaitingOverlay {
         onReconnectClicked: () -> Unit,
         onSettingsClicked: () -> Unit,
         onDisconnectClicked: () -> Unit,
+        onBluetoothSettingsClicked: (() -> Unit)? = null,
     ): ProjectionWaitingStageBindings {
         val density = context.resources.displayMetrics.density
         val pad = (24 * density).toInt()
@@ -131,6 +132,26 @@ object StageWaitingOverlay {
                 ),
             )
         }
+        val quickReconnectButton = createTvButton(
+            context = context,
+            text = context.getString(R.string.reconnect),
+            fillColor = 0xFF2563EB.toInt(),
+            textColor = Color.WHITE,
+            strokeColor = 0xFF93C5FD.toInt(),
+            onClick = onReconnectClicked,
+        )
+        val bluetoothButton = if (onBluetoothSettingsClicked != null) {
+            createTvButton(
+                context = context,
+                text = "电视蓝牙配对",
+                fillColor = waitingColors.buttonFill,
+                textColor = Color.WHITE,
+                strokeColor = waitingColors.buttonBorder,
+                onClick = onBluetoothSettingsClicked,
+            )
+        } else {
+            null
+        }
         val settingsButton = createTvButton(
             context = context,
             text = context.getString(R.string.settings),
@@ -151,6 +172,26 @@ object StageWaitingOverlay {
         val actionButtonsRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            addView(
+                quickReconnectButton,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    rightMargin = smallPad
+                },
+            )
+            if (bluetoothButton != null) {
+                addView(
+                    bluetoothButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        rightMargin = smallPad
+                    },
+                )
+            }
             addView(
                 settingsButton,
                 LinearLayout.LayoutParams(

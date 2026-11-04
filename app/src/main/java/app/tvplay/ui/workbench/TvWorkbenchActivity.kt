@@ -4,9 +4,6 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.hardware.usb.UsbManager
-import android.net.VpnService
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
@@ -14,24 +11,19 @@ import android.view.KeyEvent
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.LinearLayout
 import android.widget.Toast
-import androidx.core.view.WindowCompat
 import androidx.core.view.setPadding
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
-import app.tvplay.config.TvPreferencesStore
 import app.tvplay.config.TvSettingsRepository
-import app.tvplay.config.WiredPermissions
 import app.tvplay.config.WirelessPermissions
 import app.tvplay.engine.network.BluetoothRadioCheck
-import app.tvplay.engine.network.IphoneUsbMatcher
-import app.tvplay.engine.network.UsbTunnelVpnService
+import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.DiagnosticExportStore
 import app.tvplay.runtime.PendingReconnect
 import app.tvplay.runtime.ThemeModeDiagnostics
 import app.tvplay.runtime.TvDiagnosticsLogger
 import app.tvplay.ui.stage.CarPlayScreen
-import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.AppAppearanceOwner
 import app.tvplay.ui.theme.AppAppearanceRuntime
 import app.tvplay.ui.theme.TvColorScheme
@@ -46,8 +38,8 @@ typealias TvPlayWorkbenchActivity = TvWorkbenchActivity
 /**
  * Primary 10-foot Android TV setup & control workbench for TVPlay.
  *
- * Replaces the legacy car-oriented scrolling form with an Apple TV / Android TV dual-pane layout:
- * - Left pane ([WorkbenchHeroStage]): Live receiver stage, 3-step connection guide, and primary Launch CTA.
+ * Uses an Apple TV / Android TV dual-pane layout:
+ * - Left pane ([WorkbenchHeroStage]): Live receiver stage, wireless mode switcher, 3-step connection guide, and primary Launch CTA.
  * - Right pane ([WorkbenchSettingsTabs]): Tabbed D-pad-friendly settings (`CONNECTION`, `DISPLAY`, `AUDIO`, `ABOUT`).
  */
 open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
@@ -61,10 +53,10 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private lateinit var stagePane: WorkbenchHeroStage
     private lateinit var settingsPane: WorkbenchSettingsTabs
     private val themeModeDiagnostics = ThemeModeDiagnostics()
-    private var pendingLaunchWireless: Boolean? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = TvSettingsRepository(this)
+        settings.connection.wirelessEnabled = true
         appNight = resolveAppNightNow()
         AppAppearanceRuntime.publishHost(this, appNight)
         setTheme(if (appNight) R.style.Theme_TVPlay else R.style.Theme_TVPlay_Light)
@@ -80,11 +72,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
 
         if (savedInstanceState == null && shouldAutoLaunchProjection(intent)) {
-            val wireless = intent?.getBooleanExtra(
-                "wireless",
-                TvPreferencesStore.loadAutoConnectWireless(this),
-            ) ?: settings.connection.wirelessEnabled
-            launchProjectionStage(wireless = wireless)
+            launchProjectionStage()
         }
     }
 
@@ -96,8 +84,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             return
         }
         if (shouldAutoLaunchProjection(intent)) {
-            val wireless = intent.getBooleanExtra("wireless", settings.connection.wirelessEnabled)
-            launchProjectionStage(wireless = wireless)
+            launchProjectionStage()
         }
     }
 
@@ -124,7 +111,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
-            launchProjectionStage(wireless = settings.connection.wirelessEnabled)
+            launchProjectionStage()
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -143,15 +130,19 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
         stagePane = WorkbenchHeroStage(this, settings).apply {
             onLaunchProjection = {
-                launchProjectionStage(wireless = settings.connection.wirelessEnabled)
+                launchProjectionStage()
             }
-            onToggleTransportMode = {
-                settings.connection.wirelessEnabled = !settings.connection.wirelessEnabled
+            onSelectWirelessMode = { mode ->
+                settings.connection.wirelessEnabled = true
+                settings.connection.wirelessHotspotMode = mode
                 if (CarPlayBackgroundSession.hasSession()) {
                     PendingReconnect.mark()
                 }
                 refreshWorkbenchStatus()
                 settingsPane.refresh()
+            }
+            onOpenBluetoothSettings = {
+                openSystemBluetoothSettings()
             }
         }
 
@@ -202,32 +193,21 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     private fun shouldAutoLaunchProjection(intent: Intent?): Boolean {
         if (intent == null) return false
-        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
-            return true
-        }
-        if (intent.hasExtra("wireless") || intent.hasExtra("auto_connect_token")) {
-            return true
-        }
-        return false
+        return intent.hasExtra("wireless") || intent.hasExtra("auto_connect_token")
     }
 
-    private fun launchProjectionStage(wireless: Boolean) {
-        settings.connection.wirelessEnabled = wireless
-        val missingPermissions = if (wireless) {
-            WirelessPermissions.missing(
-                context = this,
-                wirelessMode = settings.connection.wirelessHotspotMode,
-            )
-        } else {
-            WiredPermissions.missing(this)
-        }
+    private fun launchProjectionStage() {
+        settings.connection.wirelessEnabled = true
+        val missingPermissions = WirelessPermissions.missing(
+            context = this,
+            wirelessMode = settings.connection.wirelessHotspotMode,
+        )
         if (missingPermissions.isNotEmpty()) {
-            pendingLaunchWireless = wireless
             requestPermissions(missingPermissions.toTypedArray(), REQUEST_PROJECTION_PERMISSIONS)
             return
         }
 
-        if (wireless && !BluetoothRadioCheck.isOn(this)) {
+        if (!BluetoothRadioCheck.isOn(this)) {
             Toast.makeText(
                 this,
                 getString(R.string.turn_on_bluetooth_before_starting_wireless_carplay),
@@ -237,18 +217,9 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             return
         }
 
-        if (!wireless) {
-            val vpnPrepare = runCatching { VpnService.prepare(this) }.getOrNull()
-            if (vpnPrepare != null) {
-                pendingLaunchWireless = false
-                startActivityForResult(vpnPrepare, REQUEST_VPN_PERMISSION)
-                return
-            }
-        }
-
         startActivity(
             CarPlayScreen.intent(this)
-                .putExtra("wireless", wireless),
+                .putExtra("wireless", true),
         )
     }
 
@@ -260,10 +231,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_PROJECTION_PERMISSIONS) {
-            val wireless = pendingLaunchWireless ?: settings.connection.wirelessEnabled
-            pendingLaunchWireless = null
             if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                launchProjectionStage(wireless)
+                launchProjectionStage()
             } else {
                 Toast.makeText(
                     this,
@@ -277,30 +246,18 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        when (requestCode) {
-            REQUEST_VPN_PERMISSION -> {
-                val wireless = pendingLaunchWireless ?: false
-                pendingLaunchWireless = null
-                if (resultCode == RESULT_OK) {
-                    startActivity(
-                        CarPlayScreen.intent(this)
-                            .putExtra("wireless", wireless),
-                    )
-                }
-            }
-            REQUEST_SAVE_DIAGNOSTIC_LOG -> {
-                val uri = data?.data ?: return
-                val report = TvDiagnosticsLogger.buildReport(this)
-                runCatching {
-                    DiagnosticExportStore.write(contentResolver, uri, report)
-                    Toast.makeText(this, "Diagnostic report saved", Toast.LENGTH_SHORT).show()
-                }.onFailure { error ->
-                    Toast.makeText(
-                        this,
-                        "Failed to save diagnostic report: ${error.message}",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
+        if (requestCode == REQUEST_SAVE_DIAGNOSTIC_LOG) {
+            val uri = data?.data ?: return
+            val report = TvDiagnosticsLogger.buildReport(this)
+            runCatching {
+                DiagnosticExportStore.write(contentResolver, uri, report)
+                Toast.makeText(this, "诊断日志报告已保存", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                Toast.makeText(
+                    this,
+                    "保存诊断日志失败：${error.message}",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
@@ -309,14 +266,14 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val bonded = TvPlayBluetooth.bondedDevices(this)
         if (bonded.isEmpty()) {
             appDialogBuilder(this)
-                .setTitle("No Paired Bluetooth Devices")
+                .setTitle("尚未配对任何蓝牙设备")
                 .setMessage(
-                    "Pair your iPhone in Android TV Bluetooth settings first, then return here to select it.",
+                    "请先在电视系统蓝牙设置中与 iPhone 完成蓝牙配对，然后返回此处选择该 iPhone。",
                 )
-                .setPositiveButton("Open Bluetooth Settings") { _, _ ->
+                .setPositiveButton("打开电视蓝牙设置") { _, _ ->
                     openSystemBluetoothSettings()
                 }
-                .setNegativeButton(android.R.string.cancel, null)
+                .setNegativeButton("取消", null)
                 .show()
             return
         }
@@ -326,7 +283,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val checkedIndex = bonded.indexOfFirst { it.address.equals(currentAddress, ignoreCase = true) }
 
         appDialogBuilder(this)
-            .setTitle("Choose Paired iPhone")
+            .setTitle("选择已配对的 iPhone")
             .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
                 val chosen = bonded[which]
                 settings.connection.savePairedPhone(chosen.address, chosen.name)
@@ -337,10 +294,10 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 settingsPane.refresh()
                 dialog.dismiss()
             }
-            .setNeutralButton("Bluetooth Settings") { _, _ ->
+            .setNeutralButton("系统蓝牙设置") { _, _ ->
                 openSystemBluetoothSettings()
             }
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton("取消", null)
             .show()
     }
 
@@ -371,13 +328,13 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 val saved = DiagnosticExportStore.saveWithoutPicker(this, fileName, report)
                 Toast.makeText(
                     this,
-                    "Diagnostic report saved: ${saved.displayPath}",
+                    "诊断日志已导出至：${saved.displayPath}",
                     Toast.LENGTH_LONG,
                 ).show()
             }.onFailure { error ->
                 Toast.makeText(
                     this,
-                    "Could not export diagnostic report: ${error.message}",
+                    "无法导出诊断日志：${error.message}",
                     Toast.LENGTH_LONG,
                 ).show()
             }
@@ -396,18 +353,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         )
     }
 
-    @Suppress("unused")
-    private fun hasConnectedUsbIphone(): Boolean {
-        val usb = getSystemService(UsbManager::class.java) ?: return false
-        val matcher = IphoneUsbMatcher.appleVendor()
-        return usb.deviceList.values.any { device ->
-            matcher.matches(device.vendorId, device.productId)
-        }
-    }
-
     companion object {
         private const val REQUEST_PROJECTION_PERMISSIONS = 1001
-        private const val REQUEST_VPN_PERMISSION = 1002
         private const val REQUEST_SAVE_DIAGNOSTIC_LOG = 1003
 
         fun isLauncherIntent(intent: Intent?): Boolean =

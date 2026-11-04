@@ -18,14 +18,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
-import androidx.core.view.setPadding
-import app.tvplay.R
-import app.tvplay.config.TvPreferencesStore
 import app.tvplay.config.TvSettingsRepository
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
 import app.tvplay.engine.av.CarPlayPhysicalSizePreset
-import app.tvplay.engine.av.DisplayScaleMath
 import app.tvplay.engine.av.MediaAudioBuffer
 import app.tvplay.engine.av.UiDensityScale
 import app.tvplay.engine.network.WifiP2pChannels
@@ -37,10 +33,10 @@ import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
 
 enum class SettingsCategory(val title: String) {
-    CONNECTION("Connection"),
-    DISPLAY("Display & Video"),
-    AUDIO("Audio & Mic"),
-    ABOUT("System & Logs"),
+    CONNECTION("无线连接"),
+    DISPLAY("显示与画质"),
+    AUDIO("音频与麦克风"),
+    ABOUT("系统与诊断"),
 }
 
 typealias WorkbenchSettingsPane = WorkbenchSettingsTabs
@@ -91,13 +87,13 @@ class WorkbenchSettingsTabs(
             gravity = Gravity.CENTER_VERTICAL
         }
         val headerTitle = TextView(context).apply {
-            text = "TV Receiver Settings"
+            text = "TVPlay 接收端参数设置"
             setTextColor(palette.textPrimary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }
         val headerHint = TextView(context).apply {
-            text = "Use D-pad ▲▼◀▶ and OK to configure"
+            text = "使用遥控器方向键 ▲▼◀▶ 与确认键调节"
             setTextColor(palette.textSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             gravity = Gravity.END
@@ -208,32 +204,18 @@ class WorkbenchSettingsTabs(
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(4), dp(4), dp(16))
 
-        addView(sectionHeader("Connection Transport"))
-        addView(
-            cycleCard(
-                title = "CarPlay Transport Mode",
-                subtitle = "Choose Wireless (Bluetooth + Wi-Fi) or USB Cable connection",
-                options = listOf(true to "Wireless (Wi-Fi + Bluetooth)", false to "USB Cable"),
-                current = settings.connection.wirelessEnabled,
-            ) { enabled ->
-                settings.connection.wirelessEnabled = enabled
-                onSettingChanged?.invoke()
-                refresh()
-            },
-            cardLayoutParams(),
-        )
-
+        addView(sectionHeader("蓝牙配对与目标 iPhone"))
         val phoneAddress = settings.connection.pairedPhoneAddress
         val phoneSubtitle = if (phoneAddress != null) {
-            "Selected: ${settings.connection.pairedPhoneName} ($phoneAddress)"
+            "已指定：${settings.connection.pairedPhoneName} ($phoneAddress)"
         } else {
-            "No iPhone selected yet — pair in Android TV Bluetooth settings first"
+            "自动识别已配对的 iPhone（可点击手动指定）"
         }
         addView(
             actionCard(
-                title = "Paired iPhone",
+                title = "目标 iPhone 设备",
                 subtitle = phoneSubtitle,
-                buttonLabel = "Choose iPhone",
+                buttonLabel = "选择 iPhone",
                 onClick = { onChooseIphoneClicked?.invoke() },
             ),
             cardLayoutParams(),
@@ -241,26 +223,27 @@ class WorkbenchSettingsTabs(
 
         addView(
             actionCard(
-                title = "System Bluetooth Pairing",
-                subtitle = "Open Android TV Bluetooth settings to pair a new iPhone or remote",
-                buttonLabel = "Bluetooth Settings",
+                title = "电视系统蓝牙配对",
+                subtitle = "打开 Android TV 系统蓝牙设置，与新的 iPhone 或遥控器配对",
+                buttonLabel = "打开蓝牙设置",
                 onClick = { onPairBluetoothClicked?.invoke() },
             ),
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("Wireless Link Mode (TV Optimized)"))
+        addView(sectionHeader("无线传输通道（电视端专属优化）"))
         val wirelessModes = listOf(
-            TvWirelessMode.LAN_WIFI to "Home LAN / Shared Wi-Fi (Recommended for TV)",
-            TvWirelessMode.WIFI_DIRECT to "Wi-Fi Direct P2P Group",
+            TvWirelessMode.WIFI_DIRECT to "Wi-Fi Direct 5GHz 直连（推荐 · 免配置）",
+            TvWirelessMode.LAN_WIFI to "家庭局域网 Wi-Fi / 网线直连",
         )
         addView(
             cycleCard(
-                title = "Wireless Network Path",
-                subtitle = "Home LAN uses your existing router/Ethernet; Wi-Fi Direct creates a P2P link",
+                title = "无线网络传输方式",
+                subtitle = "Wi-Fi Direct 自动建立点对点连接；家庭局域网通过同一路由器或网线互联",
                 options = wirelessModes,
                 current = settings.connection.wirelessHotspotMode,
             ) { mode ->
+                settings.connection.wirelessEnabled = true
                 settings.connection.wirelessHotspotMode = mode
                 onSettingChanged?.invoke()
                 refresh()
@@ -272,10 +255,10 @@ class WorkbenchSettingsTabs(
             TvWirelessMode.LAN_WIFI -> {
                 addView(
                     textFieldCard(
-                        title = "Home Wi-Fi SSID (for iPhone handoff)",
-                        subtitle = "The Wi-Fi network your iPhone is connected to on the same LAN",
+                        title = "家庭路由器 Wi-Fi 名称 (SSID，可选)",
+                        subtitle = "留空将自动读取当前连接的 Wi-Fi 名称；若电视插网线可填写 iPhone 所连的 Wi-Fi 名",
                         initialValue = settings.connection.existingWifiSsid,
-                        hint = "Home Wi-Fi network name",
+                        hint = "自动识别当前路由器 Wi-Fi",
                         secret = false,
                     ) { value ->
                         settings.connection.existingWifiSsid = value.trim()
@@ -285,10 +268,10 @@ class WorkbenchSettingsTabs(
                 )
                 addView(
                     textFieldCard(
-                        title = "Home Wi-Fi Password (Optional)",
-                        subtitle = "Sent to iPhone during Bluetooth iAP2 wireless handoff",
+                        title = "家庭路由器 Wi-Fi 密码（可选）",
+                        subtitle = "若 iPhone 已连接至同一家庭 Wi-Fi，此处可直接留空",
                         initialValue = settings.connection.existingWifiPassphrase,
-                        hint = "Leave empty if iPhone already joined",
+                        hint = "iPhone 已连同路由时可留空",
                         secret = true,
                     ) { value ->
                         settings.connection.existingWifiPassphrase = value
@@ -298,10 +281,10 @@ class WorkbenchSettingsTabs(
                 )
                 addView(
                     textFieldCard(
-                        title = "Network Interface Override (Advanced)",
-                        subtitle = "Optional interface name (e.g. wlan0 or eth0). Leave blank for automatic.",
+                        title = "指定网卡接口名称（高级选项）",
+                        subtitle = "默认留空即可自动识别 wlan0 或 eth0 有线网卡",
                         initialValue = settings.connection.existingWifiInterface,
-                        hint = "Auto (wlan0 / eth0)",
+                        hint = "自动识别（wlan0 / eth0）",
                         secret = false,
                     ) { value ->
                         settings.connection.existingWifiInterface = value.trim()
@@ -317,16 +300,16 @@ class WorkbenchSettingsTabs(
                     WifiP2pChannels.channels
                 val channelOptions = selectableChannels.map { channel ->
                     channel to when (channel) {
-                        WifiP2pChannels.AUTO -> "Auto (5 GHz preferred)"
-                        WifiP2pChannels.AUTO_5_GHZ -> "Auto · 5 GHz only"
-                        WifiP2pChannels.AUTO_2_4_GHZ -> "Auto · 2.4 GHz only"
-                        else -> "Channel $channel (${WifiP2pChannels.frequencyMhz(channel)} MHz)"
+                        WifiP2pChannels.AUTO -> "自动优选（优先 5 GHz）"
+                        WifiP2pChannels.AUTO_5_GHZ -> "自动 · 仅限 5 GHz 频段"
+                        WifiP2pChannels.AUTO_2_4_GHZ -> "自动 · 仅限 2.4 GHz 频段"
+                        else -> "信道 $channel (${WifiP2pChannels.frequencyMhz(channel)} MHz)"
                     }
                 }
                 addView(
                     cycleCard(
-                        title = "Wi-Fi Direct Preferred Channel",
-                        subtitle = "Select a clean 5 GHz channel for low-latency CarPlay projection",
+                        title = "Wi-Fi Direct 首选无线信道",
+                        subtitle = "建议保持「自动优选」，或选择干扰较少的 5 GHz 高速信道",
                         options = channelOptions,
                         current = settings.connection.wifiP2pPreferredChannel,
                     ) { channel ->
@@ -338,11 +321,11 @@ class WorkbenchSettingsTabs(
             }
         }
 
-        addView(sectionHeader("Startup & Auto-Connect"))
+        addView(sectionHeader("开机自启与蓝牙自动唤醒"))
         addView(
             toggleCard(
-                title = "Auto-Start TVPlay on Boot",
-                subtitle = "Launch TVPlay automatically when Android TV powers on",
+                title = "电视开机时自动启动 TVPlay",
+                subtitle = "Android TV 开机完成后自动拉起 TVPlay 服务",
                 checked = settings.connection.autoConnectOnBoot,
             ) { enabled ->
                 settings.connection.autoConnectOnBoot = enabled
@@ -352,8 +335,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Auto-Connect When iPhone Bluetooth Connects",
-                subtitle = "Wake CarPlay session automatically when your paired iPhone links over Bluetooth",
+                title = "iPhone 蓝牙连上时自动进入投屏",
+                subtitle = "检测到已配对的 iPhone 蓝牙连接时自动开启 CarPlay 投屏舞台",
                 checked = settings.connection.connectOnPhoneBluetooth,
             ) { enabled ->
                 settings.connection.connectOnPhoneBluetooth = enabled
@@ -367,11 +350,11 @@ class WorkbenchSettingsTabs(
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(4), dp(4), dp(16))
 
-        addView(sectionHeader("Video Decoder & Rendering"))
+        addView(sectionHeader("视频硬件解码与渲染"))
         addView(
             toggleCard(
-                title = "HEVC (H.265) Video Stream",
-                subtitle = "Higher visual sharpness at lower bitrate on 4K Android TV hardware decoders",
+                title = "HEVC (H.265) 高清视频编码",
+                subtitle = "在 4K 电视硬件解码器上提供更高清晰度与更低无线码率开销",
                 checked = settings.display.hevcEnabled,
             ) { enabled ->
                 settings.display.hevcEnabled = enabled
@@ -381,8 +364,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Allow Software HEVC Decoder",
-                subtitle = "Fallback to CPU decoder if hardware HEVC decoder is unavailable",
+                title = "允许软件解码 HEVC（兼容备用）",
+                subtitle = "当电视芯片无硬件 HEVC 解码器时允许回退至 CPU 解码",
                 checked = settings.display.hevcSoftwareDecoderEnabled,
             ) { enabled ->
                 settings.display.hevcSoftwareDecoderEnabled = enabled
@@ -392,12 +375,12 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "Video Surface Mode",
-                subtitle = "Auto selects hardware SurfaceView unless picture color filter requires TextureView",
+                title = "视频渲染视图类型",
+                subtitle = "SurfaceView 延迟最低；TextureView 支持实时色彩与对比度滤镜调节",
                 options = listOf(
-                    VideoSurfaceType.AUTO to "Auto (Recommended)",
-                    VideoSurfaceType.SURFACE_VIEW to "SurfaceView (Lowest Latency)",
-                    VideoSurfaceType.TEXTURE_VIEW to "TextureView (Color Filter Support)",
+                    VideoSurfaceType.AUTO to "自动选择（推荐）",
+                    VideoSurfaceType.SURFACE_VIEW to "SurfaceView（最低延迟直通）",
+                    VideoSurfaceType.TEXTURE_VIEW to "TextureView（支持画面色彩调节）",
                 ),
                 current = settings.display.videoSurfaceType,
             ) { mode ->
@@ -408,8 +391,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Smooth Frame Pacing",
-                subtitle = "Adds a 1-frame jitter buffer for smoother motion on 60 Hz TV panels",
+                title = "平滑帧率同步（防抖缓冲）",
+                subtitle = "增加 1 帧平滑队列，提升 60Hz 电视大屏的动画顺滑度",
                 checked = settings.display.smoothVideoPlayback,
             ) { enabled ->
                 settings.display.smoothVideoPlayback = enabled
@@ -419,8 +402,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "60 FPS Projection",
-                subtitle = "Request 60 fps CarPlay stream (disable for 30 fps on older TV sticks)",
+                title = "60 FPS 高帧率投屏",
+                subtitle = "向 iPhone 请求 60 帧/秒流畅画面（关闭则为 30 FPS）",
                 checked = settings.display.frameRate60Enabled,
             ) { enabled ->
                 settings.display.frameRate60Enabled = enabled
@@ -429,11 +412,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("TV Canvas & Layout Scaling"))
+        addView(sectionHeader("电视画布分辨率与图标布局缩放"))
         addView(
             cycleCard(
-                title = "Resolution Scale",
-                subtitle = "Adjust CarPlay render canvas resolution relative to your TV screen",
+                title = "渲染画布分辨率缩放",
+                subtitle = "调整 CarPlay 相对于电视物理屏幕的渲染分辨率比例",
                 options = listOf(75, 85, 100, 115, 130).map { it to "$it%" },
                 current = settings.display.displayScalePercent,
             ) { percent ->
@@ -444,8 +427,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "UI Icon & Text Density",
-                subtitle = "Scale CarPlay sidebar, icons, and labels for 10-foot viewing distance",
+                title = "界面图标与字体密度 (DPI)",
+                subtitle = "针对客厅 3 米观看距离放大或缩小 CarPlay 侧边栏与图标",
                 options = UiDensityScale.presets.map { it to "$it%" },
                 current = settings.display.uiDensityPercent,
             ) { percent ->
@@ -456,13 +439,13 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "CarPlay Screen Layout Preset",
-                subtitle = "Emulate physical screen dimensions to control CarPlay widget & split-screen layout",
+                title = "CarPlay 屏幕物理尺寸预设",
+                subtitle = "模拟不同物理尺寸以控制 CarPlay 分屏卡片与小组件布局",
                 options = CarPlayPhysicalSizePreset.entries.map { preset ->
                     preset to when (preset) {
-                        CarPlayPhysicalSizePreset.LARGE -> "Large Controls (${preset.widthMillimeters} mm)"
-                        CarPlayPhysicalSizePreset.MEDIUM -> "Balanced 10-Foot TV Default (${preset.widthMillimeters} mm)"
-                        CarPlayPhysicalSizePreset.SMALL -> "Compact / Widescreen Dashboard (${preset.widthMillimeters} mm)"
+                        CarPlayPhysicalSizePreset.LARGE -> "大图标紧凑布局 (${preset.widthMillimeters} mm)"
+                        CarPlayPhysicalSizePreset.MEDIUM -> "客厅电视标准分屏 (${preset.widthMillimeters} mm)"
+                        CarPlayPhysicalSizePreset.SMALL -> "宽屏多列仪表盘 (${preset.widthMillimeters} mm)"
                     }
                 },
                 current = settings.display.physicalSizePreset,
@@ -473,11 +456,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("TV Overscan / Safe Area"))
+        addView(sectionHeader("电视过扫描与安全边距"))
         addView(
             toggleCard(
-                title = "Disable TV Safe-Area Insets",
-                subtitle = "Use 100% edge-to-edge HDMI pixels without safe-area margin",
+                title = "禁用电视安全边距（100% 满屏像素）",
+                subtitle = "使用 HDMI 点对点满屏输出，不预留四周安全内边距",
                 checked = settings.display.mainDisplayDisableSafeArea,
             ) { disabled ->
                 settings.display.mainDisplayDisableSafeArea = disabled
@@ -487,8 +470,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Draw CarPlay Wallpaper Outside Safe Area",
-                subtitle = "Allow CarPlay background artwork to extend into overscan margins",
+                title = "允许壁纸延伸至安全区外",
+                subtitle = "保留控件安全边距的同时，让 CarPlay 背景壁纸铺满整块屏幕",
                 checked = settings.display.safeAreaDrawOutside,
             ) { drawOutside ->
                 settings.display.safeAreaDrawOutside = drawOutside
@@ -497,15 +480,15 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("Appearance & Diagnostics"))
+        addView(sectionHeader("深浅色外观与实时帧率显示"))
         addView(
             cycleCard(
-                title = "CarPlay Appearance (Day / Night)",
-                subtitle = "Control whether CarPlay maps and UI use Dark or Light mode",
+                title = "CarPlay 日间 / 夜间外观",
+                subtitle = "控制 CarPlay 地图与界面采用深色或浅色主题",
                 options = listOf(
-                    CarPlayNightMode.NIGHT to "Always Dark (TV Default)",
-                    CarPlayNightMode.SYSTEM to "Follow System / Time",
-                    CarPlayNightMode.DAY to "Always Light",
+                    CarPlayNightMode.NIGHT to "始终深色（电视端推荐）",
+                    CarPlayNightMode.SYSTEM to "跟随系统时间",
+                    CarPlayNightMode.DAY to "始终浅色",
                 ),
                 current = settings.display.carPlayNightMode,
             ) { mode ->
@@ -516,12 +499,12 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "TVPlay Workbench Theme",
-                subtitle = "Appearance of the TVPlay setup workbench and dialogs",
+                title = "TVPlay 工作台界面主题",
+                subtitle = "设置主界面与弹窗的配色风格",
                 options = listOf(
-                    AppAppearance.DARK to "Dark Slate (Recommended)",
-                    AppAppearance.AUTO to "Follow Android TV",
-                    AppAppearance.LIGHT to "Light",
+                    AppAppearance.DARK to "深邃暗色（推荐）",
+                    AppAppearance.AUTO to "跟随 Android TV 系统",
+                    AppAppearance.LIGHT to "明亮浅色",
                 ),
                 current = settings.display.appAppearance,
             ) { mode ->
@@ -532,13 +515,13 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "Waiting Screen Background",
-                subtitle = "Backdrop color while waiting for iPhone projection",
+                title = "等待连接画面背景色",
+                subtitle = "等待 iPhone 投屏期间的全屏背景配色",
                 options = listOf(
-                    WaitingScreenColorPreset.DARK to "Theme Default (Dark Slate)",
-                    WaitingScreenColorPreset.OLED_BLACK to "Pure OLED Black",
-                    WaitingScreenColorPreset.MIDNIGHT_BLUE to "Midnight Blue",
-                    WaitingScreenColorPreset.LIGHT to "Light Slate",
+                    WaitingScreenColorPreset.DARK to "深灰石板（默认）",
+                    WaitingScreenColorPreset.OLED_BLACK to "OLED 纯黑（防烧屏）",
+                    WaitingScreenColorPreset.MIDNIGHT_BLUE to "午夜深蓝",
+                    WaitingScreenColorPreset.LIGHT to "柔和浅灰",
                 ),
                 current = settings.display.waitingScreenColorPreset,
             ) { preset ->
@@ -549,8 +532,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "On-Screen FPS Counter",
-                subtitle = "Display real-time decoded frames per second in the top-right corner",
+                title = "右上角实时帧率浮窗 (FPS HUD)",
+                subtitle = "投屏时在画面右上角实时显示解码帧率与耗时",
                 checked = settings.display.fpsCounterEnabled,
             ) { enabled ->
                 settings.display.fpsCounterEnabled = enabled
@@ -564,18 +547,18 @@ class WorkbenchSettingsTabs(
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(4), dp(4), dp(16))
 
-        addView(sectionHeader("TV Audio Output & Buffering"))
+        addView(sectionHeader("电视音频输出与缓冲"))
         val bufferOptions = MediaAudioBuffer.presets.map { ms ->
             ms to if (ms == MediaAudioBuffer.DEFAULT_MILLIS) {
-                "$ms ms (Default)"
+                "$ms 毫秒（默认）"
             } else {
-                "$ms ms"
+                "$ms 毫秒"
             }
         }
         addView(
             cycleCard(
-                title = "Media Audio Buffer Size",
-                subtitle = "Increase if wireless music stutters on congested Wi-Fi; decrease for tighter latency",
+                title = "无线音乐音频缓冲大小",
+                subtitle = "若无线信号拥挤导致音乐断续可适当调大；追求更低延迟可调小",
                 options = bufferOptions,
                 current = settings.audio.mediaBufferMillis,
             ) { ms ->
@@ -586,8 +569,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Manage Android Audio Focus",
-                subtitle = "Request system audio focus when CarPlay plays music, Siri, or navigation prompts",
+                title = "自动管理 Android 音频焦点",
+                subtitle = "CarPlay 播放音乐、Siri 或导航播报时自动向电视系统申请音频焦点",
                 checked = settings.audio.audioFocusEnabled,
             ) { enabled ->
                 settings.audio.audioFocusEnabled = enabled
@@ -597,8 +580,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Auto-Yield Audio Focus When Idle",
-                subtitle = "Release audio focus after CarPlay audio stops so background TV apps can resume",
+                title = "静音空闲时自动释放音频焦点",
+                subtitle = "CarPlay 暂停播放后释放音频焦点，方便电视后台其他应用恢复发声",
                 checked = settings.audio.audioFocusAutoYield,
             ) { enabled ->
                 settings.audio.audioFocusAutoYield = enabled
@@ -608,8 +591,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Keep Media Keys Without Taking Audio Focus",
-                subtitle = "Useful when mixing CarPlay navigation with another Android TV music app",
+                title = "转发遥控器媒体键时不抢占焦点",
+                subtitle = "适合一边看 CarPlay 画面、一边用电视本地应用听歌的场景",
                 checked = settings.audio.disableMediaKeyAudioFocus,
             ) { enabled ->
                 settings.audio.disableMediaKeyAudioFocus = enabled
@@ -618,11 +601,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("Voice Assistant & Microphone"))
+        addView(sectionHeader("Siri 语音助手与麦克风输入"))
         addView(
             toggleCard(
-                title = "Enable Voice / Siri Microphone",
-                subtitle = "Route Android TV / USB / Bluetooth remote microphone to CarPlay Siri & calls",
+                title = "启用电视 / 遥控器语音麦克风",
+                subtitle = "将蓝牙语音遥控器或 USB 麦克风音频路由至 CarPlay Siri 与通话",
                 checked = settings.audio.microphoneEnabled,
             ) { enabled ->
                 settings.audio.microphoneEnabled = enabled
@@ -632,8 +615,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Buffered Main Audio Stream",
-                subtitle = "Enable AirPlay buffered main audio stream support",
+                title = "启用高容量主音频缓冲通道",
+                subtitle = "开启 AirPlay 主媒体流缓冲模式以提升抗抖动能力",
                 checked = settings.audio.mainBufferedAudio,
             ) { enabled ->
                 settings.audio.mainBufferedAudio = enabled
@@ -643,8 +626,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "Keep Audio on iPhone / External Bluetooth Speaker",
-                subtitle = "Disable TV audio output so sound stays on iPhone or Bluetooth soundbar",
+                title = "保持声音在 iPhone / 外部蓝牙音箱播放",
+                subtitle = "禁用电视端音频解码输出，让声音直接从 iPhone 或独立蓝牙音响发出",
                 checked = settings.audio.disableAudioOutput,
             ) { disabled ->
                 settings.audio.disableAudioOutput = disabled
@@ -658,39 +641,39 @@ class WorkbenchSettingsTabs(
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(4), dp(4), dp(16))
 
-        addView(sectionHeader("Accessory Identity"))
+        addView(sectionHeader("接收端设备标识与离线 MFi"))
         addView(
             textFieldCard(
-                title = "Reported Manufacturer",
-                subtitle = "Accessory manufacturer name presented during iAP2 identification",
+                title = "广播厂商名称 (Manufacturer)",
+                subtitle = "iAP2 握手时向 iPhone 展示的接收端厂商标识",
                 initialValue = settings.identity.manufacturer,
-                hint = "Apple",
+                hint = "TVPlay",
                 secret = false,
             ) { value ->
-                settings.identity.manufacturer = value.ifBlank { "Apple" }
+                settings.identity.manufacturer = value.ifBlank { "TVPlay" }
                 onSettingChanged?.invoke()
             },
             cardLayoutParams(),
         )
         addView(
             textFieldCard(
-                title = "Reported Model",
-                subtitle = "Accessory model identifier presented during iAP2 identification",
+                title = "广播设备型号 (Model)",
+                subtitle = "iAP2 握手时向 iPhone 展示的接收端型号标识",
                 initialValue = settings.identity.model,
-                hint = "AppleTV",
+                hint = "TVPlay",
                 secret = false,
             ) { value ->
-                settings.identity.model = value.ifBlank { "AppleTV" }
+                settings.identity.model = value.ifBlank { "TVPlay" }
                 onSettingChanged?.invoke()
             },
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("Diagnostics & Troubleshooting"))
+        addView(sectionHeader("连接诊断与日志导出"))
         addView(
             toggleCard(
-                title = "Capture Verbose Session Diagnostics",
-                subtitle = "Record redacted RTSP/iAP2/decoder diagnostic events for troubleshooting",
+                title = "记录详细会话诊断日志",
+                subtitle = "记录脱敏后的 RTSP / iAP2 / 解码器状态事件以便排查连接问题",
                 checked = settings.identity.debugLogsEnabled,
             ) { enabled ->
                 settings.identity.debugLogsEnabled = enabled
@@ -700,9 +683,9 @@ class WorkbenchSettingsTabs(
         )
         addView(
             actionCard(
-                title = "Export Diagnostic Report",
-                subtitle = "Save a redacted diagnostic log bundle to storage or share it",
-                buttonLabel = "Export Log",
+                title = "导出诊断日志报告",
+                subtitle = "将脱敏后的连接诊断日志保存至电视存储空间",
+                buttonLabel = "导出日志",
                 onClick = { onSaveDiagnosticLogClicked?.invoke() },
             ),
             cardLayoutParams(),
@@ -711,11 +694,11 @@ class WorkbenchSettingsTabs(
 
     private fun sectionHeader(title: String): TextView =
         TextView(context).apply {
-            text = title.uppercase()
+            text = title
             setTextColor(palette.accent)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            letterSpacing = 0.08f
+            letterSpacing = 0.04f
             setPadding(dp(4), dp(12), dp(4), dp(6))
         }
 

@@ -2,10 +2,6 @@ package app.tvplay.engine.network
 
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
-import android.os.Binder
-import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import app.tvplay.engine.auth.AccessoryIdentity
 import app.tvplay.engine.auth.MfiAuthProvider
@@ -20,25 +16,18 @@ import app.tvplay.engine.session.TvStreamServerConfig
 import java.io.IOException
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
 typealias CarPlayVpnService = UsbTunnelVpnService
 
 /**
- * Hosts the AirPlay TCP listener for both NCM/VPN and local-only Wi-Fi transports.
+ * In-process AirPlay TCP listener for wireless CarPlay (Wi-Fi Direct & Home LAN).
  *
- * The wired path also owns the Android VPN tunnel and NCM IPv6 bridge. VPN consent is requested
- * with [prepare] before binding.
+ * Does not use Android `VpnService` or require `BIND_VPN_SERVICE`.
  */
-class UsbTunnelVpnService : VpnService() {
-    inner class LocalBinder : Binder() {
-        val service: UsbTunnelVpnService get() = this@UsbTunnelVpnService
-    }
-
+class UsbTunnelVpnService {
     sealed class AttachResult {
         data object Started : AttachResult()
         data object AlreadyStarted : AttachResult()
@@ -57,82 +46,32 @@ class UsbTunnelVpnService : VpnService() {
         val listenerIdentity: AirPlayListenerIdentity? = null,
     )
 
-    private val binder = LocalBinder()
     private val active = AtomicBoolean(false)
     private val sessionsLock = Any()
     private val sessions = mutableSetOf<AirPlaySession>()
     @Volatile private var attachment: AirPlayAttachment? = null
     private var serverSocket: ServerSocket? = null
     private var additionalServers: List<ServerSocket> = emptyList()
-    private var bridge: Ipv6NcmBridge? = null
-    private var tun: ParcelFileDescriptor? = null
     private var attachGeneration = 0
 
-    /** The exception chain behind the latest [AttachResult.Failed], for the diagnostic log. */
     @Volatile var lastAttachFailure: String? = null
         private set
 
-    override fun onBind(intent: Intent?): IBinder = binder
-
     @Synchronized
     fun attach(
-        ncm: NcmUsbBridge,
-        linkLocal: String,
-        hostMac: ByteArray,
-        config: TvStreamServerConfig,
-        identity: AccessoryIdentity,
-        pairings: PairingRegistry,
-        mfi: MfiAuthProvider?,
-        listener: AirPlaySessionListener,
-        media: AirPlayMediaHandler,
-    ): AttachResult {
-        if (active.get()) {
-            Log.i(TAG, "replacing stale NCM/VPN attachment")
-            releaseLocked()
-        }
-        active.set(true)
-        val generation = ++attachGeneration
-        return try {
-            val address = InetAddress.getByName(linkLocal)
-            if (address !is Inet6Address || !address.isLinkLocalAddress) {
-                throw IllegalArgumentException("linkLocal must be a link-local IPv6 literal")
-            }
-            require(hostMac.size == 6) { "hostMac must be 6 bytes" }
-
-            val tunFd = Builder()
-                .addAddress(linkLocal, LINK_PREFIX)
-                .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
-                .setSession(SESSION_NAME)
-                .setMtu(TUN_MTU)
-                .setBlocking(true)
-                // An empty app list routes every UID through this VPN. Scope it before establish;
-                // rejection must reach the existing attachment cleanup, never an unscoped retry.
-                .addAllowedApplication(packageName)
-                .establish()
-                ?: throw IOException("VpnService.establish returned null")
-            tun = tunFd
-
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
-                onTransportError(generation, listener, error)
-            }
-            ipv6Bridge.start()
-            bridge = ipv6Bridge
-
-            startAirPlayServer(
-                generation,
-                AirPlayAttachment(scopedToTunnel(address, listener), config, identity, pairings, mfi, listener, media),
-            )
-            AttachResult.Started
-        } catch (error: Exception) {
-            releaseLocked()
-            lastAttachFailure = attachFailure(error)
-            AttachResult.Failed(error.message ?: error.javaClass.simpleName)
-        }
-    }
+        @Suppress("UNUSED_PARAMETER") ncm: NcmUsbBridge,
+        @Suppress("UNUSED_PARAMETER") linkLocal: String,
+        @Suppress("UNUSED_PARAMETER") hostMac: ByteArray,
+        @Suppress("UNUSED_PARAMETER") config: TvStreamServerConfig,
+        @Suppress("UNUSED_PARAMETER") identity: AccessoryIdentity,
+        @Suppress("UNUSED_PARAMETER") pairings: PairingRegistry,
+        @Suppress("UNUSED_PARAMETER") mfi: MfiAuthProvider?,
+        @Suppress("UNUSED_PARAMETER") listener: AirPlaySessionListener,
+        @Suppress("UNUSED_PARAMETER") media: AirPlayMediaHandler,
+    ): AttachResult = AttachResult.Failed("TVPlay 仅支持无线 CarPlay 投屏")
 
     /**
-     * Starts the AirPlay listener on the wireless AP / station address without establishing a VPN or
-     * NCM bridge.
+     * Starts the AirPlay TCP listener on the wireless Wi-Fi Direct / LAN address in-process.
      */
     @Synchronized
     fun attachWireless(
@@ -147,7 +86,7 @@ class UsbTunnelVpnService : VpnService() {
         listenerIdentity: AirPlayListenerIdentity? = null,
     ): AttachResult {
         if (active.get()) {
-            Log.i(TAG, "replacing stale local-only Wi-Fi attachment")
+            Log.i(TAG, "replacing stale wireless AirPlay listener attachment")
             releaseLocked()
         }
         active.set(true)
@@ -175,7 +114,6 @@ class UsbTunnelVpnService : VpnService() {
         }
     }
 
-    /** Releases the active AirPlay listener and whichever VPN/NCM transport resources are active. */
     @Synchronized
     fun detach() {
         releaseLocked()
@@ -188,42 +126,7 @@ class UsbTunnelVpnService : VpnService() {
 
     fun isAttached(): Boolean = active.get() && attachment != null
 
-    /** Port the AirPlay listener actually bound, which may differ from the configured port. */
     fun boundPort(): Int? = attachment?.config?.port
-
-    override fun onDestroy() {
-        detach()
-        super.onDestroy()
-    }
-
-    /**
-     * Linux rejects bind() to a link-local IPv6 address without a scope id (EINVAL). Android 8+
-     * IoBridge.bind looks the scope up itself, but Android 7.x binds natively in
-     * PlainSocketImpl.socketBind and never derives one, so the unscoped wired listener failed with
-     * "Invalid argument". Scope it to the tunnel that owns the address on every version; when no
-     * interface owns it, keep the unscoped address and the platform's own behavior.
-     */
-    private fun scopedToTunnel(address: Inet6Address, listener: AirPlaySessionListener): InetAddress {
-        if (address.scopeId != 0) return address
-        var interfaces = emptyList<TunnelCandidate>()
-        repeat(TUN_LOOKUP_ATTEMPTS) { attempt ->
-            if (attempt > 0) Thread.sleep(TUN_LOOKUP_DELAY_MILLIS)
-            interfaces = tunnelCandidates()
-            selectTunnelInterface(address, interfaces)?.let { owner ->
-                runCatching { listener.onDebugLog("wired AirPlay listener scope iface=${owner.name} index=${owner.index}") }
-                return Inet6Address.getByAddress(null, address.address, owner.index)
-            }
-        }
-        val tunnels = interfaces.filter { it.name.startsWith("tun") }.joinToString(",") { it.name }.ifEmpty { "none" }
-        runCatching { listener.onDebugLog("wired AirPlay listener scope iface=not_found tun=$tunnels; binding unscoped") }
-        return address
-    }
-
-    private fun tunnelCandidates(): List<TunnelCandidate> = runCatching {
-        NetworkInterface.getNetworkInterfaces()?.let { Collections.list(it) }.orEmpty().map { networkInterface ->
-            TunnelCandidate(networkInterface.name, networkInterface.index, Collections.list(networkInterface.inetAddresses))
-        }
-    }.getOrDefault(emptyList())
 
     private fun startAirPlayServer(
         generation: Int,
@@ -358,15 +261,11 @@ class UsbTunnelVpnService : VpnService() {
         Log.e(TAG, "CarPlay transport stopped: $message", error)
         Thread(
             {
-                val releasedGeneration = synchronized(this) {
+                synchronized(this) {
                     if (generation != attachGeneration) return@Thread
                     releaseLocked()
-                    attachGeneration
                 }
                 listener.onTransportError(message)
-                synchronized(this) {
-                    if (attachGeneration == releasedGeneration && !active.get()) stopSelf()
-                }
             },
             "airplay-teardown",
         ).apply {
@@ -375,53 +274,22 @@ class UsbTunnelVpnService : VpnService() {
         }
     }
 
-    /** Caller must hold this service's monitor. Closes only resources active for this attachment. */
     private fun releaseLocked() {
         attachGeneration += 1
         active.set(false)
         attachment = null
-        serverSocket?.close()
+        runCatching { serverSocket?.close() }
         serverSocket = null
-        additionalServers.forEach { it.close() }
+        additionalServers.forEach { runCatching { it.close() } }
         additionalServers = emptyList()
         closeSessionsLocked()
-        bridge?.close()
-        bridge = null
-        tun?.close()
-        tun = null
     }
 
     companion object {
-        private const val TAG = "xcertplay-usb"
-        private const val LINK_PREFIX = 64
-        private const val LINK_LOCAL_ROUTE = "fe80::"
-        private const val SESSION_NAME = "xcertplay CarPlay"
-        private const val TUN_MTU = 1500
-        private const val TUN_LOOKUP_ATTEMPTS = 10
-        private const val TUN_LOOKUP_DELAY_MILLIS = 50L
+        private const val TAG = "tvplay-airplay"
 
-        internal data class TunnelCandidate(val name: String, val index: Int, val addresses: List<InetAddress>)
+        fun prepare(@Suppress("UNUSED_PARAMETER") context: Context): Intent? = null
 
-        /**
-         * Picks the interface that owns [address]. A tun interface wins when another interface
-         * happens to carry the same link-local address.
-         */
-        internal fun selectTunnelInterface(address: Inet6Address, interfaces: List<TunnelCandidate>): TunnelCandidate? {
-            val owners = interfaces.filter { candidate ->
-                candidate.index > 0 && candidate.addresses.any { owned ->
-                    owned is Inet6Address && owned.address.contentEquals(address.address)
-                }
-            }
-            return owners.firstOrNull { it.name.startsWith("tun") } ?: owners.firstOrNull()
-        }
-
-        /** Returns the VPN consent intent, or null when consent is already granted. */
-        fun prepare(context: Context): Intent? = VpnService.prepare(context)
-
-        /**
-         * Android 7.1 reported only "Invalid argument" when establish failed (#557); name the
-         * exception chain and the frame that threw, so the rejected VPN setting can be identified.
-         */
         internal fun attachFailure(error: Throwable): String {
             val chain = generateSequence(error) { it.cause }.take(4).joinToString(" <- ") { failure ->
                 "${failure.javaClass.simpleName}: ${failure.message ?: "no message"}"

@@ -8,11 +8,11 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.SurfaceTexture
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -361,12 +361,13 @@ class TvStageActivity : Activity() {
         waitingBindings = StageWaitingOverlay.build(
             context = this,
             waitingColors = waitingColors,
-            wirelessEnabled = wirelessEnabled,
+            wirelessEnabled = true,
             wirelessHotspotMode = wirelessMode,
             existingWifiSsid = lanSsid,
             onReconnectClicked = ::reconnectNow,
             onSettingsClicked = ::returnToWorkbench,
             onDisconnectClicked = ::disconnectAndExit,
+            onBluetoothSettingsClicked = ::openBluetoothSettings,
         )
         rootFrame.addView(
             waitingBindings.stageOverlay,
@@ -401,16 +402,8 @@ class TvStageActivity : Activity() {
     private fun startOrAttachSession() {
         PendingReconnect.clear()
         waitingBindings.reconnectBannerView.visibility = View.GONE
-        val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
+        val wirelessEnabled = true
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
-
-        if (!wirelessEnabled) {
-            val vpnIntent = runCatching { VpnService.prepare(this) }.getOrNull()
-            if (vpnIntent != null) {
-                startActivityForResult(vpnIntent, REQUEST_VPN_PERMISSION)
-                return
-            }
-        }
 
         runCatching { MfiAssetInstaller.ensure(this) }
             .onFailure { error ->
@@ -635,7 +628,7 @@ class TvStageActivity : Activity() {
                 waitingBindings.connectionHelpView.text = StageWaitingOverlay.helpMessage(
                     context = this,
                     failed = status,
-                    wirelessEnabled = wirelessEnabled,
+                    wirelessEnabled = true,
                     wirelessMode = wirelessMode,
                 )
                 waitingBindings.connectionHelpView.visibility = View.VISIBLE
@@ -644,12 +637,39 @@ class TvStageActivity : Activity() {
             }
 
             if (status is CarPlayStatus.WirelessActive || status is CarPlayStatus.WirelessActiveFallback) {
+                cancelScheduledReconnect()
                 streamingActive = true
             } else if (status is CarPlayStatus.ControlEnded || status is CarPlayStatus.Failed) {
                 streamingActive = false
                 firstFrameRendered = false
+                val retryAllowed = status !is CarPlayStatus.Failed ||
+                    status.startupFailure != WirelessStartupFailure.BLUETOOTH_UNUSABLE
+                if (retryAllowed) {
+                    scheduleAutoReconnect(3_500L)
+                }
             }
             refreshOverlayVisibility()
+        }
+    }
+
+    private fun scheduleAutoReconnect(delayMillis: Long) {
+        cancelScheduledReconnect()
+        val task = Runnable {
+            reconnectRunnable = null
+            if (!isFinishing && !isDestroyed && !streamingActive) {
+                sessionEngine?.reconnectIphone() ?: reconnectNow()
+            }
+        }
+        reconnectRunnable = task
+        mainHandler.postDelayed(task, delayMillis)
+    }
+
+    private fun openBluetoothSettings() {
+        val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { startActivity(intent) }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
         }
     }
 
@@ -866,23 +886,7 @@ class TvStageActivity : Activity() {
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_VPN_PERMISSION) {
-            if (resultCode == RESULT_OK) {
-                startOrAttachSession()
-            } else {
-                waitingBindings.stageStatusView.text = StageWaitingOverlay.friendlyStage(
-                    this,
-                    getString(app.tvplay.R.string.vpn_authorization_unavailable),
-                )
-            }
-        }
-    }
-
     companion object {
-        private const val REQUEST_VPN_PERMISSION = 1001
-
         fun connectionInstructions(
             context: Context,
             status: CarPlayStatus?,

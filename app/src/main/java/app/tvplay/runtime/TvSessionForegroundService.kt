@@ -29,18 +29,20 @@ class TvSessionForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val wireless = intent?.getBooleanExtra("wireless", true) ?: true
         val status = intent?.getStringExtra("status") ?: getString(R.string.waiting_for_iphone)
-        val type = if (wireless) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-        } else {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-        }
+        val notification = buildNotification(status)
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, buildNotification(status), type)
+            runCatching {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+            }.onFailure {
+                runCatching { startForeground(NOTIFICATION_ID, notification) }
+            }
         } else {
-            startForeground(NOTIFICATION_ID, buildNotification(status))
+            runCatching { startForeground(NOTIFICATION_ID, notification) }
         }
         return START_NOT_STICKY
     }

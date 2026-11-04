@@ -270,9 +270,9 @@ object TvPreferencesStore {
     fun loadWirelessMode(context: Context): TvWirelessMode {
         val stored = prefs(context).getString(KEY_WIRELESS_MODE, null)
         return when (stored) {
-            TvWirelessMode.WIFI_DIRECT.name, "WIFI_P2P" -> TvWirelessMode.WIFI_DIRECT
             TvWirelessMode.LAN_WIFI.name, "EXISTING_WIFI" -> TvWirelessMode.LAN_WIFI
-            else -> TvWirelessMode.LAN_WIFI
+            TvWirelessMode.WIFI_DIRECT.name, "WIFI_P2P" -> TvWirelessMode.WIFI_DIRECT
+            else -> TvWirelessMode.WIFI_DIRECT
         }
     }
 
@@ -350,11 +350,11 @@ object TvPreferencesStore {
     fun loadPairedPhoneName(context: Context): String =
         diplayPrefs(context).getString(KEY_PHONE_NAME, null)
             ?: prefs(context).getString(KEY_PHONE_NAME, null)
-            ?: "Your iPhone"
+            ?: "我的 iPhone"
 
     fun phoneName(context: Context): String = loadPairedPhoneName(context)
 
-    fun savePairedPhone(context: Context, address: String, name: String = "Your iPhone") {
+    fun savePairedPhone(context: Context, address: String, name: String = "我的 iPhone") {
         diplayPrefs(context).edit()
             .putString(KEY_PHONE_ADDRESS, address)
             .putString(KEY_PHONE_NAME, name)

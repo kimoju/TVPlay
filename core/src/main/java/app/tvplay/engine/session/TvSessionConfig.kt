@@ -130,7 +130,7 @@ class TvSessionConfig(
     val label: String = "TVPlay",
     val hostName: String = "TVPlay",
     val transport: TvTransportMode = TvTransportMode.WIRELESS,
-    val wirelessMode: TvWirelessMode = TvWirelessMode.LAN_WIFI,
+    val wirelessMode: TvWirelessMode = TvWirelessMode.WIFI_DIRECT,
     val wirelessBluetoothAddress: String? = null,
     val wifiDirectPreferredChannel: Int = 0,
     val lanWifiSsid: String = "",
@@ -156,11 +156,6 @@ class TvSessionConfig(
         }
         require(label.isNotBlank()) { "label must not be blank" }
         require(hostName.isNotBlank()) { "hostName must not be blank" }
-        if (transport == TvTransportMode.WIRELESS && wirelessMode == TvWirelessMode.LAN_WIFI) {
-            require(validateLanCredentials(lanWifiSsid, lanWifiPassphrase) == null) {
-                "Home LAN mode requires an SSID of at most 32 UTF-8 bytes and an empty or 8–63 character WPA2 passphrase"
-            }
-        }
     }
 
     companion object {

@@ -11,7 +11,6 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Looper
 import app.tvplay.engine.protocol.iap2.Iap2WirelessSecurity
-import app.tvplay.engine.session.TvSessionConfig
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -22,7 +21,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 typealias ExistingWifiManager = LanNetworkLink
 
-/** Attaches to an existing station network. Never creates an AP, joins Wi-Fi or changes routing. */
+/**
+ * Attaches to an existing home LAN (Wi-Fi or wired Ethernet) on Android TV.
+ * Never creates an AP, joins Wi-Fi, or changes system routing.
+ */
 class LanNetworkLink(
     context: Context,
     private val ssid: String,
@@ -34,7 +36,6 @@ class LanNetworkLink(
     private val connectivity = context.applicationContext.getSystemService(ConnectivityManager::class.java)
         ?: throw IllegalStateException("ConnectivityManager is unavailable")
     private val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
-        ?: throw IllegalStateException("WifiManager is unavailable")
     private val lock = Any()
     private val invalidated = AtomicBoolean()
     @Volatile private var closed = false
@@ -51,17 +52,9 @@ class LanNetworkLink(
         }
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-            // With an explicit interface the platform network may be discovered only after
-            // attaching, so track the interface name until a network is selected.
             val tracked = network == selected ||
                 (selected == null && properties.interfaceName == interfaceName)
             if (tracked && !sameLink(properties)) invalidate("interface or address changed")
-        }
-    }
-
-    init {
-        require(TvSessionConfig.validateLanCredentials(ssid, passphrase) == null) {
-            "Invalid existing Wi-Fi credentials"
         }
     }
 
@@ -72,33 +65,38 @@ class LanNetworkLink(
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
         check(selected == null) { "ExistingWifiManager has already started" }
         val started = System.nanoTime()
-        // An explicit interface covers units whose station LAN runs on an interface Android never
-        // reports as Wi-Fi, such as a USB NIC presenting itself as eth1 (#573 family). The SSID and
-        // security checks below read WifiInfo, which such an interface cannot provide.
         val configured = preferredInterface?.trim()?.takeIf { it.isNotEmpty() }
         while (!closed) {
-            // INTERNET/VALIDATED and the default route do not identify the CarPlay LAN.
             val network: Network? = if (configured != null) {
                 connectivity.allNetworks.firstOrNull {
                     connectivity.getLinkProperties(it)?.interfaceName == configured
                 }
             } else {
-                val networks = connectivity.allNetworks.filter { candidate ->
+                val wifiNetworks = connectivity.allNetworks.filter { candidate ->
                     connectivity.getNetworkCapabilities(candidate)?.let {
                         it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
                             !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     } == true
                 }
-                if (networks.size > 1) {
-                    throw IOException("Multiple Wi-Fi networks are active; keep one existing Wi-Fi connection")
+                val ethNetworks = connectivity.allNetworks.filter { candidate ->
+                    connectivity.getNetworkCapabilities(candidate)?.let {
+                        it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) &&
+                            !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    } == true
                 }
-                networks.singleOrNull()
+                wifiNetworks.firstOrNull() ?: ethNetworks.firstOrNull() ?: connectivity.activeNetwork
             }
-            val properties = network?.let(connectivity::getLinkProperties)
-            val name = properties?.interfaceName ?: configured
-            val iface = name?.let { runCatching { NetworkInterface.getByName(it) }.getOrNull() }
+            val properties = network?.let { runCatching { connectivity.getLinkProperties(it) }.getOrNull() }
+            val fallbackIface = if (properties?.interfaceName == null && configured == null) {
+                discoverFallbackLanInterface()
+            } else {
+                null
+            }
+            val name = properties?.interfaceName ?: configured ?: fallbackIface?.name
+            val iface = fallbackIface ?: name?.let { runCatching { NetworkInterface.getByName(it) }.getOrNull() }
             val linkAddresses: List<InetAddress> = when {
-                properties != null -> properties.linkAddresses.map { it.address }
+                properties != null && properties.linkAddresses.isNotEmpty() ->
+                    properties.linkAddresses.map { it.address }
                 iface != null -> Collections.list(iface.inetAddresses)
                 else -> emptyList()
             }
@@ -108,38 +106,22 @@ class LanNetworkLink(
                 var frequency: Int? = null
                 var channel = 0
                 var apBssid: ByteArray? = null
-                var networkNameReadable = false
-                if (configured == null) {
-                    val capabilities = connectivity.getNetworkCapabilities(network)
+                var liveSsid: String? = null
+                if (configured == null && wifi != null) {
+                    val capabilities = network?.let { runCatching { connectivity.getNetworkCapabilities(it) }.getOrNull() }
                     val networkInfo = if (Build.VERSION.SDK_INT >= 31) capabilities?.transportInfo as? WifiInfo else null
-                    // On-demand capabilities can redact SSID/BSSID even when the legacy station
-                    // snapshot can supply them. A non-null redacted object must not hide that input.
                     @Suppress("DEPRECATION")
                     val stationInfo = try { wifi.connectionInfo } catch (_: SecurityException) { null }
                     val info = listOfNotNull(networkInfo, stationInfo).firstOrNull { readableSsid(it) != null }
                         ?: networkInfo ?: stationInfo
-                    val liveSsid = readableSsid(info)
-                    networkNameReadable = liveSsid != null
-                    if (liveSsid != null && liveSsid != ssid) {
-                        throw IOException("Configured Wi-Fi does not match the connected network; check Wi-Fi settings and saved details")
-                    }
+                    liveSsid = readableSsid(info)
                     frequency = info?.frequency?.takeIf { it > 0 }
                     channel = frequency?.let(::wifiFrequencyMhzToChannel) ?: 0
                     apBssid = accessPointAddress(info?.bssid)
-                    val observedSecurity = if (Build.VERSION.SDK_INT >= 31 && info != null) info.currentSecurityType else -1
-                    if (Build.VERSION.SDK_INT >= 31) {
-                        when (observedSecurity) {
-                            WifiInfo.SECURITY_TYPE_OPEN -> if (passphrase.isNotEmpty()) {
-                                throw IOException("Connected Wi-Fi is open; clear the saved Wi-Fi password")
-                            }
-                            WifiInfo.SECURITY_TYPE_PSK, WifiInfo.SECURITY_TYPE_SAE -> if (passphrase.isEmpty()) {
-                                throw IOException("Connected Wi-Fi is secured; enter its WPA2 password")
-                            }
-                            WifiInfo.SECURITY_TYPE_UNKNOWN -> Unit
-                            else -> throw IOException("Existing Wi-Fi requires an open or WPA2-Personal network")
-                        }
-                    }
                 }
+                val configuredSsid = ssid.trim().takeUnless { it.isEmpty() || it.equals("TVPlay", ignoreCase = true) }
+                val effectiveSsid = configuredSsid ?: liveSsid ?: "TVPlay"
+
                 synchronized(lock) {
                     check(!closed) { "ExistingWifiManager is closed" }
                     selected = network
@@ -147,48 +129,72 @@ class LanNetworkLink(
                     hosts = addresses
                     interfaceIndex = iface.index
                     interfaceName = name
-                    // With an explicit interface the network may lack the Wi-Fi transport (or not be
-                    // visible at all), so the request drops the transport and matches by name.
                     val request = requestWithoutDefaultCapabilities()
-                    if (configured == null) request.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                    connectivity.registerNetworkCallback(
-                        request.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), callback)
-                    callbackRegistered = true
+                    if (configured == null) {
+                        request.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        request.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    }
+                    runCatching {
+                        connectivity.registerNetworkCallback(
+                            request.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),
+                            callback,
+                        )
+                        callbackRegistered = true
+                    }
                 }
-                // Close the gap between reading the link and registering the callback. With an
-                // explicit interface that the platform does not expose as a Network there is no
-                // LinkProperties to compare, so only the invalidation flag is checked.
-                val current = if (network == null) null else connectivity.getLinkProperties(network)
+                val current = if (network == null) null else runCatching { connectivity.getLinkProperties(network) }.getOrNull()
                 if ((current != null && !sameLink(current)) || invalidated.get()) {
-                    throw IOException("Existing Wi-Fi changed during startup; connect again")
+                    throw IOException("局域网网络在启动期间发生变化，正在重新连接")
                 }
-                onDiagnostic("Existing Wi-Fi attached iface=$name host=${address.hostAddress} " +
-                    "networkNameReadable=$networkNameReadable channel=$channel security=${security()} " +
-                    "receiverIdentity=saved" + if (configured != null) " configuredInterface=$configured" else "")
-                return WirelessHotspotInfo(ssid, passphrase, security(), channel, frequency,
-                    // The router's BSSID is not this receiver's AirPlay device identity.
-                    null, name, address, when {
-                        frequency == null -> "Auto"
+                onDiagnostic(
+                    "Existing LAN attached iface=$name host=${address.hostAddress} " +
+                        "networkNameReadable=${liveSsid != null} channel=$channel security=${security()} " +
+                        "receiverIdentity=saved" + if (configured != null) " configuredInterface=$configured" else "",
+                )
+                return WirelessHotspotInfo(
+                    ssid = effectiveSsid,
+                    passphrase = passphrase,
+                    security = security(),
+                    channel = channel,
+                    frequencyMHz = frequency,
+                    bssid = null,
+                    interfaceName = name,
+                    hostAddress = address,
+                    bandLabel = when {
+                        frequency == null -> "局域网"
                         frequency < 2500 -> "2.4 GHz"
                         frequency < 5955 -> "5 GHz"
                         else -> "6 GHz"
-                    }, WirelessHotspotBackend.EXISTING_WIFI, hostAddresses = addresses, accessPointBssid = apBssid)
+                    },
+                    backend = WirelessHotspotBackend.EXISTING_WIFI,
+                    hostAddresses = addresses,
+                    accessPointBssid = apBssid,
+                )
             }
             if ((System.nanoTime() - started) / 1_000_000 >= timeoutMillis) {
                 val interfaceMissing = configured != null &&
                     runCatching { NetworkInterface.getByName(configured) }.getOrNull() == null
                 throw IOException(
                     if (interfaceMissing) {
-                        "Existing Wi-Fi interface $configured was not found; check the interface setting"
+                        "未找到指定的网络接口 $configured，请检查网络接口设置"
                     } else {
-                        "Existing Wi-Fi is not connected or has no usable address. Connect both devices to the same Wi-Fi in system settings"
+                        "当前电视未连接局域网 Wi-Fi 或网线，请先将电视与 iPhone 连接至同一路由器"
                     },
                 )
             }
             Thread.sleep(200)
         }
-        throw IOException("Existing Wi-Fi attachment was cancelled")
+        throw IOException("局域网连接已取消")
     }
+
+    private fun discoverFallbackLanInterface(): NetworkInterface? = runCatching {
+        val all = Collections.list(NetworkInterface.getNetworkInterfaces())
+        all.firstOrNull { iface ->
+            iface.isUp && !iface.isLoopback && !iface.isVirtual &&
+                (iface.name.startsWith("wlan") || iface.name.startsWith("eth")) &&
+                wirelessHostAddress(Collections.list(iface.inetAddresses), iface.index) != null
+        }
+    }.getOrNull()
 
     private fun sameLink(properties: LinkProperties): Boolean =
         properties.interfaceName == interfaceName && properties.linkAddresses.any { it.address == host } &&
@@ -222,13 +228,12 @@ class LanNetworkLink(
         synchronized(lock) {
             closed = true
             if (callbackRegistered) {
-                connectivity.unregisterNetworkCallback(callback)
+                runCatching { connectivity.unregisterNetworkCallback(callback) }
                 callbackRegistered = false
             }
         }
     }
 
-    // NetworkRequest.Builder.clearCapabilities needs API 30; before that, drop the defaults one by one.
     private fun requestWithoutDefaultCapabilities(): NetworkRequest.Builder =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             NetworkRequest.Builder().clearCapabilities()

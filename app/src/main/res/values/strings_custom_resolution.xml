@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="resolution_canvas_unsupported" formatted="false">This head unit cannot decode the enlarged resolution. Using 100%.</string>
+    <string name="resolution_canvas_unsupported" formatted="false">当前电视硬件解码器不支持超采样放大分辨率，已自动使用 100% 原生画布。</string>
 </resources>

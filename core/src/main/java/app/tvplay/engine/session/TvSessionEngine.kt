@@ -745,20 +745,7 @@ class TvSessionEngine(
     private var attachCloseable: Closeable? = null
     private var lastIphoneListing: String? = null
     private var iphoneWaitStartedAt: Long? = null
-    private var vpnLatch = CountDownLatch(1)
     private val teardownComplete = CountDownLatch(1)
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            vpnService = (binder as UsbTunnelVpnService.LocalBinder).service
-            vpnLatch.countDown()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName) {
-            vpnService = null
-            fail(IphoneUsbException.DeviceUnavailable("CarPlay VPN service disconnected"))
-        }
-    }
 
     /** The live AirPlay session, for a new host that adopts the running stream without a session-active callback. */
     fun activeAirPlaySession(): AirPlaySession? = activeSession?.takeIf { !closed && !it.isClosed }
@@ -1451,7 +1438,8 @@ class TvSessionEngine(
                 "wireless RFCOMM connecting address=${device.address} " +
                     "uuid=$IAP2_IPHONE_UUID",
             )
-            val socket = synchronized(wirelessResourceLock) {
+            runCatching { adapter.cancelDiscovery() }
+            var socket = synchronized(wirelessResourceLock) {
                 if (isStaleWirelessRun(generation)) return
                 device.createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
@@ -1460,7 +1448,21 @@ class TvSessionEngine(
             val bluetoothStarted = System.nanoTime()
             val bluetoothConnectMillis: Long
             try {
-                connectBluetoothSocket(socket, device.address)
+                try {
+                    connectBluetoothSocket(socket, device.address)
+                } catch (firstError: IOException) {
+                    if (isStaleWirelessRun(generation) || BluetoothLinkCheck.socketServiceMissing(firstError)) {
+                        throw firstError
+                    }
+                    debugLog("wireless secure RFCOMM connect failed (${firstError.message}); trying insecure RFCOMM fallback")
+                    val fallbackSocket = synchronized(wirelessResourceLock) {
+                        if (isStaleWirelessRun(generation)) throw firstError
+                        device.createInsecureRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                            .also { bluetoothSocket = it }
+                    }
+                    socket = fallbackSocket
+                    connectBluetoothSocket(fallbackSocket, device.address)
+                }
                 bluetoothConnectMillis = elapsedMillis(bluetoothStarted)
                 connectionDiagnostic(
                     "Bluetooth connect completed elapsedMs=$bluetoothConnectMillis " +
@@ -2337,9 +2339,8 @@ class TvSessionEngine(
         type.equals("disableBluetooth", ignoreCase = true) ||
             type.equals("disable-bluetooth", ignoreCase = true)
 
-    private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
-        val hotspotMode = config.wirelessMode
-        val manager: WirelessHotspotManager = when (hotspotMode) {
+    private fun createHotspotManager(mode: TvWirelessMode, generation: Int): WirelessHotspotManager =
+        when (mode) {
             TvWirelessMode.WIFI_DIRECT -> WifiDirectGroupLink(
                 appContext,
                 ::debugLog,
@@ -2354,6 +2355,35 @@ class TvSessionEngine(
                 preferredInterface = config.lanNetworkInterface,
             )
         }
+
+    private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
+        val primaryMode = config.wirelessMode
+        val fallbackMode = if (primaryMode == TvWirelessMode.WIFI_DIRECT) {
+            TvWirelessMode.LAN_WIFI
+        } else {
+            TvWirelessMode.WIFI_DIRECT
+        }
+        return try {
+            startWirelessHotspotWithMode(primaryMode, generation)
+        } catch (primaryFailure: Exception) {
+            if (isStaleWirelessRun(generation)) throw primaryFailure
+            debugLog(
+                "wireless primary mode ${primaryMode.name} failed (${primaryFailure.message}); " +
+                    "automatically trying fallback mode ${fallbackMode.name}",
+            )
+            try {
+                startWirelessHotspotWithMode(fallbackMode, generation)
+            } catch (_: Exception) {
+                throw primaryFailure
+            }
+        }
+    }
+
+    private fun startWirelessHotspotWithMode(
+        hotspotMode: TvWirelessMode,
+        generation: Int,
+    ): WirelessHotspotInfo {
+        val manager = createHotspotManager(hotspotMode, generation)
         synchronized(wirelessResourceLock) {
             if (isStaleWirelessRun(generation)) {
                 manager.close()
@@ -2364,7 +2394,7 @@ class TvSessionEngine(
         val timeoutMillis = if (hotspotMode == TvWirelessMode.WIFI_DIRECT) {
             WIFI_P2P_START_TIMEOUT_MILLIS
         } else {
-            HOTSPOT_START_TIMEOUT_MILLIS
+            10_000L
         }
         return try {
             manager.start(timeoutMillis)
@@ -2386,14 +2416,18 @@ class TvSessionEngine(
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
         val bonded = adapter.bondedDevices.orEmpty()
         config.wirelessBluetoothDeviceAddress?.let { selected ->
-            return bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }
-                ?: throw ConnectionFailureException(
-                    ConnectionFailureCause.CHOSEN_IPHONE_NOT_PAIRED,
-                    "The selected iPhone is no longer paired. Choose it again in TVPlay.",
-                )
+            bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }?.let { return it }
         }
+        val iap2Uuid = UUID.fromString(IAP2_IPHONE_UUID)
         val iPhones = bonded.filter { device ->
-            device.name?.contains("iPhone", ignoreCase = true) == true
+            val nameMatches = device.name?.contains("iPhone", ignoreCase = true) == true
+            val classMatches = runCatching {
+                device.bluetoothClass?.majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
+            }.getOrDefault(false)
+            val uuidMatches = runCatching {
+                device.uuids?.any { it.uuid == iap2Uuid } == true
+            }.getOrDefault(false)
+            nameMatches || classMatches || uuidMatches
         }
         val directlyConnectedIPhones = iPhones.filter(::isBluetoothDeviceConnected)
         Log.i(
@@ -2411,24 +2445,24 @@ class TvSessionEngine(
         }
         if (connectedIPhones.size == 1) return connectedIPhones.single()
         if (connectedIPhones.size > 1) {
-            throw ConnectionFailureException(
-                ConnectionFailureCause.IPHONE_NOT_CHOSEN,
-                "Multiple connected iPhones found: " +
-                    connectedIPhones.joinToString { "${it.name ?: "iPhone"} (${it.address})" },
-            )
+            return connectedIPhones.first()
         }
         if (iPhones.size == 1) return iPhones.single()
         if (iPhones.size > 1) {
-            throw ConnectionFailureException(
-                ConnectionFailureCause.IPHONE_NOT_CHOSEN,
-                "Multiple bonded iPhones found and none is currently connected; " +
-                    "connect one iPhone and retry",
-            )
+            return iPhones.first()
         }
+        val nonPeripheral = bonded.filter { device ->
+            runCatching {
+                val major = device.bluetoothClass?.majorDeviceClass
+                major != android.bluetooth.BluetoothClass.Device.Major.PERIPHERAL &&
+                    major != android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO
+            }.getOrDefault(true)
+        }
+        if (nonPeripheral.size == 1) return nonPeripheral.single()
         if (bonded.size == 1) return bonded.single()
         throw ConnectionFailureException(
             if (bonded.isEmpty()) ConnectionFailureCause.NO_PAIRED_IPHONE else ConnectionFailureCause.IPHONE_NOT_CHOSEN,
-            "No unambiguous bonded iPhone found; pair one iPhone and retry",
+            "尚未找到已配对的 iPhone，请先与电视蓝牙配对",
         )
     }
 
@@ -2770,40 +2804,15 @@ class TvSessionEngine(
     private fun ByteArray.macString(): String =
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
+    @Synchronized
     private fun awaitVpnService(): UsbTunnelVpnService? {
-        vpnService?.let { return it }
-        bindVpn()
-        return try {
-            if (vpnLatch.await(VPN_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            null
-        }
+        if (closed) return null
+        return vpnService ?: UsbTunnelVpnService().also { vpnService = it }
     }
 
-    private fun bindVpn() {
-        if (vpnBound) return
-        vpnBound = true
-        try {
-            val intent = Intent(appContext, UsbTunnelVpnService::class.java)
-            if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
-                vpnBound = false
-                vpnLatch.countDown()
-            }
-        } catch (_: Throwable) {
-            vpnBound = false
-            vpnLatch.countDown()
-        }
-    }
-
+    @Synchronized
     private fun unbindVpn() {
-        if (!vpnBound) return
-        vpnBound = false
-        try {
-            appContext.unbindService(serviceConnection)
-        } catch (_: Exception) {
-            // The service may have already been unbound.
-        }
+        vpnService?.detach()
         vpnService = null
     }
 

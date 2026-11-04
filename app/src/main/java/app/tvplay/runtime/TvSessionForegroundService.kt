@@ -99,13 +99,15 @@ class TvSessionForegroundService : Service() {
         const val ACTION_STOP = "app.tvplay.DISCONNECT"
 
         fun startOrUpdate(context: Context, wireless: Boolean, status: String) {
-            val intent = Intent(context, TvSessionForegroundService::class.java)
-                .putExtra("wireless", wireless)
-                .putExtra("status", status)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                val intent = Intent(context, TvSessionForegroundService::class.java)
+                    .putExtra("wireless", wireless)
+                    .putExtra("status", status)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
             }
         }
 
@@ -114,7 +116,9 @@ class TvSessionForegroundService : Service() {
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, TvSessionForegroundService::class.java))
+            runCatching {
+                context.stopService(Intent(context, TvSessionForegroundService::class.java))
+            }
         }
     }
 }

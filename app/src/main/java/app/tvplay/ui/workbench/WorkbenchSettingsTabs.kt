@@ -76,6 +76,7 @@ class WorkbenchSettingsTabs(
 
     var onChooseIphoneClicked: (() -> Unit)? = null
     var onPairBluetoothClicked: (() -> Unit)? = null
+    var onResetWirelessHotspotClicked: (() -> Unit)? = null
     var onSaveDiagnosticLogClicked: (() -> Unit)? = null
     var onOpenPictureAdjustmentClicked: (() -> Unit)? = null
     var onSettingChanged: (() -> Unit)? = null
@@ -273,10 +274,10 @@ class WorkbenchSettingsTabs(
             TvWirelessMode.LAN_WIFI -> {
                 addView(
                     textFieldCard(
-                        title = "家庭路由器 Wi-Fi 名称 (SSID，可选)",
-                        subtitle = "留空将自动读取当前连接的 Wi-Fi 名称；若电视插网线可填写 iPhone 所连的 Wi-Fi 名",
+                        title = "家庭路由器 Wi-Fi 名称 (SSID)",
+                        subtitle = "填写 iPhone 与电视共同连接的路由器 Wi-Fi 名称（无线握手时需告知 iPhone）",
                         initialValue = settings.connection.existingWifiSsid,
-                        hint = "自动识别当前路由器 Wi-Fi",
+                        hint = "填写家庭路由器 Wi-Fi 名称",
                         secret = false,
                     ) { value ->
                         settings.connection.existingWifiSsid = value.trim()
@@ -286,10 +287,10 @@ class WorkbenchSettingsTabs(
                 )
                 addView(
                     textFieldCard(
-                        title = "家庭路由器 Wi-Fi 密码（可选）",
-                        subtitle = "若 iPhone 已连接至同一家庭 Wi-Fi，此处可直接留空",
+                        title = "家庭路由器 Wi-Fi 密码",
+                        subtitle = "填写该家庭路由器的 WPA2 密码（若为开放无密码网络可留空）",
                         initialValue = settings.connection.existingWifiPassphrase,
-                        hint = "iPhone 已连同路由时可留空",
+                        hint = "填写家庭路由器 Wi-Fi 密码",
                         secret = true,
                     ) { value ->
                         settings.connection.existingWifiPassphrase = value
@@ -334,6 +335,15 @@ class WorkbenchSettingsTabs(
                         settings.connection.wifiP2pPreferredChannel = channel
                         onSettingChanged?.invoke()
                     },
+                    cardLayoutParams(),
+                )
+                addView(
+                    actionCard(
+                        title = "重置 Wi-Fi Direct 投屏通道",
+                        subtitle = "当无线握手后画面未弹出或热点状态异常时，清理电视端残留的 P2P 组网状态",
+                        buttonLabel = "重置通道",
+                        onClick = { onResetWirelessHotspotClicked?.invoke() },
+                    ),
                     cardLayoutParams(),
                 )
             }

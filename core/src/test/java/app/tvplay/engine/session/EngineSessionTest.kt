@@ -45,4 +45,38 @@ class EngineSessionTest {
         assertEquals(0x05ac, filter.vendorId)
         assertEquals(0x12a8, filter.productId)
     }
+
+    @Test
+    fun isNonPhoneBluetoothAccessoryExcludesTvRemotesAndSpeakersButKeepsIphones() {
+        assertTrue(
+            isNonPhoneBluetoothAccessory(
+                name = "小米蓝牙语音遥控器",
+                majorDeviceClass = android.bluetooth.BluetoothClass.Device.Major.PERIPHERAL,
+            ),
+        )
+        assertTrue(
+            isNonPhoneBluetoothAccessory(
+                name = "Bluetooth Remote",
+                majorDeviceClass = null,
+            ),
+        )
+        assertTrue(
+            isNonPhoneBluetoothAccessory(
+                name = "Living Room Soundbar",
+                majorDeviceClass = android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO,
+            ),
+        )
+        assertFalse(
+            isNonPhoneBluetoothAccessory(
+                name = "iPhone 16 Pro",
+                majorDeviceClass = android.bluetooth.BluetoothClass.Device.Major.PHONE,
+            ),
+        )
+        assertFalse(
+            isNonPhoneBluetoothAccessory(
+                name = "张三的手机",
+                majorDeviceClass = android.bluetooth.BluetoothClass.Device.Major.PHONE,
+            ),
+        )
+    }
 }

@@ -120,7 +120,22 @@ class LanNetworkLink(
                     apBssid = accessPointAddress(info?.bssid)
                 }
                 val configuredSsid = ssid.trim().takeUnless { it.isEmpty() || it.equals("TVPlay", ignoreCase = true) }
-                val effectiveSsid = configuredSsid ?: liveSsid ?: "TVPlay"
+                val effectiveSsid = configuredSsid ?: liveSsid
+                if (configured == null) {
+                    if (liveSsid != null && configuredSsid != null && !liveSsid.equals(configuredSsid, ignoreCase = false)) {
+                        throw WirelessStartupException(
+                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                            "已配置的 Wi-Fi 名称 ($configuredSsid) 与电视当前连接的 Wi-Fi ($liveSsid) 不一致，请在连接设置中核对",
+                        )
+                    }
+                    if (effectiveSsid == null) {
+                        throw WirelessStartupException(
+                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                            "家庭局域网模式需要先在「连接与配对」中填写家庭路由器 Wi-Fi 名称与密码，或改用「Wi-Fi Direct 5GHz 直连」模式",
+                        )
+                    }
+                }
+                val finalSsid = effectiveSsid ?: "TVPlay"
 
                 synchronized(lock) {
                     check(!closed) { "ExistingWifiManager is closed" }
@@ -152,7 +167,7 @@ class LanNetworkLink(
                         "receiverIdentity=saved" + if (configured != null) " configuredInterface=$configured" else "",
                 )
                 return WirelessHotspotInfo(
-                    ssid = effectiveSsid,
+                    ssid = finalSsid,
                     passphrase = passphrase,
                     security = security(),
                     channel = channel,
@@ -243,6 +258,24 @@ class LanNetworkLink(
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
         }
+
+    companion object {
+        fun detectConnectedWifiSsid(context: Context): String? = runCatching {
+            val app = context.applicationContext
+            val connectivity = app.getSystemService(ConnectivityManager::class.java)
+            val wifi = app.getSystemService(WifiManager::class.java)
+            val activeCap = connectivity?.activeNetwork?.let {
+                runCatching { connectivity.getNetworkCapabilities(it) }.getOrNull()
+            }
+            val networkInfo = if (Build.VERSION.SDK_INT >= 31) activeCap?.transportInfo as? WifiInfo else null
+            @Suppress("DEPRECATION")
+            val stationInfo = try { wifi?.connectionInfo } catch (_: SecurityException) { null }
+            listOfNotNull(networkInfo, stationInfo).firstNotNullOfOrNull { info ->
+                info.ssid?.removeSurrounding("\"")
+                    ?.takeUnless { it == WifiManager.UNKNOWN_SSID || it.isBlank() }
+            }
+        }.getOrNull()
+    }
 }
 
 internal fun wirelessHostAddress(addresses: List<InetAddress>, interfaceIndex: Int): InetAddress? {

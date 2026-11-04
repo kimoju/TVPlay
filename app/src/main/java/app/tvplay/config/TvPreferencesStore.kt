@@ -365,6 +365,17 @@ object TvPreferencesStore {
             .apply()
     }
 
+    fun clearPairedPhone(context: Context) {
+        diplayPrefs(context).edit()
+            .remove(KEY_PHONE_ADDRESS)
+            .remove(KEY_PHONE_NAME)
+            .apply()
+        prefs(context).edit()
+            .remove(KEY_PHONE_ADDRESS)
+            .remove(KEY_PHONE_NAME)
+            .apply()
+    }
+
     fun savePhone(context: Context, address: String, name: String) =
         savePairedPhone(context, address, name)
 

@@ -149,4 +149,38 @@ class TvConfigTest {
         TvPreferencesStore.clearLockdownRecord(context)
         assertNull(TvPreferencesStore.loadLockdownRecord(context))
     }
+
+    @Test
+    fun sanitizeSavedPhoneClearsTvRemotesAndUnpairedDevicesWhileKeepingValidIphone() {
+        val context = RuntimeEnvironment.getApplication()
+        val remoteOnly = listOf(
+            TvPlayBluetooth.PairedDevice(
+                name = "小米蓝牙语音遥控器",
+                address = "AA:BB:CC:DD:EE:01",
+                isLikelyIphone = false,
+                isAccessory = true,
+            ),
+        )
+        TvPreferencesStore.savePairedPhone(context, "AA:BB:CC:DD:EE:01", "小米蓝牙语音遥控器")
+        TvPlayBluetooth.sanitizeSavedPhone(context, remoteOnly)
+        assertNull(TvPreferencesStore.loadPairedPhoneAddress(context))
+
+        val pairedIphoneAndRemote = listOf(
+            TvPlayBluetooth.PairedDevice(
+                name = "iPhone 16 Pro",
+                address = "11:22:33:44:55:66",
+                isLikelyIphone = true,
+                isAccessory = false,
+            ),
+            remoteOnly.single(),
+        )
+        TvPreferencesStore.savePairedPhone(context, "11:22:33:44:55:66", "iPhone 16 Pro")
+        TvPlayBluetooth.sanitizeSavedPhone(context, pairedIphoneAndRemote)
+        assertEquals("11:22:33:44:55:66", TvPreferencesStore.loadPairedPhoneAddress(context))
+
+        // Unpaired phone address is cleared when bonded list has other devices
+        TvPreferencesStore.savePairedPhone(context, "99:88:77:66:55:44", "Old iPhone")
+        TvPlayBluetooth.sanitizeSavedPhone(context, pairedIphoneAndRemote)
+        assertNull(TvPreferencesStore.loadPairedPhoneAddress(context))
+    }
 }

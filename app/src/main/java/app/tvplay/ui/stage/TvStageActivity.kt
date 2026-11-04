@@ -1,13 +1,17 @@
 package app.tvplay.ui.stage
 
 import android.app.Activity
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -27,9 +31,12 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import app.tvplay.R
 import app.tvplay.config.MfiAssetInstaller
 import app.tvplay.config.TvDeviceCapabilities
+import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvPreferencesStore
+import java.util.concurrent.Executors
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
 import app.tvplay.config.WaitingScreenColors
@@ -120,13 +127,39 @@ class TvStageActivity : Activity() {
     private var firstFrameRendered = false
     private var sessionHevc = false
     private var vpnPromptedThisSession = false
+    private var permissionsPromptedThisSession = false
     private var reconnectRunnable: Runnable? = null
+    @Volatile
+    private var restartGeneration = 0
+    private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "tvplay-stage-teardown").apply { isDaemon = true }
+    }
+    private var bluetoothReceiverRegistered = false
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) != BluetoothAdapter.STATE_ON) {
+                return
+            }
+            if (isFinishing || isDestroyed || streamingActive) return
+            if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return
+            cancelScheduledReconnect()
+            sessionEngine?.reconnectIphone() ?: reconnectNow()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyLaunchIntentMode(intent)
         CarPlayScreen.forwarded(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        runCatching {
+            registerReceiver(
+                bluetoothStateReceiver,
+                IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            )
+            bluetoothReceiverRegistered = true
+        }
 
         rootFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -167,7 +200,7 @@ class TvStageActivity : Activity() {
         applyLaunchIntentMode(intent)
         val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
         if (
-            intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED ||
+            isIphoneUsbAttachment(intent) ||
             previousWireless != currentWireless ||
             PendingReconnect.isPending()
         ) {
@@ -178,7 +211,7 @@ class TvStageActivity : Activity() {
     private fun applyLaunchIntentMode(launchIntent: Intent?) {
         if (launchIntent == null) return
         when {
-            launchIntent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+            isIphoneUsbAttachment(launchIntent) -> {
                 TvPreferencesStore.saveWirelessEnabled(this, false)
             }
             launchIntent.hasExtra("wireless") -> {
@@ -186,6 +219,17 @@ class TvStageActivity : Activity() {
                 TvPreferencesStore.saveWirelessEnabled(this, wireless)
             }
         }
+    }
+
+    private fun isIphoneUsbAttachment(launchIntent: Intent?): Boolean {
+        if (launchIntent?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return false
+        val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            launchIntent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            launchIntent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+        }
+        return device == null || device.vendorId == 0x05AC
     }
 
     override fun onResume() {
@@ -209,6 +253,10 @@ class TvStageActivity : Activity() {
 
     override fun onDestroy() {
         cancelScheduledReconnect()
+        if (bluetoothReceiverRegistered) {
+            runCatching { unregisterReceiver(bluetoothStateReceiver) }
+            bluetoothReceiverRegistered = false
+        }
         fpsHudOverlay.stop()
         pictureBinding?.close()
         pictureBinding = null
@@ -431,16 +479,41 @@ class TvStageActivity : Activity() {
         )
     }
 
-    private fun startOrAttachSession() {
+    private fun startOrAttachSession(adoptExisting: Boolean = true) {
+        val shouldAdopt = adoptExisting &&
+            !PendingReconnect.isPending() &&
+            sessionEngine == null &&
+            CarPlayBackgroundSession.hasSession()
         PendingReconnect.clear()
         waitingBindings.reconnectBannerView.visibility = View.GONE
+        if (shouldAdopt && adoptBackgroundSession()) {
+            return
+        }
         if (sessionEngine != null) {
             stopActiveSession()
         } else if (CarPlayBackgroundSession.hasSession()) {
             CarPlayBackgroundSession.stop {}
         }
+        val controllerGeneration = ++restartGeneration
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
+        if (wirelessEnabled) {
+            TvPlayBluetooth.sanitizeSavedPhone(this)
+        }
+
+        if (!permissionsPromptedThisSession) {
+            val missingPermissions = if (wirelessEnabled) {
+                WirelessPermissions.missing(this, wirelessMode)
+            } else {
+                WiredPermissions.missing(this)
+            }
+            if (missingPermissions.isNotEmpty()) {
+                permissionsPromptedThisSession = true
+                runCatching {
+                    requestPermissions(missingPermissions.toTypedArray(), REQUEST_STAGE_PERMISSIONS)
+                }
+            }
+        }
 
         if (!wirelessEnabled && !vpnPromptedThisSession) {
             val vpnPrepare = UsbTunnelVpnService.prepare(this)
@@ -532,8 +605,9 @@ class TvStageActivity : Activity() {
             mediaBufferMillis = TvPreferencesStore.loadMediaBufferMillis(this, wirelessEnabled),
             onAudioDiagnostic = TvDiagnosticsLogger::record,
             onScreenStreamActiveChanged = { streamType, active ->
-                if (streamType == 110) {
+                if (streamType == 110 && controllerGeneration == restartGeneration) {
                     mainHandler.post {
+                        if (controllerGeneration != restartGeneration) return@post
                         streamingActive = active
                         refreshOverlayVisibility()
                     }
@@ -546,27 +620,33 @@ class TvStageActivity : Activity() {
         ).also { av ->
             av.setAudioOutputDisabled(disableAudio)
             av.setFirstVideoFrameListener {
-                mainHandler.post {
-                    firstFrameRendered = true
-                    streamingActive = true
-                    activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
-                    LastConnectionProblem.clear(this)
-                    refreshOverlayVisibility()
-                    if (TvPreferencesStore.loadFpsCounter(this)) {
-                        fpsHudOverlay.start()
+                if (controllerGeneration == restartGeneration) {
+                    mainHandler.post {
+                        if (controllerGeneration != restartGeneration) return@post
+                        firstFrameRendered = true
+                        streamingActive = true
+                        activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
+                        LastConnectionProblem.clear(this)
+                        refreshOverlayVisibility()
+                        if (TvPreferencesStore.loadFpsCounter(this)) {
+                            fpsHudOverlay.start()
+                        }
                     }
                 }
             }
             av.setVideoStreamDimensionsListener { streamW, streamH ->
-                mainHandler.post {
-                    sessionDisplay = CarPlaySessionDisplay(
-                        width = streamW,
-                        height = streamH,
-                        rotation = 0,
-                        windowWidth = videoContainer.width.coerceAtLeast(rawW),
-                        windowHeight = videoContainer.height.coerceAtLeast(rawH),
-                    )
-                    updateVideoLayout(videoContainer.width, videoContainer.height)
+                if (controllerGeneration == restartGeneration) {
+                    mainHandler.post {
+                        if (controllerGeneration != restartGeneration) return@post
+                        sessionDisplay = CarPlaySessionDisplay(
+                            width = streamW,
+                            height = streamH,
+                            rotation = 0,
+                            windowWidth = videoContainer.width.coerceAtLeast(rawW),
+                            windowHeight = videoContainer.height.coerceAtLeast(rawH),
+                        )
+                        updateVideoLayout(videoContainer.width, videoContainer.height)
+                    }
                 }
             }
             activeSurface?.let { surface ->
@@ -601,56 +681,17 @@ class TvStageActivity : Activity() {
             mainBufferedAudio = bufferedAudio,
         )
 
-        val sessionListener = object : AirPlaySessionListener {
-            override fun onSessionActive(session: AirPlaySession) {
-                activeAirPlaySession = session
-                CarPlayBackgroundSession.active = true
-                val nightMode = resolveNightMode()
-                session.setNightMode(nightMode)
-                mainHandler.post {
-                    streamingActive = true
-                    TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
-                    refreshOverlayVisibility()
-                }
-            }
-
-            override fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {
-                mainHandler.post {
-                    TvSessionForegroundService.startOrUpdate(
-                        this@TvStageActivity,
-                        wirelessEnabled,
-                        info.name.ifBlank { "iPhone" },
-                    )
-                }
-            }
-
-            override fun onSessionEnded(session: AirPlaySession) {
-                if (activeAirPlaySession === session) {
-                    activeAirPlaySession = null
-                }
-                CarPlayBackgroundSession.active = false
-                mainHandler.post {
-                    streamingActive = false
-                    firstFrameRendered = false
-                    fpsHudOverlay.stop()
-                    refreshOverlayVisibility()
-                }
-            }
-
-            override fun onDebugLog(message: String) {
-                TvDiagnosticsLogger.record(message)
-            }
-        }
+        val sessionListener = createSessionListener(controllerGeneration, wirelessEnabled)
 
         val controller = TvSessionEngine(
-            context = applicationContext,
+            context = this,
             config = sessionConfig,
             airPlayConfig = streamServerConfig,
             identity = identity,
             pairings = pairings,
             listener = sessionListener,
             media = mediaEngine,
-            reportStatus = ::onCarPlayStatusChanged,
+            reportStatus = { status -> onCarPlayStatusChanged(status, controllerGeneration) },
             loadPairRecord = { TvPreferencesStore.loadLockdownRecord(this) },
             savePairRecord = { record -> TvPreferencesStore.saveLockdownRecord(this, record) },
             clearPairRecord = { TvPreferencesStore.clearLockdownRecord(this) },
@@ -678,12 +719,165 @@ class TvStageActivity : Activity() {
         if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
             TvMediaKeyRouter.attach(this, controller, pipeline::onMediaAudioFocusChanged)
         }
+        runCatching {
+            TvSessionForegroundService.startOrUpdate(
+                this,
+                wirelessEnabled,
+                getString(R.string.waiting_for_iphone),
+            )
+        }
         controller.start()
     }
 
+    private fun adoptBackgroundSession(): Boolean {
+        val snapshot = CarPlayBackgroundSession.snapshot() ?: return false
+        if (snapshot.controller.isClosed()) {
+            CarPlayBackgroundSession.clear(snapshot.controller)
+            return false
+        }
+        val controllerGeneration = ++restartGeneration
+        val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
+        sessionEngine = snapshot.controller
+        avPipeline = snapshot.sink
+        sessionDisplay = snapshot.display
+        val liveSession = snapshot.controller.activeAirPlaySession()
+        activeAirPlaySession = liveSession
+        val hasStream = liveSession != null || CarPlayBackgroundSession.active
+        streamingActive = hasStream
+        firstFrameRendered = hasStream
+        CarPlayBackgroundSession.store(
+            controller = snapshot.controller,
+            sink = snapshot.sink,
+            width = snapshot.width,
+            height = snapshot.height,
+            owner = this,
+            display = snapshot.display,
+        ) { done ->
+            stopActiveSession()
+            TvSessionForegroundService.stop(this@TvStageActivity)
+            done()
+        }
+        snapshot.controller.attachUi(
+            createSessionListener(controllerGeneration, wirelessEnabled),
+            { status -> onCarPlayStatusChanged(status, controllerGeneration) },
+        )
+        snapshot.sink.setScreenStreamActiveChangedListener { streamType, active ->
+            if (streamType == 110 && controllerGeneration == restartGeneration) {
+                mainHandler.post {
+                    if (controllerGeneration != restartGeneration) return@post
+                    streamingActive = active
+                    refreshOverlayVisibility()
+                }
+            }
+        }
+        snapshot.sink.setFirstVideoFrameListener {
+            if (controllerGeneration == restartGeneration) {
+                mainHandler.post {
+                    if (controllerGeneration != restartGeneration) return@post
+                    firstFrameRendered = true
+                    streamingActive = true
+                    activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
+                    LastConnectionProblem.clear(this)
+                    refreshOverlayVisibility()
+                    if (TvPreferencesStore.loadFpsCounter(this)) {
+                        fpsHudOverlay.start()
+                    }
+                }
+            }
+        }
+        activeSurface?.let { surface ->
+            snapshot.sink.setMainSurface(surface, videoContainer.width, videoContainer.height)
+        }
+        updateVideoLayout(videoContainer.width, videoContainer.height)
+        if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
+            TvMediaKeyRouter.attach(this, snapshot.controller, snapshot.sink::onMediaAudioFocusChanged)
+        }
+        refreshOverlayVisibility()
+        return true
+    }
+
+    private fun createSessionListener(
+        controllerGeneration: Int,
+        wirelessEnabled: Boolean,
+    ): AirPlaySessionListener = object : AirPlaySessionListener {
+        override fun onSessionActive(session: AirPlaySession) {
+            if (controllerGeneration != restartGeneration) return
+            activeAirPlaySession = session
+            CarPlayBackgroundSession.active = true
+            val nightMode = resolveNightMode()
+            session.setNightMode(nightMode)
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration) return@post
+                streamingActive = true
+                TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
+                refreshOverlayVisibility()
+            }
+        }
+
+        override fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {
+            if (controllerGeneration != restartGeneration) return
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration) return@post
+                TvSessionForegroundService.startOrUpdate(
+                    this@TvStageActivity,
+                    wirelessEnabled,
+                    info.name.ifBlank { "iPhone" },
+                )
+            }
+        }
+
+        override fun onSessionEnded(session: AirPlaySession) {
+            if (controllerGeneration != restartGeneration) return
+            val active = activeAirPlaySession
+            if (active != null && active !== session) {
+                TvDiagnosticsLogger.record("Non-active AirPlay connection ended; keeping live session")
+                return
+            }
+            val hadActiveSession = active != null || streamingActive
+            activeAirPlaySession = null
+            CarPlayBackgroundSession.active = false
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration) return@post
+                streamingActive = false
+                firstFrameRendered = false
+                fpsHudOverlay.stop()
+                refreshOverlayVisibility()
+                if (hadActiveSession) {
+                    scheduleAutoReconnect(2_000L)
+                }
+            }
+        }
+
+        override fun onTransportError(message: String) {
+            if (controllerGeneration != restartGeneration) return
+            TvDiagnosticsLogger.record("AirPlay transport error: $message")
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration) return@post
+                val hadActive = activeAirPlaySession != null || streamingActive
+                if (hadActive) {
+                    activeAirPlaySession = null
+                    CarPlayBackgroundSession.active = false
+                    streamingActive = false
+                    firstFrameRendered = false
+                    fpsHudOverlay.stop()
+                    refreshOverlayVisibility()
+                    scheduleAutoReconnect(2_000L)
+                }
+            }
+        }
+
+        override fun onDebugLog(message: String) {
+            TvDiagnosticsLogger.record(message)
+        }
+    }
+
     private fun onCarPlayStatusChanged(status: CarPlayStatus) {
+        onCarPlayStatusChanged(status, restartGeneration)
+    }
+
+    private fun onCarPlayStatusChanged(status: CarPlayStatus, controllerGeneration: Int) {
         mainHandler.post {
-            if (isFinishing || isDestroyed) return@post
+            if (isFinishing || isDestroyed || controllerGeneration != restartGeneration) return@post
             val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
             val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
             val lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
@@ -734,10 +928,25 @@ class TvStageActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_STAGE_PERMISSIONS) {
+            if (grantResults.any { it == PackageManager.PERMISSION_GRANTED } && !streamingActive) {
+                cancelScheduledReconnect()
+                sessionEngine?.reconnectIphone() ?: startOrAttachSession(adoptExisting = false)
+            }
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_STAGE_VPN_PERMISSION) {
-            startOrAttachSession()
+            startOrAttachSession(adoptExisting = false)
         }
     }
 
@@ -916,11 +1125,35 @@ class TvStageActivity : Activity() {
 
     private fun reconnectNow() {
         cancelScheduledReconnect()
-        stopActiveSession()
+        PendingReconnect.clear()
+        waitingBindings.reconnectBannerView.visibility = View.GONE
+        val oldEngine = sessionEngine ?: CarPlayBackgroundSession.snapshot()?.controller
+        val oldPipeline = avPipeline ?: CarPlayBackgroundSession.snapshot()?.sink
+        if (oldEngine == null && oldPipeline == null) {
+            startOrAttachSession(adoptExisting = false)
+            return
+        }
+        val generation = ++restartGeneration
+        activeAirPlaySession = null
         streamingActive = false
         firstFrameRendered = false
+        fpsHudOverlay.stop()
+        TvMediaKeyRouter.release(this)
+        sessionEngine = null
+        avPipeline = null
+        CarPlayBackgroundSession.clear(oldEngine, keepOwner = true)
+        waitingBindings.stageStatusView.text = "正在重置连接并重新启动投屏会话..."
         refreshOverlayVisibility()
-        startOrAttachSession()
+        teardownExecutor.execute {
+            oldEngine?.close()
+            oldEngine?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
+            oldPipeline?.close()
+            mainHandler.post {
+                if (!isFinishing && !isDestroyed && generation == restartGeneration) {
+                    startOrAttachSession(adoptExisting = false)
+                }
+            }
+        }
     }
 
     private fun returnToWorkbench() {
@@ -990,6 +1223,8 @@ class TvStageActivity : Activity() {
 
     companion object {
         private const val REQUEST_STAGE_VPN_PERMISSION = 2001
+        private const val REQUEST_STAGE_PERMISSIONS = 2002
+        private const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
 
         fun connectionInstructions(
             context: Context,

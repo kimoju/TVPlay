@@ -118,7 +118,14 @@ object AndroidTvInputMode {
  * Local Bluetooth adapter address and display name lookup for TVPlay connection guides and AirPlay /info.
  */
 object TvPlayBluetooth {
-    data class PairedDevice(val name: String, val address: String)
+    private const val IAP2_UUID = "00000000-deca-fade-deca-deafdecacafe"
+
+    data class PairedDevice(
+        val name: String,
+        val address: String,
+        val isLikelyIphone: Boolean = false,
+        val isAccessory: Boolean = false,
+    )
 
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
@@ -128,10 +135,50 @@ object TvPlayBluetooth {
         adapter?.bondedDevices.orEmpty().mapNotNull { device ->
             val address = runCatching { device.address }.getOrNull()?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
-            val name = runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() } ?: "iPhone"
-            PairedDevice(name = name, address = address)
-        }
+            val rawName = runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() }
+            val name = rawName ?: "蓝牙设备"
+            val majorClass = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
+            val hasIap2Uuid = runCatching {
+                device.uuids?.any { it.uuid.toString().equals(IAP2_UUID, ignoreCase = true) } == true
+            }.getOrDefault(false)
+            val nameHasIphone = name.contains("iPhone", ignoreCase = true)
+            val isAccessory = !nameHasIphone && !hasIap2Uuid &&
+                app.tvplay.engine.session.isNonPhoneBluetoothAccessory(rawName, majorClass)
+            val isLikelyIphone = !isAccessory && (
+                nameHasIphone ||
+                    hasIap2Uuid ||
+                    majorClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
+                )
+            PairedDevice(
+                name = name,
+                address = address,
+                isLikelyIphone = isLikelyIphone,
+                isAccessory = isAccessory,
+            )
+        }.sortedWith(
+            compareBy<PairedDevice> { !it.isLikelyIphone }
+                .thenBy { it.isAccessory }
+                .thenBy { it.name.lowercase() },
+        )
     }.getOrDefault(emptyList())
+
+    /**
+     * Clears any saved target phone address if it is no longer paired or if it points to a
+     * non-phone TV peripheral (such as a Bluetooth TV remote control).
+     */
+    fun sanitizeSavedPhone(context: Context, bonded: List<PairedDevice> = bondedDevices(context)) {
+        val savedAddress = TvPreferencesStore.loadPairedPhoneAddress(context) ?: return
+        val savedName = TvPreferencesStore.loadPairedPhoneName(context)
+        if (app.tvplay.engine.session.isNonPhoneBluetoothAccessory(savedName, null)) {
+            TvPreferencesStore.clearPairedPhone(context)
+            return
+        }
+        if (bonded.isEmpty()) return
+        val match = bonded.firstOrNull { it.address.equals(savedAddress, ignoreCase = true) }
+        if (match == null || (match.isAccessory && !match.isLikelyIphone)) {
+            TvPreferencesStore.clearPairedPhone(context)
+        }
+    }
 
     @SuppressLint("MissingPermission", "HardwareIds")
     @Suppress("DEPRECATION")

@@ -126,8 +126,12 @@ class TvSettingsRepository(private val context: Context) {
         val pairedPhoneName: String
             get() = TvPreferencesStore.loadPairedPhoneName(context)
 
-        fun savePairedPhone(address: String, name: String = "Your iPhone") {
+        fun savePairedPhone(address: String, name: String = "我的 iPhone") {
             TvPreferencesStore.savePairedPhone(context, address, name)
+        }
+
+        fun clearPairedPhone() {
+            TvPreferencesStore.clearPairedPhone(context)
         }
 
         var externalController: Boolean

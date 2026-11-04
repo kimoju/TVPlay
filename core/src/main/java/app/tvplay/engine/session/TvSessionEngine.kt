@@ -2320,11 +2320,24 @@ class TvSessionEngine(
             )
         } catch (error: Throwable) {
             debugLog("wired bring-up failed", error)
-            if (!ncmOwnedLocally) vpnService?.detach()
             fail(error)
         } finally {
             wiredStartWatchdog?.terminate()
-            if (ncmOwnedLocally) ncm.close()
+            val activeCsm = csm
+            if (activeCsm != null) {
+                csm = null
+                closeBestEffort("wired iAP2 CSM") { activeCsm.close() }
+            }
+            val activeMux = mux
+            if (activeMux != null) {
+                mux = null
+                closeBestEffort("wired USBMUX") { activeMux.close() }
+            }
+            if (!ncmOwnedLocally) {
+                closeBestEffort("wired VPN transport") { vpnService?.detach() }
+            } else {
+                closeBestEffort("wired NCM") { ncm.close() }
+            }
         }
     }
 
@@ -2370,32 +2383,7 @@ class TvSessionEngine(
         }
 
     private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
-        val primaryMode = config.wirelessMode
-        val fallbackMode = if (primaryMode == TvWirelessMode.WIFI_DIRECT) {
-            TvWirelessMode.LAN_WIFI
-        } else {
-            TvWirelessMode.WIFI_DIRECT
-        }
-        return try {
-            startWirelessHotspotWithMode(primaryMode, generation)
-        } catch (primaryFailure: Exception) {
-            if (isStaleWirelessRun(generation)) throw primaryFailure
-            debugLog(
-                "wireless primary mode ${primaryMode.name} failed (${primaryFailure.message}); " +
-                    "automatically trying fallback mode ${fallbackMode.name}",
-            )
-            try {
-                startWirelessHotspotWithMode(fallbackMode, generation)
-            } catch (_: Exception) {
-                throw primaryFailure
-            }
-        }
-    }
-
-    private fun startWirelessHotspotWithMode(
-        hotspotMode: TvWirelessMode,
-        generation: Int,
-    ): WirelessHotspotInfo {
+        val hotspotMode = config.wirelessMode
         val manager = createHotspotManager(hotspotMode, generation)
         synchronized(wirelessResourceLock) {
             if (isStaleWirelessRun(generation)) {
@@ -2415,6 +2403,8 @@ class TvSessionEngine(
             if (hotspot === manager) hotspot = null
             closeBestEffort(hotspotMode.name) { manager.close() }
             if (isStaleWirelessRun(generation)) throw failure
+            if (failure is P2pResetRequiredException) throw failure
+            if (failure is WirelessStartupException) throw failure
             throw IOException(
                 "Could not establish ${hotspotMode.name} hotspot: " +
                     (failure.message ?: failure.javaClass.simpleName),
@@ -2428,11 +2418,31 @@ class TvSessionEngine(
 
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
         val bonded = adapter.bondedDevices.orEmpty()
-        config.wirelessBluetoothDeviceAddress?.let { selected ->
-            bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }?.let { return it }
-        }
         val iap2Uuid = UUID.fromString(IAP2_IPHONE_UUID)
-        val iPhones = bonded.filter { device ->
+        fun isAccessory(device: BluetoothDevice): Boolean {
+            val hasIap2 = runCatching {
+                device.uuids?.any { it.uuid == iap2Uuid } == true
+            }.getOrDefault(false)
+            if (hasIap2) return false
+            val name = runCatching { device.name }.getOrNull()
+            val major = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
+            return isNonPhoneBluetoothAccessory(name, major)
+        }
+
+        config.wirelessBluetoothDeviceAddress?.let { selected ->
+            val matched = bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }
+                ?: throw ConnectionFailureException(
+                    ConnectionFailureCause.CHOSEN_IPHONE_NOT_PAIRED,
+                    "所选的 iPhone 已取消蓝牙配对，请重新在 TVPlay 中选择或配对 iPhone",
+                )
+            if (!isAccessory(matched)) {
+                return matched
+            }
+            debugLog("wireless ignoring non-phone Bluetooth accessory saved as target address=$selected")
+        }
+
+        val candidateDevices = bonded.filterNot(::isAccessory)
+        val iPhones = candidateDevices.filter { device ->
             val nameMatches = device.name?.contains("iPhone", ignoreCase = true) == true
             val classMatches = runCatching {
                 device.bluetoothClass?.majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
@@ -2458,23 +2468,21 @@ class TvSessionEngine(
         }
         if (connectedIPhones.size == 1) return connectedIPhones.single()
         if (connectedIPhones.size > 1) {
-            return connectedIPhones.first()
+            throw ConnectionFailureException(
+                ConnectionFailureCause.IPHONE_NOT_CHOSEN,
+                "发现多台已连接的 iPhone，请在 TVPlay 连接设置中指定目标 iPhone",
+            )
         }
         if (iPhones.size == 1) return iPhones.single()
         if (iPhones.size > 1) {
-            return iPhones.first()
+            throw ConnectionFailureException(
+                ConnectionFailureCause.IPHONE_NOT_CHOSEN,
+                "发现多台已配对的 iPhone，请在 TVPlay 连接设置中指定目标 iPhone",
+            )
         }
-        val nonPeripheral = bonded.filter { device ->
-            runCatching {
-                val major = device.bluetoothClass?.majorDeviceClass
-                major != android.bluetooth.BluetoothClass.Device.Major.PERIPHERAL &&
-                    major != android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO
-            }.getOrDefault(true)
-        }
-        if (nonPeripheral.size == 1) return nonPeripheral.single()
-        if (bonded.size == 1) return bonded.single()
+        if (candidateDevices.size == 1) return candidateDevices.single()
         throw ConnectionFailureException(
-            if (bonded.isEmpty()) ConnectionFailureCause.NO_PAIRED_IPHONE else ConnectionFailureCause.IPHONE_NOT_CHOSEN,
+            if (candidateDevices.isEmpty()) ConnectionFailureCause.NO_PAIRED_IPHONE else ConnectionFailureCause.IPHONE_NOT_CHOSEN,
             "尚未找到已配对的 iPhone，请先与电视蓝牙配对",
         )
     }
@@ -3052,4 +3060,46 @@ class TvSessionEngine(
         private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"
         private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
     }
+}
+
+/**
+ * Classifies whether a bonded Bluetooth device is an Android TV remote control, speaker, keyboard,
+ * gamepad, or other non-phone peripheral so TVPlay never mistakes the TV's own remote for an iPhone.
+ */
+fun isNonPhoneBluetoothAccessory(name: String?, majorDeviceClass: Int?): Boolean {
+    if (name?.contains("iPhone", ignoreCase = true) == true) return false
+    if (
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.PERIPHERAL ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.WEARABLE ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.IMAGING ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.TOY ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.HEALTH ||
+        majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.COMPUTER
+    ) {
+        return true
+    }
+    val lower = name?.lowercase().orEmpty()
+    val accessoryKeywords = listOf(
+        "remote",
+        "遥控",
+        "controller",
+        "gamepad",
+        "joystick",
+        "手柄",
+        "keyboard",
+        "键盘",
+        "mouse",
+        "鼠标",
+        "airmouse",
+        "speaker",
+        "音箱",
+        "耳机",
+        "airpods",
+        "buds",
+        "headphone",
+        "headset",
+        "soundbar",
+    )
+    return accessoryKeywords.any { lower.contains(it) }
 }

@@ -1,14 +1,24 @@
 package app.tvplay.ui.workbench
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.wifi.p2p.WifiP2pManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.setPadding
 import app.tvplay.R
@@ -17,7 +27,9 @@ import app.tvplay.config.TvSettingsRepository
 import app.tvplay.config.WiredPermissions
 import app.tvplay.config.WirelessPermissions
 import app.tvplay.engine.network.BluetoothRadioCheck
+import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.UsbTunnelVpnService
+import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.DiagnosticExportStore
 import app.tvplay.runtime.PendingReconnect
@@ -53,6 +65,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private lateinit var stagePane: WorkbenchHeroStage
     private lateinit var settingsPane: WorkbenchSettingsTabs
     private var pendingWirelessLaunch: Boolean = true
+    private var pendingChoosePhoneLaunchAfterSelect: Boolean = false
     private val themeModeDiagnostics = ThemeModeDiagnostics()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,6 +111,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             return
         }
         observeAppearance(ThemeModeDiagnostics.Source.RESUME)
+        TvPlayBluetooth.sanitizeSavedPhone(this)
         refreshWorkbenchStatus()
         settingsPane.refresh()
     }
@@ -159,6 +173,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         settingsPane = WorkbenchSettingsTabs(this, settings).apply {
             onChooseIphoneClicked = { showChooseIphoneDialog(launchAfterSelect = false) }
             onPairBluetoothClicked = { openSystemBluetoothSettings() }
+            onResetWirelessHotspotClicked = { resetWirelessHotspotGroup() }
             onSaveDiagnosticLogClicked = { exportDiagnosticReport() }
             onSettingChanged = {
                 if (CarPlayBackgroundSession.hasSession()) {
@@ -253,23 +268,35 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 return
             }
 
+            val allBonded = TvPlayBluetooth.bondedDevices(this)
+            TvPlayBluetooth.sanitizeSavedPhone(this, allBonded)
             if (settings.connection.pairedPhoneAddress == null) {
-                val bonded = TvPlayBluetooth.bondedDevices(this)
-                val iPhones = bonded.filter { it.name.contains("iPhone", ignoreCase = true) }
+                val phoneCandidates = allBonded.filter { !it.isAccessory }
+                val likelyIphones = phoneCandidates.filter { it.isLikelyIphone }
                 when {
-                    iPhones.size == 1 -> {
-                        val single = iPhones.single()
+                    likelyIphones.size == 1 -> {
+                        val single = likelyIphones.single()
                         settings.connection.savePairedPhone(single.address, single.name)
                     }
-                    bonded.size > 1 -> {
+                    phoneCandidates.size == 1 -> {
+                        val single = phoneCandidates.single()
+                        settings.connection.savePairedPhone(single.address, single.name)
+                    }
+                    else -> {
                         showChooseIphoneDialog(launchAfterSelect = true)
                         return
                     }
-                    bonded.size == 1 -> {
-                        val single = bonded.single()
-                        settings.connection.savePairedPhone(single.address, single.name)
-                    }
                 }
+            }
+
+            if (
+                settings.connection.wirelessHotspotMode == TvWirelessMode.LAN_WIFI &&
+                settings.connection.existingWifiSsid.isBlank() &&
+                settings.connection.existingWifiInterface.isBlank() &&
+                LanNetworkLink.detectConnectedWifiSsid(this) == null
+            ) {
+                showLanWifiConfigDialog(launchAfterSave = true)
+                return
             }
         } else {
             val vpnPrepare = UsbTunnelVpnService.prepare(this)
@@ -299,8 +326,16 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PROJECTION_PERMISSIONS) {
-            launchProjectionStage(pendingWirelessLaunch, skipPermissionPrompt = true)
+        when (requestCode) {
+            REQUEST_PROJECTION_PERMISSIONS -> {
+                launchProjectionStage(pendingWirelessLaunch, skipPermissionPrompt = true)
+            }
+            REQUEST_BLUETOOTH_CONNECT_FOR_DIALOG -> {
+                doShowChooseIphoneDialog(
+                    launchAfterSelect = pendingChoosePhoneLaunchAfterSelect,
+                    includeAccessories = false,
+                )
+            }
         }
     }
 
@@ -329,12 +364,36 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     }
 
     private fun showChooseIphoneDialog(launchAfterSelect: Boolean = false) {
-        val bonded = TvPlayBluetooth.bondedDevices(this)
-        if (bonded.isEmpty()) {
+        pendingChoosePhoneLaunchAfterSelect = launchAfterSelect
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED &&
+            TvPlayBluetooth.bondedDevices(this).isEmpty()
+        ) {
+            val requestStarted = runCatching {
+                requestPermissions(
+                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                    REQUEST_BLUETOOTH_CONNECT_FOR_DIALOG,
+                )
+                true
+            }.getOrDefault(false)
+            if (requestStarted) {
+                doShowChooseIphoneDialog(launchAfterSelect = launchAfterSelect, includeAccessories = false)
+                return
+            }
+        }
+        doShowChooseIphoneDialog(launchAfterSelect = launchAfterSelect, includeAccessories = false)
+    }
+
+    private fun doShowChooseIphoneDialog(
+        launchAfterSelect: Boolean,
+        includeAccessories: Boolean,
+    ) {
+        if (!BluetoothRadioCheck.isOn(this)) {
             appDialogBuilder(this)
-                .setTitle("尚未配对任何蓝牙设备")
+                .setTitle("请先开启电视蓝牙")
                 .setMessage(
-                    "请先在电视系统蓝牙设置中与 iPhone 完成蓝牙配对，然后返回此处选择该 iPhone。",
+                    "无线 CarPlay 需要通过电视蓝牙与 iPhone 完成初始握手。请先打开电视系统蓝牙设置并开启蓝牙开关。",
                 )
                 .setPositiveButton("打开电视蓝牙设置") { _, _ ->
                     openSystemBluetoothSettings()
@@ -344,14 +403,55 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             return
         }
 
-        val labels = bonded.map { "${it.name} (${it.address})" }.toTypedArray()
+        val allBonded = TvPlayBluetooth.bondedDevices(this)
+        TvPlayBluetooth.sanitizeSavedPhone(this, allBonded)
+        val devices = if (includeAccessories) allBonded else allBonded.filter { !it.isAccessory }
+        if (devices.isEmpty()) {
+            val onlyAccessoriesPaired = allBonded.isNotEmpty()
+            val builder = appDialogBuilder(this)
+                .setTitle("尚未配对 iPhone")
+                .setMessage(
+                    if (onlyAccessoriesPaired) {
+                        "当前仅检测到电视蓝牙遥控器或音频外设，尚未发现已配对的 iPhone。\n\n" +
+                            "请按以下步骤配对：\n" +
+                            "1. 点击「打开电视蓝牙设置」\n" +
+                            "2. 在 iPhone 上打开「设置 → 蓝牙」并保持在该页面\n" +
+                            "3. 在电视或 iPhone 上点击对方名称完成配对，随后返回 TVPlay"
+                    } else {
+                        "请先在电视系统蓝牙设置中与 iPhone 完成蓝牙配对，然后返回此处选择该 iPhone。"
+                    },
+                )
+                .setPositiveButton("打开电视蓝牙设置") { _, _ ->
+                    openSystemBluetoothSettings()
+                }
+                .setNegativeButton("取消", null)
+            if (onlyAccessoriesPaired) {
+                builder.setNeutralButton("显示全部蓝牙设备") { _, _ ->
+                    doShowChooseIphoneDialog(
+                        launchAfterSelect = launchAfterSelect,
+                        includeAccessories = true,
+                    )
+                }
+            }
+            builder.show()
+            return
+        }
+
+        val labels = devices.map { device ->
+            val tag = when {
+                device.isLikelyIphone -> " · iPhone"
+                device.isAccessory -> " · 外设"
+                else -> ""
+            }
+            "${device.name}$tag (${device.address})"
+        }.toTypedArray()
         val currentAddress = settings.connection.pairedPhoneAddress
-        val checkedIndex = bonded.indexOfFirst { it.address.equals(currentAddress, ignoreCase = true) }
+        val checkedIndex = devices.indexOfFirst { it.address.equals(currentAddress, ignoreCase = true) }
 
         appDialogBuilder(this)
             .setTitle("选择已配对的 iPhone")
             .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
-                val chosen = bonded[which]
+                val chosen = devices[which]
                 settings.connection.savePairedPhone(chosen.address, chosen.name)
                 if (CarPlayBackgroundSession.hasSession()) {
                     PendingReconnect.mark()
@@ -360,14 +460,126 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 settingsPane.refresh()
                 dialog.dismiss()
                 if (launchAfterSelect) {
-                    openStageActivity(wireless = true)
+                    launchProjectionStage(wireless = true, skipPermissionPrompt = true)
                 }
             }
-            .setNeutralButton("系统蓝牙设置") { _, _ ->
+            .setNeutralButton("去配对新 iPhone") { _, _ ->
                 openSystemBluetoothSettings()
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    private fun showLanWifiConfigDialog(launchAfterSave: Boolean) {
+        val density = resources.displayMetrics.density
+        val palette = TvColorScheme.resolve(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padH = (24 * density).toInt()
+            val padV = (12 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+        }
+        val detectedSsid = LanNetworkLink.detectConnectedWifiSsid(this).orEmpty()
+        val ssidInput = EditText(this).apply {
+            hint = "家庭路由器 Wi-Fi 名称 (SSID)"
+            setText(settings.connection.existingWifiSsid.ifBlank { detectedSsid })
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textSecondary)
+            isSingleLine = true
+        }
+        val passLabel = TextView(this).apply {
+            text = "家庭路由器 Wi-Fi 密码（若无密码可留空）："
+            setTextColor(palette.textSecondary)
+            setPadding(0, (10 * density).toInt(), 0, (4 * density).toInt())
+        }
+        val passInput = EditText(this).apply {
+            hint = "WPA2 Wi-Fi 密码"
+            setText(settings.connection.existingWifiPassphrase)
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textSecondary)
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        container.addView(ssidInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        container.addView(passLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        container.addView(passInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        appDialogBuilder(this)
+            .setTitle("配置家庭局域网 Wi-Fi 或改用免配置直连")
+            .setMessage(
+                "无线 CarPlay 蓝牙握手时需将路由器 Wi-Fi 名称告知 iPhone。\n" +
+                    "• 推荐使用「Wi-Fi Direct 5GHz 直连」，无需填写任何路由器信息即可自动建联。\n" +
+                    "• 若使用「家庭局域网模式」，请在下方填写 iPhone 所连的路由器 Wi-Fi 名称与密码。",
+            )
+            .setView(container)
+            .setPositiveButton("保存并启动局域网投屏") { _, _ ->
+                val ssid = ssidInput.text?.toString()?.trim().orEmpty()
+                val pass = passInput.text?.toString().orEmpty()
+                if (ssid.isBlank()) {
+                    Toast.makeText(
+                        this,
+                        "请填写路由器 Wi-Fi 名称，或点击「改用 Wi-Fi Direct 直连」",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    return@setPositiveButton
+                }
+                settings.connection.saveExistingWifiCredentials(ssid, pass)
+                refreshWorkbenchStatus()
+                settingsPane.refresh()
+                if (launchAfterSave) {
+                    openStageActivity(wireless = true)
+                }
+            }
+            .setNeutralButton("改用 Wi-Fi Direct 直连（推荐）") { _, _ ->
+                settings.connection.wirelessHotspotMode = TvWirelessMode.WIFI_DIRECT
+                refreshWorkbenchStatus()
+                settingsPane.refresh()
+                if (launchAfterSave) {
+                    launchProjectionStage(wireless = true)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun resetWirelessHotspotGroup() {
+        val manager = getSystemService(WifiP2pManager::class.java)
+        val channel = manager?.initialize(this, Looper.getMainLooper(), null)
+        if (manager == null || channel == null) {
+            Toast.makeText(this, "当前设备不支持 Wi-Fi Direct 重置", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching {
+            manager.requestGroupInfo(channel) { group ->
+                if (group == null) {
+                    Toast.makeText(this, "Wi-Fi Direct 投屏通道已处于干净就绪状态", Toast.LENGTH_SHORT).show()
+                    return@requestGroupInfo
+                }
+                manager.removeGroup(
+                    channel,
+                    object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() {
+                            Toast.makeText(
+                                this@TvWorkbenchActivity,
+                                "已重置 Wi-Fi Direct 投屏通道，请重新启动投屏",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+
+                        override fun onFailure(reason: Int) {
+                            Toast.makeText(
+                                this@TvWorkbenchActivity,
+                                "未能自动移除旧通道（请在系统设置中关闭再打开 Wi-Fi）",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    },
+                )
+            }
+        }.onFailure {
+            Toast.makeText(this, "重置 Wi-Fi Direct 通道时需授予附近设备权限", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun openSystemBluetoothSettings() {
@@ -426,6 +638,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         private const val REQUEST_PROJECTION_PERMISSIONS = 1001
         private const val REQUEST_VPN_PERMISSION = 1002
         private const val REQUEST_SAVE_DIAGNOSTIC_LOG = 1003
+        private const val REQUEST_BLUETOOTH_CONNECT_FOR_DIALOG = 1004
 
         fun isLauncherIntent(intent: Intent?): Boolean =
             intent?.action == Intent.ACTION_MAIN &&

@@ -16,10 +16,8 @@ internal object AndroidTvInputMode {
     @Volatile
     internal var forceTvPlayModeForTest: Boolean? = null
 
-    fun isTvPlayConfigEnabled(context: Context): Boolean {
-        forceTvPlayModeForTest?.let { return it }
-        return runCatching { context.resources.getBoolean(R.bool.config_tvplay_mode) }.getOrDefault(true)
-    }
+    fun isTvPlayConfigEnabled(context: Context): Boolean =
+        forceTvPlayModeForTest ?: true
 
     fun isTelevision(context: Context): Boolean {
         val packageManager = context.packageManager

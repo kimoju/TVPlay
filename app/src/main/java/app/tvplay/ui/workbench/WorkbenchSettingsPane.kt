@@ -20,7 +20,6 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import app.tvplay.AppAppearance
-import app.tvplay.CarPlayBlackCornerOverlay
 import app.tvplay.CarPlayNightMode
 import app.tvplay.DefaultConnectionMode
 import app.tvplay.SettingsCategory
@@ -52,7 +51,6 @@ internal class WorkbenchSettingsPane(
         fun onShowPairedPhonePickerDialog()
         fun onRequestPermissions(permissions: Array<String>)
         fun onOpenPictureControls()
-        fun onPlayTestTone(streamType: Int)
         fun onShowDiagnosticReport()
         fun onExportDiagnosticReport()
         fun onToast(message: String)
@@ -116,7 +114,7 @@ internal class WorkbenchSettingsPane(
             SettingsCategory.CONNECTION -> buildConnectionTab(palette, callbacks)
             SettingsCategory.DISPLAY -> buildDisplayTab(palette, callbacks)
             SettingsCategory.AUDIO -> buildAudioTab(palette, callbacks)
-            SettingsCategory.ABOUT, SettingsCategory.ADVANCED -> buildAboutTab(palette, callbacks)
+            SettingsCategory.ABOUT -> buildAboutTab(palette, callbacks)
         }
     }
 
@@ -445,19 +443,6 @@ internal class WorkbenchSettingsPane(
         )
         uiCard.addView(space(dp(10)))
 
-        val cornerRadius = settings.display.blackCornerRadiusDp
-        val cornerLabel = if (cornerRadius == 0) "直角全屏 (0 dp)" else "圆角遮罩 ($cornerRadius dp)"
-        uiCard.addView(
-            settingButtonRow("电视画面四角圆角", cornerLabel, palette) {
-                val radii = CarPlayBlackCornerOverlay.RADII_DP
-                val idx = radii.indexOf(cornerRadius)
-                val next = radii[(idx + 1) % radii.size]
-                settings.display.blackCornerRadiusDp = next
-                callbacks.onRenderRequested()
-            },
-        )
-        uiCard.addView(space(dp(10)))
-
         val fpsCounter = settings.display.fpsCounterEnabled
         uiCard.addView(
             settingToggleRow(
@@ -586,13 +571,6 @@ internal class WorkbenchSettingsPane(
                 callbacks.onMarkReconnectNeeded()
             },
         )
-        speakerCard.addView(space(dp(10)))
-
-        speakerCard.addView(
-            settingButtonRow("扬声器声道测试", "播放测试提示音", palette) {
-                callbacks.onPlayTestTone(AudioManager.STREAM_MUSIC)
-            },
-        )
 
         column.addView(speakerCard)
         return column
@@ -655,7 +633,7 @@ internal class WorkbenchSettingsPane(
         diagCard.addView(space(dp(10)))
 
         diagCard.addView(
-            settingButtonRow("导出诊断报告到存储", "保存至 Downloads/DiPlay 目录", palette) {
+            settingButtonRow("导出诊断报告到存储", "保存至 Downloads/TVPlay 目录", palette) {
                 callbacks.onExportDiagnosticReport()
             },
         )

@@ -197,38 +197,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         }
 
     private var videoView: View? = null
-    private var blackCornerOverlay: CarPlayBlackCornerOverlay? = null
-    private var pendingIphoneCornerMask: Pair<AirPlaySession, Pair<ByteArray, Int>>? = null
-    private var iphoneCornerMaskDecodeGeneration = 0
-
-    private fun localCornerRadius(): Int =
-        if (blackCornerRadiusDp == CarPlayBlackCornerOverlay.IPHONE_MASK) 24 else blackCornerRadiusDp
-
-    private fun clearIphoneCornerMask() {
-        ++iphoneCornerMaskDecodeGeneration
-        pendingIphoneCornerMask = null
-        blackCornerOverlay?.setIphoneMask(null)
-    }
-
-    private fun installIphoneCornerMask(session: AirPlaySession, png: ByteArray, displayWidth: Int) {
-        val revision = ++iphoneCornerMaskDecodeGeneration
-        Thread({
-            val decoded = runCatching { IphoneCornerMask.decode(png, displayWidth) }.getOrNull()
-            runOnUiThread {
-                if (revision == iphoneCornerMaskDecodeGeneration && activeAirPlaySession === session &&
-                    !shuttingDown.get() && blackCornerRadiusDp == CarPlayBlackCornerOverlay.IPHONE_MASK) {
-                    if (decoded != null) {
-                        blackCornerOverlay?.setIphoneMask(decoded)
-                        appendLog("iPhone corner mask applied: ${decoded.size}px for width $displayWidth")
-                    } else {
-                        blackCornerOverlay?.setIphoneMask(null)
-                        appendLog("iPhone corner mask rejected; using local radius fallback")
-                    }
-                } else decoded?.blackPixels?.recycle()
-            }
-        }, "tvplay-iphone-corner-mask").start()
-    }
-
     private var fallbackVideoView: SurfaceView? = null
     private var fallbackVideoBounds: CarPlaySurfaceBounds? = null
     private var lastPicture: Bitmap? = null
@@ -312,8 +280,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private val hevcDecoders by lazy { HevcSupport.decoders() }
     private val sessionHevc: Boolean
         get() = HevcSupport.usable(hevcEnabled, hevcSoftwareDecoderEnabled, hevcDecoders)
-    private var advancedAudioChannelMappingSupported = false
-    private var advancedAudioChannelMapping = false
     private var navigationStreamType = 14
     private var debugLogsEnabled = false
     private var autoStartOnBoot = false
@@ -326,20 +292,8 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private var maximumDetectedWidthPixels = 0
     private var maximumDetectedHeightPixels = 0
     private var rightHandDrive = false
-    private var carPlayDock = CarPlayDock.AUTOMATIC
-    private var pendingViewAreas: CarPlayViewAreas? = null
-    private var sessionDock: CarPlayDock? = null
-    private var hideTopBar = true
-    private var hideBottomBar = true
-    private var temporarySystemBarsEnabled = false
-    private var temporarySystemBarsVisible = false
-    private val hideTemporarySystemBars = Runnable {
-        temporarySystemBarsVisible = false
-        applyFullscreenMode()
-    }
     private var safeAreaDrawOutside = true
     private var mainDisplayDisableSafeArea = false
-    private var blackCornerRadiusDp = 0
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
     private var wirelessEnabled = false
@@ -375,26 +329,9 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private var hostAppearanceResumed = false
     private var paintWaitingScreen: () -> Unit = {}
     private var carPlayNightMode = CarPlayNightMode.NIGHT
-    private var nightSchedule = CarPlayNightSchedule()
-    private var ambientDelaySeconds = 2
     private var nightModeDiagnosticSource = ThemeModeDiagnostics.Source.CARPLAY_MODE
-    private val noOpLightSource = object : CarPlayNightModeController.LightSource {
-        override val available: Boolean = false
-        override fun start(onLux: (Float) -> Unit): Boolean = false
-        override fun stop() = Unit
-    }
     private val nightModeController by lazy {
         CarPlayNightModeController(
-            light = noOpLightSource,
-            scheduler = object : CarPlayNightModeController.Scheduler {
-                private val handler = Handler(Looper.getMainLooper())
-                override fun postDelayed(task: Runnable, delayMillis: Long) {
-                    handler.postDelayed(task, delayMillis)
-                }
-                override fun remove(task: Runnable) {
-                    handler.removeCallbacks(task)
-                }
-            },
             initialNight = darkMode,
             onNightChanged = { night ->
                 darkMode = night
@@ -430,17 +367,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private var controlRunningCount = 0
     private var lossSinceControlRunning = false
     private var sessionLog: SessionLogFile? = null
-    private var gestureFingerCount = 3
     private var settingsGestureHint: TextView? = null
-    private var gestureSequenceActive = false
-    private var gestureTracking = false
-    private var gestureStartX = 0f
-    private var gestureStartY = 0f
-    private var heldTouch: MotionEvent? = null
-    private var heldTouchContent: CarPlayVideoLayout? = null
-    private var heldTouchX = 0f
-    private var heldTouchY = 0f
-    private val sendHeldTouch = Runnable { flushHeldTouch() }
     private var recoveryPendingAfterMenu = false
     private var failurePendingAfterMenu: CarPlayStatus.Failed? = null
     private val shuttingDown = AtomicBoolean(false)
@@ -544,7 +471,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             AirPlayPersistence.saveWirelessEnabled(this, false)
         }
         if (runCatching { TvPlayBootstrap.ensure(this, AirPlayPersistence.loadMfiTarget(this)) }.isFailure) {
-            OwnScreenStart.start(this, Intent(this, TvPlayWorkbenchActivity::class.java), ::appendLog)
+            runCatching { startActivity(Intent(this, TvPlayWorkbenchActivity::class.java)) }
             finish()
             return
         }
@@ -555,8 +482,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             ?: nightModeOrNull(resources.configuration.uiMode) ?: true
         appNight = true
         logThemeState(ThemeModeDiagnostics.Source.CREATE, resources.configuration)
-        advancedAudioChannelMappingSupported =
-            resources.getBoolean(R.bool.config_advanced_audio_channel_mapping)
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         loadPersistedSettings()
         setContentView(buildContentView())
@@ -570,7 +495,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
                     } else if (menuOpen) {
                         closeQuickMenu(reconnect = false)
                     } else {
-                        showDiPlayHome()
+                        showTvPlayHome()
                     }
                 }
             },
@@ -595,17 +520,11 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     }
 
     private fun loadPersistedSettings() {
-        carPlayDock = CarPlayDock.load(this)
         carPlayNightMode = AirPlayPersistence.loadCarPlayNightMode(this)
-        nightSchedule = AirPlayPersistence.loadCarPlayNightSchedule(this)
         nightModeController.configure(
             carPlayNightMode,
             nightModeOrNull(resources.configuration.uiMode) ?: true,
-            15f,
-            ambientDelaySeconds,
-            nightSchedule,
         )
-        gestureFingerCount = 3
         displayScalePercent = AirPlayPersistence.loadDisplayScalePercent(this)
         displayScaleTenths = CarPlayDisplayScale.sanitize((displayScalePercent + 5) / 10)
         uiScalePercent = AirPlayPersistence.loadUiScalePercent(this)
@@ -613,9 +532,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         hevcSoftwareDecoderEnabled =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
-        advancedAudioChannelMapping =
-            advancedAudioChannelMappingSupported &&
-                AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         navigationStreamType = AirPlayPersistence.loadNavigationStreamType(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
@@ -630,14 +546,8 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             maximumDetectedHeightPixels = height
         }
         rightHandDrive = AirPlayPersistence.loadRightHandDrive(this)
-        hideTopBar = AirPlayPersistence.loadHideTopBar(this)
-        hideBottomBar = AirPlayPersistence.loadHideBottomBar(this)
-        temporarySystemBarsEnabled = AirPlayPersistence.loadTemporarySystemBars(this)
         safeAreaDrawOutside = AirPlayPersistence.loadSafeAreaDrawOutside(this)
         mainDisplayDisableSafeArea = AirPlayPersistence.loadMainDisplayDisableSafeArea(this)
-        blackCornerRadiusDp = AirPlayPersistence.loadBlackCornerRadiusDp(this)
-        blackCornerOverlay?.radiusDp = localCornerRadius()
-        if (blackCornerRadiusDp != CarPlayBlackCornerOverlay.IPHONE_MASK) clearIphoneCornerMask()
         loadConnectionSettings()
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
     }
@@ -799,12 +709,10 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         super.onResume()
         hostAppearanceResumed = true
         val savedNightMode = AirPlayPersistence.loadCarPlayNightMode(this)
-        val savedSchedule = AirPlayPersistence.loadCarPlayNightSchedule(this)
         val systemNight = nightModeOrNull(resources.configuration.uiMode) ?: true
-        if (savedNightMode != carPlayNightMode || savedSchedule != nightSchedule) {
+        if (savedNightMode != carPlayNightMode) {
             carPlayNightMode = savedNightMode
-            nightSchedule = savedSchedule
-            nightModeController.configure(carPlayNightMode, systemNight, 15f, ambientDelaySeconds, nightSchedule)
+            nightModeController.configure(carPlayNightMode, systemNight)
         }
         nightModeController.resume(systemNight)
         AppAppearanceRuntime.publishHost(this, darkMode)
@@ -823,22 +731,9 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         if (!menuOpen) loadConnectionSettings()
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
         showMissingWirelessPermission()
-        advancedAudioChannelMapping =
-            advancedAudioChannelMappingSupported &&
-                AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         connectionInstructionsView?.text = connectionInstructions(null)
-        var systemBarsChanged = false
-        if (!menuOpen) {
-            val savedHideTopBar = AirPlayPersistence.loadHideTopBar(this)
-            val savedHideBottomBar = AirPlayPersistence.loadHideBottomBar(this)
-            systemBarsChanged = hideTopBar != savedHideTopBar ||
-                hideBottomBar != savedHideBottomBar
-            hideTopBar = savedHideTopBar
-            hideBottomBar = savedHideBottomBar
-        }
         maybeStartCarPlay()
         applyFullscreenMode()
-        if (systemBarsChanged) refreshDisplaySizeAfterLayout()
         videoView?.post {
             val view = videoView ?: return@post
             if (view.width > 0 && view.height > 0) {
@@ -886,7 +781,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        cancelTemporarySystemBars()
         hostAppearanceResumed = false
         AppAppearanceRuntime.clearHost(this)
         nightModeController.pause()
@@ -913,7 +807,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
 
     override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
         super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
-        if (isInMultiWindowMode) cancelTemporarySystemBars()
         applyFullscreenMode()
         videoView?.post {
             val view = videoView ?: return@post
@@ -928,8 +821,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         }
         CarPlayScreen.destroyed(this)
         runCatching { unregisterReceiver(bluetoothOnReceiver) }
-        mainHandler.removeCallbacks(hideTemporarySystemBars)
-        dropHeldTouch()
         discardLastPicture()
         if (pictureCopyThreadStarted) pictureCopyThread.quitSafely()
         hostAppearanceResumed = false
@@ -964,10 +855,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             setOnTouchListener { view, event -> onHostTouch(view, event) }
         }
         root.addView(video, FrameLayout.LayoutParams(-1, -1))
-        blackCornerOverlay = CarPlayBlackCornerOverlay(this).also { overlay ->
-            overlay.radiusDp = localCornerRadius()
-            root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-        }
         root.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
 
         val waitingBindings = ProjectionWaitingView.build(
@@ -985,8 +872,8 @@ open class TvPlayProjectionActivity : ComponentActivity() {
                     restartCarPlay(getString(R.string.connecting_to_your_iphone))
                 }
             },
-            onWifiRecoveryClicked = { showDiPlayHome("wireless-recovery") },
-            onBackToWorkbenchClicked = { showDiPlayHome() },
+            onWifiRecoveryClicked = { showTvPlayHome("wireless-recovery") },
+            onBackToWorkbenchClicked = { showTvPlayHome() },
         )
         paintWaitingScreen = {
             waitingBindings.viewport.setBackgroundColor(WaitingScreenColors.of(appNight).background)
@@ -1032,7 +919,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         onResumeProjection = { closeQuickMenu(reconnect = false) },
         onReturnToWorkbench = {
             closeQuickMenu(reconnect = false)
-            showDiPlayHome()
+            showTvPlayHome()
         },
         onOpenPicturePanel = {
             closeQuickMenu(reconnect = false)
@@ -1073,7 +960,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             }
             AirPlayPersistence.saveCarPlayNightMode(this, carPlayNightMode)
             val systemNight = nightModeOrNull(resources.configuration.uiMode) ?: true
-            nightModeController.configure(carPlayNightMode, systemNight, 15f, ambientDelaySeconds, nightSchedule)
+            nightModeController.configure(carPlayNightMode, systemNight)
             nightModeController.resume(systemNight)
             syncAirPlayDarkMode(ThemeModeDiagnostics.Source.CARPLAY_MODE)
             rebuildQuickMenuInPlace()
@@ -1082,7 +969,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         onDisconnectAndExit = {
             closeQuickMenu(reconnect = false)
             CarPlayBackgroundSession.stop {
-                runOnUiThread { showDiPlayHome() }
+                runOnUiThread { showTvPlayHome() }
             }
         },
     )
@@ -1191,8 +1078,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
                 ).show()
             }
         }
-        val nativeMasks = blackCornerRadiusDp == CarPlayBlackCornerOverlay.IPHONE_MASK
-        val disableSafeArea = mainDisplayDisableSafeArea || nativeMasks
+        val disableSafeArea = mainDisplayDisableSafeArea
         val display = scaledDisplay.copy(
             safeArea = if (disableSafeArea) null else AirPlaySafeArea.toInsets(
                 mapping = AirPlayPersistence.loadSafeAreaRect(this, size.width, size.height),
@@ -1201,30 +1087,11 @@ open class TvPlayProjectionActivity : ComponentActivity() {
                 displayWidthPixels = scaledDisplay.widthPixels,
                 displayHeightPixels = scaledDisplay.heightPixels,
             ),
-            safeAreaDrawOutside = if (nativeMasks) false else safeAreaDrawOutside,
+            safeAreaDrawOutside = safeAreaDrawOutside,
             mainDisplayCornerMasks = if (disableSafeArea) true else null,
             mainDisplayDisableSafeArea = disableSafeArea,
-            useIphoneCornerMask = nativeMasks,
+            useIphoneCornerMask = false,
         )
-        val dock = CarPlayDock.load(this).also { sessionDock = it }
-        val viewAreas = CarPlayViewAreas.build(
-            display.widthPixels,
-            display.heightPixels,
-            listOf(
-                CarPlayViewAreas.Screen(
-                    display.widthPixels,
-                    display.heightPixels,
-                    portrait = display.heightPixels > display.widthPixels,
-                ),
-            ),
-            dock,
-            splitWindow = { null },
-            startPortrait = display.heightPixels > display.widthPixels,
-            sidePanel = false,
-            rightHandDrive = rightHandDrive,
-        )
-        pendingViewAreas = viewAreas
-        val declared = if (viewAreas == null) display else display.copy(viewAreas = viewAreas.areas, initialViewArea = viewAreas.current)
         val requestSummary = "Display request selected=${CarPlayUiScale.label(requestedPercent)} percent=$requestedPercent " +
             "surface=${size.width}x${size.height} resolution=${requestedResolutionPercent}% " +
             "base=${requestedResolutionDisplay.widthPixels}x${requestedResolutionDisplay.heightPixels} " +
@@ -1242,7 +1109,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             deviceId = TvPlayBootstrap.deviceId(airPlayIdentity),
             btMac = TvPlayBluetooth.localAddress(this) ?: TvPlayBootstrap.deviceId(airPlayIdentity),
             sourceVersion = "950.7.1",
-            main = declared,
+            main = display,
             cluster = null,
             rightHandDrive = rightHandDrive,
             hevc = sessionHevc,
@@ -1316,7 +1183,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             videoWidth = videoWidth,
             videoHeight = videoHeight,
             preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
-            advancedAudioChannelMapping = advancedAudioChannelMapping,
+            advancedAudioChannelMapping = false,
             audioFocusEnabled = AirPlayPersistence.loadAudioFocusEnabled(this),
             audioFocusAutoYield = AirPlayPersistence.loadAudioFocusAutoYield(this),
             mediaChannel = AirPlayPersistence.loadMediaAudioChannel(this),
@@ -1338,7 +1205,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             onMediaAudioChanged = CarPlayMediaKeys::onMediaAudioChanged,
             callEchoCancellation = AirPlayPersistence.loadCallEchoCancellation(this),
             callVoiceFilter = AirPlayPersistence.loadCallVoiceFilter(this),
-            callSpeakerphone = { AirPlayPersistence.loadCallSpeakerphone(this) },
             videoPacingDelayMillis = if (smoothVideo) smoothVideoDelayMillis(fps) else 0,
             mainVideoFrameRate = fps,
             vendorLowLatencyDecoder = AirPlayPersistence.loadLowLatencyDecoder(this),
@@ -1358,25 +1224,10 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         object : AirPlaySessionListener {
             private val diagnosticLog = sessionLog
 
-            override fun onCornerMask(session: AirPlaySession, png: ByteArray, displayWidth: Int) {
-                runOnUiThread {
-                    if (controllerGeneration != restartGeneration || shuttingDown.get() ||
-                        blackCornerRadiusDp != CarPlayBlackCornerOverlay.IPHONE_MASK) return@runOnUiThread
-                    val active = activeAirPlaySession
-                    if (active != null && active !== session) return@runOnUiThread
-                    pendingIphoneCornerMask = session to (png to displayWidth)
-                    if (active === session) installIphoneCornerMask(session, png, displayWidth)
-                }
-            }
-
             override fun onSessionActive(session: AirPlaySession) {
                 runOnUiThread {
                     if (controllerGeneration != restartGeneration) return@runOnUiThread
                     activeAirPlaySession = session
-                    val pending = pendingIphoneCornerMask
-                    if (pending?.first === session) {
-                        installIphoneCornerMask(session, pending.second.first, pending.second.second)
-                    } else clearIphoneCornerMask()
                     CarPlayBackgroundSession.active = true
                     LastConnectionProblem.clear(this@TvPlayProjectionActivity)
                     showConnectionHelp(null)
@@ -1413,7 +1264,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
                     if (controllerGeneration != restartGeneration || startupRetryStopped) return@runOnUiThread
                     startupRetryBudget.disconnected()
                     activeAirPlaySession = null
-                    clearIphoneCornerMask()
                     CarPlayBackgroundSession.active = false
                     if (menuOpen) {
                         recoveryPendingAfterMenu = true
@@ -1547,12 +1397,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             createStatusReporter(generation),
         )
         activeAirPlaySession = snapshot.controller.activeAirPlaySession()
-        if (blackCornerRadiusDp == CarPlayBlackCornerOverlay.IPHONE_MASK) {
-            snapshot.controller.activeIphoneCornerMask()?.let { (session, png, width) ->
-                activeAirPlaySession = session
-                installIphoneCornerMask(session, png, width)
-            }
-        }
         snapshot.sink.setScreenStreamActiveChangedListener { type, active ->
             onScreenStreamStateChanged(restartGeneration, type, active)
         }
@@ -1573,7 +1417,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         mfiTarget = AirPlayPersistence.loadMfiTarget(this)
         runCatching { TvPlayBootstrap.ensure(this, mfiTarget) }
         val config = createRuntimeConfig()
-        val effectiveSize = if (isMultiWindowActive() && !AirPlayPersistence.loadAdaptPipResolution(this) &&
+        val effectiveSize = if (isMultiWindowActive() &&
             maximumDetectedWidthPixels >= size.width && maximumDetectedHeightPixels >= size.height &&
             (maximumDetectedWidthPixels > size.width || maximumDetectedHeightPixels > size.height)) {
             DisplaySize(maximumDetectedWidthPixels, maximumDetectedHeightPixels)
@@ -1619,12 +1463,8 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             airPlayConfig.main.widthPixels,
             airPlayConfig.main.heightPixels,
             displayRotation(),
-            hideTopBar,
-            hideBottomBar,
             effectiveSize.width,
             effectiveSize.height,
-            viewAreas = pendingViewAreas,
-            statusBarShown = statusBarShown(),
         )
         sessionDisplay = display
         videoView?.let { updateVideoLayout(it.width, it.height) }
@@ -1709,9 +1549,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private fun isMultiWindowActive(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInMultiWindowMode
 
-    private fun statusBarShown(): Boolean? =
-        ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.statusBars())
-
     private fun applyDisplaySize(size: DisplaySize) {
         val display = sessionDisplay
         val layoutChanged = displayLayoutChanged(size)
@@ -1731,10 +1568,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         } else if (controller == null && display == null) {
             maybeStartCarPlay()
         } else if (display != null && !layoutChanged &&
-            statusBarHiddenByAnotherWindow(display, size.width, size.height, statusBarShown())) {
-            appendLog("Status bar hidden ${previous.width}x${previous.height} -> ${size.width}x${size.height}; keeping CarPlay session")
-            videoView?.let { updateVideoLayout(it.width, it.height) }
-        } else if (display != null && !layoutChanged &&
             size.width <= display.windowWidth && size.height <= display.windowHeight) {
             appendLog("Display resized ${previous.width}x${previous.height} -> ${size.width}x${size.height}; keeping CarPlay session")
             videoView?.let { updateVideoLayout(it.width, it.height) }
@@ -1748,18 +1581,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
 
     private fun displayLayoutChanged(newSize: DisplaySize? = activeDisplaySize): Boolean {
         val display = sessionDisplay ?: return false
-        if (display.rotation != displayRotation()) return true
-        if (display.hideTopBar != hideTopBar || display.hideBottomBar != hideBottomBar) return true
-        if (newSize != null && newSize.width > 0 && newSize.height > 0 &&
-            display.windowWidth > 0 && display.windowHeight > 0) {
-            val baseAspect = display.windowWidth.toDouble() / display.windowHeight
-            val currentAspect = newSize.width.toDouble() / newSize.height
-            val aspectDiff = abs(currentAspect / baseAspect - 1.0)
-            if (aspectDiff > 0.08 && AirPlayPersistence.loadAdaptPipResolution(this)) {
-                return true
-            }
-        }
-        return false
+        return display.rotation != displayRotation()
     }
 
     private fun contentRect(viewWidth: Int, viewHeight: Int): CarPlayVideoLayout =
@@ -1770,7 +1592,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             videoView = videoView,
             fallbackVideoView = fallbackVideoView,
             currentFallbackBounds = fallbackVideoBounds,
-            blackCornerOverlay = blackCornerOverlay,
             display = sessionDisplay,
             viewWidth = viewWidth,
             viewHeight = viewHeight,
@@ -1906,7 +1727,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         oldSink?.let(retiringSinks::add)
         sink = null
         sessionDisplay = null
-        clearIphoneCornerMask()
         discardLastPicture()
         val diagnosticLog = sessionLog
         teardownExecutor.execute {
@@ -1929,15 +1749,15 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         }
     }
 
-    private fun showDiPlayHome(page: String = "home") {
+    private fun showTvPlayHome(page: String = "home") {
         releaseCarPlayTouches()
-        OwnScreenStart.start(
-            this,
-            Intent(this, TvPlayWorkbenchActivity::class.java)
-                .putExtra("page", page)
-                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
-            ::appendLog,
-        )
+        runCatching {
+            startActivity(
+                Intent(this, TvPlayWorkbenchActivity::class.java)
+                    .putExtra("page", page)
+                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            )
+        }
     }
 
     private fun closeRetiringSink(owner: AndroidMediaSink) {
@@ -1948,7 +1768,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     }
 
     private fun openSettingsMenu() {
-        cancelTemporarySystemBars()
         if (menuOpen) return
         releaseCarPlayTouches()
         loadPersistedSettings()
@@ -2166,54 +1985,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
         if (menuOpen) return true
 
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                gestureSequenceActive = false
-                gestureTracking = false
-            }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                if (gestureFingerCount > 0 && event.pointerCount == gestureFingerCount && !gestureSequenceActive) {
-                    gestureSequenceActive = true
-                    gestureTracking = true
-                    gestureStartX = pointerCentroid(event, horizontal = true)
-                    gestureStartY = pointerCentroid(event, horizontal = false)
-                    releaseCarPlayTouches()
-                    return true
-                }
-            }
-        }
-
-        if (gestureSequenceActive) {
-            if (event.actionMasked == MotionEvent.ACTION_POINTER_UP || event.pointerCount != gestureFingerCount) {
-                gestureTracking = false
-            }
-            if (!gestureTracking || event.pointerCount != gestureFingerCount) {
-                if (event.actionMasked == MotionEvent.ACTION_UP ||
-                    event.actionMasked == MotionEvent.ACTION_CANCEL
-                ) {
-                    gestureSequenceActive = false
-                    gestureTracking = false
-                }
-                return true
-            }
-            if (event.actionMasked == MotionEvent.ACTION_MOVE) {
-                val deltaX = abs(pointerCentroid(event, horizontal = true) - gestureStartX)
-                val deltaY = pointerCentroid(event, horizontal = false) - gestureStartY
-                if (
-                    abs(deltaY) >= dp(SETTINGS_SWIPE_DISTANCE_DP) &&
-                    abs(deltaY) >= deltaX * SETTINGS_SWIPE_DIRECTION_RATIO
-                ) {
-                    gestureTracking = false
-                    if (deltaY > 0) {
-                        gestureSequenceActive = false
-                        openSettingsMenu()
-                    }
-                    return true
-                }
-            }
-            return true
-        }
-
         val content = contentRect(view.width, view.height)
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             touchOutsideContent = !content.contains(event.x, event.y)
@@ -2224,74 +1995,18 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             }
             return true
         }
-        if (gestureFingerCount > 0 && holdTouch(event, content)) return true
-        flushHeldTouch()
         val contacts = CarPlayTouchMapper.contacts(event, content)
         controller?.sendTouch(contacts)
         return true
     }
 
     private fun releaseCarPlayTouches() {
-        dropHeldTouch()
         controller?.sendTouch(emptyList())
-    }
-
-    private fun holdTouch(event: MotionEvent, content: CarPlayVideoLayout): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                dropHeldTouch()
-                heldTouch = MotionEvent.obtain(event)
-                heldTouchContent = content
-                heldTouchX = event.x
-                heldTouchY = event.y
-                mainHandler.postDelayed(sendHeldTouch, SETTINGS_SWIPE_HOLD_MILLIS)
-                return true
-            }
-            MotionEvent.ACTION_CANCEL -> if (heldTouch != null) {
-                dropHeldTouch()
-                return true
-            }
-            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_POINTER_DOWN -> {
-                val held = heldTouch ?: return false
-                val moved = hypot((event.getX(0) - heldTouchX).toDouble(), (event.getY(0) - heldTouchY).toDouble())
-                if (moved > ViewConfiguration.get(this).scaledTouchSlop) return false
-                held.recycle()
-                heldTouch = MotionEvent.obtain(event)
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun flushHeldTouch() {
-        mainHandler.removeCallbacks(sendHeldTouch)
-        val held = heldTouch ?: return
-        val content = heldTouchContent
-        heldTouch = null
-        heldTouchContent = null
-        if (content != null) controller?.sendTouch(CarPlayTouchMapper.contacts(held, content))
-        held.recycle()
-    }
-
-    private fun dropHeldTouch() {
-        mainHandler.removeCallbacks(sendHeldTouch)
-        heldTouch?.recycle()
-        heldTouch = null
-        heldTouchContent = null
-    }
-
-    private fun pointerCentroid(event: MotionEvent, horizontal: Boolean): Float {
-        var total = 0f
-        for (index in 0 until event.pointerCount) {
-            total += if (horizontal) event.getX(index) else event.getY(index)
-        }
-        return total / event.pointerCount
     }
 
     private fun onScreenStreamStateChanged(generation: Int, type: Int, active: Boolean) {
         runOnUiThread {
             if (shuttingDown.get() || generation != restartGeneration) return@runOnUiThread
-            if (type == SCREEN_TYPE_MAIN && !active) clearIphoneCornerMask()
             if (active) {
                 activeScreenStreamTypes.add(type)
             } else {
@@ -2386,43 +2101,15 @@ open class TvPlayProjectionActivity : ComponentActivity() {
 
     private fun applyFullscreenMode() {
         val multiWindow = isMultiWindowActive()
-        val hideTop = hideTopBar && !multiWindow
-        val hideBottom = hideBottomBar && !multiWindow
-        WindowCompat.setDecorFitsSystemWindows(window, !(hideTop && hideBottom))
+        WindowCompat.setDecorFitsSystemWindows(window, multiWindow)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
-        val peek = temporarySystemBarsVisible && !multiWindow
-        if (hideTop && !peek) {
-            controller.hide(WindowInsetsCompat.Type.statusBars())
+        if (!multiWindow) {
+            controller.hide(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
         } else {
-            controller.show(WindowInsetsCompat.Type.statusBars())
-        }
-        if (hideBottom && !peek) {
-            controller.hide(WindowInsetsCompat.Type.navigationBars())
-        } else {
-            controller.show(WindowInsetsCompat.Type.navigationBars())
+            controller.show(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
         }
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-    }
-
-    private fun showTemporarySystemBars(): Boolean {
-        if (!temporarySystemBarsEnabled || (!hideTopBar && !hideBottomBar) ||
-            gestureFingerCount <= 0 || isMultiWindowActive()) {
-            return false
-        }
-        mainHandler.removeCallbacks(hideTemporarySystemBars)
-        temporarySystemBarsVisible = true
-        applyFullscreenMode()
-        mainHandler.postDelayed(hideTemporarySystemBars, 5_000L)
-        return true
-    }
-
-    private fun cancelTemporarySystemBars() {
-        mainHandler.removeCallbacks(hideTemporarySystemBars)
-        if (temporarySystemBarsVisible) {
-            temporarySystemBarsVisible = false
-            applyFullscreenMode()
-        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
@@ -2451,9 +2138,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
         const val AUDIO_CAPTURE_MARKER = "audio-capture.enabled"
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
-        const val SETTINGS_SWIPE_DISTANCE_DP = 72
-        const val SETTINGS_SWIPE_DIRECTION_RATIO = 1.15f
-        const val SETTINGS_SWIPE_HOLD_MILLIS = 80L
     }
 
     private data class DisplaySize(val width: Int, val height: Int)
@@ -2466,27 +2150,13 @@ internal data class CarPlaySessionDisplay(
     val width: Int,
     val height: Int,
     val rotation: Int,
-    val hideTopBar: Boolean,
-    val hideBottomBar: Boolean,
     val windowWidth: Int,
     val windowHeight: Int,
-    val viewAreas: CarPlayViewAreas? = null,
-    val statusBarShown: Boolean? = null,
 )
-
-internal fun statusBarHiddenByAnotherWindow(
-    display: CarPlaySessionDisplay,
-    width: Int,
-    height: Int,
-    statusBarShown: Boolean?,
-): Boolean =
-    !display.hideTopBar && display.statusBarShown == true && statusBarShown == false &&
-        width == display.windowWidth && height > display.windowHeight
 
 /** Process-local hand-off for keeping the CarPlay session alive while no Activity is visible. */
 internal object CarPlayBackgroundSession {
     @Volatile var active = false
-    @Volatile var callPopupReady = false
     @Volatile var hotspotReady: CarPlayStatus.HotspotReady? = null
     private var stopAction: (((() -> Unit)) -> Unit)? = null
     private var stopping = false
@@ -2546,7 +2216,6 @@ internal object CarPlayBackgroundSession {
         stop: (() -> Unit) -> Unit,
     ) {
         if (this.controller !== controller) {
-            callPopupReady = false
             hotspotReady = null
         }
         this.stopAction = stop
@@ -2565,7 +2234,6 @@ internal object CarPlayBackgroundSession {
         sink = null
         if (!keepOwner) { stopAction = null; owner = null }
         active = false
-        callPopupReady = false
         hotspotReady = null
         width = 0
         height = 0

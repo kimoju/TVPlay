@@ -79,7 +79,7 @@ class LauncherIntentTest {
         controller = Robolectric.buildActivity(TvPlayWorkbenchActivity::class.java,
             Intent().putExtra("page", "settings")).create()
         val activity = controller!!.get()
-        ReflectionHelpers.setField(activity, "connectionSettingsReturnCategory", SettingsCategory.ADVANCED)
+        ReflectionHelpers.setField(activity, "connectionSettingsReturnCategory", SettingsCategory.ABOUT)
         ReflectionHelpers.callInstanceMethod<Unit>(activity, "onNewIntent",
             ReflectionHelpers.ClassParameter(Intent::class.java, launcher()))
         assertEquals("home", ReflectionHelpers.getField<String>(activity, "page"))

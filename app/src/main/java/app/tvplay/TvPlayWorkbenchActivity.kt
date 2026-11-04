@@ -4,14 +4,9 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.graphics.Typeface
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.text.InputType
-import android.util.Log
 import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
@@ -40,7 +35,6 @@ internal enum class SettingsCategory(val title: String) {
     DISPLAY("显示与画质"),
     AUDIO("音频与语音"),
     ABOUT("关于与诊断"),
-    ADVANCED("高级设置"),
 }
 
 /**
@@ -58,15 +52,12 @@ class TvPlayWorkbenchActivity : ComponentActivity(), AppAppearanceOwner {
     private val TEXT get() = palette.primaryText
     private val MUTED get() = palette.secondaryText
 
-    private val handler = Handler(Looper.getMainLooper())
     private var page: String = "home"
     private var selectedCategory: SettingsCategory = SettingsCategory.CONNECTION
     private var connectionSettingsReturnCategory: SettingsCategory? = null
     private var setupError: String? = null
     private var backupServer: Any? = null
     private var removeHostAppearanceObserver: (() -> Unit)? = null
-    private var testToneTrack: AudioTrack? = null
-    private var toneStop: Runnable? = null
 
     private val settingsRepository by lazy { TvPlaySettingsRepository(this) }
     private val stagePane by lazy { WorkbenchStagePane(this, settingsRepository) }
@@ -155,10 +146,6 @@ class TvPlayWorkbenchActivity : ComponentActivity(), AppAppearanceOwner {
     }
 
     override fun onDestroy() {
-        toneStop?.let(handler::removeCallbacks)
-        toneStop = null
-        testToneTrack?.let { runCatching { it.stop(); it.release() } }
-        testToneTrack = null
         removeHostAppearanceObserver?.invoke()
         removeHostAppearanceObserver = null
         super.onDestroy()
@@ -200,7 +187,7 @@ class TvPlayWorkbenchActivity : ComponentActivity(), AppAppearanceOwner {
                 putExtra("picture_controls", true)
             }
         }
-        OwnScreenStart.start(this, launch)
+        startActivity(launch)
     }
 
     private fun markReconnectNeeded() {
@@ -348,10 +335,6 @@ class TvPlayWorkbenchActivity : ComponentActivity(), AppAppearanceOwner {
 
         override fun onOpenPictureControls() {
             openCarPlayScreen(pictureControls = true)
-        }
-
-        override fun onPlayTestTone(streamType: Int) {
-            playTestTone(streamType)
         }
 
         override fun onShowDiagnosticReport() {
@@ -537,44 +520,6 @@ class TvPlayWorkbenchActivity : ComponentActivity(), AppAppearanceOwner {
         appDialogBuilder().setTitle(getString(R.string.view_diagnostic_report))
             .setView(ScrollView(appDialogContext()).apply { addView(body) })
             .setPositiveButton(getString(R.string.close), null).show()
-    }
-
-    private fun playTestTone(streamType: Int) {
-        toneStop?.let { handler.removeCallbacks(it) }
-        toneStop = null
-        testToneTrack?.let { runCatching { it.stop(); it.release() } }
-        testToneTrack = null
-        var candidate: AudioTrack? = null
-        val track = try {
-            val pcm = assets.open("navigation_test.pcm").use { it.readBytes() }
-            AudioTrack(
-                streamType,
-                44100,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                pcm.size,
-                AudioTrack.MODE_STREAM,
-            ).also {
-                candidate = it
-                check(it.state == AudioTrack.STATE_INITIALIZED)
-                check(it.write(pcm, 0, pcm.size) == pcm.size)
-                it.play()
-            }
-        } catch (error: Exception) {
-            val state = candidate?.state ?: AudioTrack.STATE_UNINITIALIZED
-            candidate?.let { runCatching { it.release() } }
-            Log.w("TVPlay", "playTestTone streamType=$streamType unavailable", error)
-            toast(getString(R.string.audio_stream_unavailable, streamType, state))
-            return
-        }
-        testToneTrack = track
-        val stop = Runnable {
-            runCatching { track.stop(); track.release() }
-            if (testToneTrack === track) testToneTrack = null
-            toneStop = null
-        }
-        toneStop = stop
-        handler.postDelayed(stop, 2500L)
     }
 
     private fun column(): LinearLayout = LinearLayout(this).apply {

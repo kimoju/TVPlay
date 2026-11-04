@@ -48,7 +48,7 @@ import org.robolectric.shadows.ShadowMediaCodec
 class SmoothVideoHostLifecycleTest {
     private lateinit var activity: TvPlayProjectionActivity
     private lateinit var controllerConstruction: MockedConstruction<CarPlayController>
-    private val display = CarPlaySessionDisplay(1920, 990, Surface.ROTATION_0, true, true, 1920, 990)
+    private val display = CarPlaySessionDisplay(1920, 990, Surface.ROTATION_0, 1920, 990)
     private val sizeClass = Class.forName("app.tvplay.TvPlayProjectionActivity\$DisplaySize")
     private val ownedSinks = mutableListOf<AndroidMediaSink>()
     private val surfaces = mutableListOf<Pair<SurfaceTexture, Surface>>()
@@ -57,7 +57,6 @@ class SmoothVideoHostLifecycleTest {
     @Before fun setUp() {
         CarPlayBackgroundSession.clear()
         activity = Robolectric.buildActivity(TvPlayProjectionActivity::class.java).get()
-        AirPlayPersistence.saveAdaptPipResolution(activity, false)
         AirPlayPersistence.saveMfiTarget(activity, MfiTarget.USB_CH341)
         // Host startup without vendor-service workers or real transports.
         controllerConstruction = mockConstruction(CarPlayController::class.java) { controller, _ ->

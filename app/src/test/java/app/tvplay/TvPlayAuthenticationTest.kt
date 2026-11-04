@@ -24,13 +24,11 @@ import org.robolectric.annotation.LooperMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 @LooperMode(LooperMode.Mode.PAUSED)
-class DiPlayAuthenticationTest {
+class TvPlayAuthenticationTest {
     private val context get() = RuntimeEnvironment.getApplication()
     private val directory get() = File(context.noBackupFilesDir, "offline-mfi")
 
     @Before fun setUp() {
-        // The JVM test host has no vehicle SOME/IP gateway.
-        shadowOf(context).declareActionUnbindable("com.ts.car.someip.SomeIpServerService")
         TvPlayBootstrap::class.java.getDeclaredField("ready").apply { isAccessible = true }
             .setBoolean(null, false)
     }

@@ -198,7 +198,7 @@ class CarPlayMediaFocusForwardingTest {
         clearInitialGrant: Boolean = true): AudioManager.OnAudioFocusChangeListener {
         `when`(controller.nowPlayingSnapshot()).thenReturn(CarPlayNowPlaying())
         CarPlayBackgroundSession.store(controller, sink, 800, 480, Any(),
-            CarPlaySessionDisplay(800, 480, Surface.ROTATION_0, false, false, 800, 480)) {}
+            CarPlaySessionDisplay(800, 480, Surface.ROTATION_0, 800, 480)) {}
         CarPlayMediaKeys.attach(app, controller)
         CarPlayMediaKeys.onMediaAudioChanged(true)
         shadowOf(Looper.getMainLooper()).idle()

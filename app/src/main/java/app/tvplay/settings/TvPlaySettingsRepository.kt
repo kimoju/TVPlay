@@ -3,9 +3,7 @@ package app.tvplay.settings
 import android.content.Context
 import app.tvplay.AirPlayPersistence
 import app.tvplay.AppAppearance
-import app.tvplay.CarPlayDock
 import app.tvplay.CarPlayNightMode
-import app.tvplay.CarPlayNightSchedule
 import app.tvplay.DefaultConnectionMode
 import app.tvplay.TvPlayPreferences
 import app.tvplay.airplay.AirPlayIdentity
@@ -172,17 +170,9 @@ internal class TvPlaySettingsRepository(private val context: Context) {
             get() = AirPlayPersistence.loadCarPlayNightMode(context)
             set(value) = AirPlayPersistence.saveCarPlayNightMode(context, value)
 
-        var carPlayNightSchedule: CarPlayNightSchedule
-            get() = AirPlayPersistence.loadCarPlayNightSchedule(context)
-            set(value) = AirPlayPersistence.saveCarPlayNightSchedule(context, value)
-
         var appAppearance: AppAppearance
             get() = AirPlayPersistence.loadAppAppearance(context)
             set(value) = AirPlayPersistence.saveAppAppearance(context, value)
-
-        var carPlayDock: CarPlayDock
-            get() = CarPlayDock.load(context)
-            set(value) = CarPlayDock.save(context, value)
 
         var rightHandDrive: Boolean
             get() = AirPlayPersistence.loadRightHandDrive(context)
@@ -200,22 +190,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
             get() = AirPlayPersistence.loadMaximumDetectedDisplay(context)
             set(value) = AirPlayPersistence.saveMaximumDetectedDisplay(context, value.first, value.second)
 
-        var adaptPipResolution: Boolean
-            get() = AirPlayPersistence.loadAdaptPipResolution(context)
-            set(value) = AirPlayPersistence.saveAdaptPipResolution(context, value)
-
-        var hideTopBar: Boolean
-            get() = AirPlayPersistence.loadHideTopBar(context)
-            set(value) = AirPlayPersistence.saveHideTopBar(context, value)
-
-        var hideBottomBar: Boolean
-            get() = AirPlayPersistence.loadHideBottomBar(context)
-            set(value) = AirPlayPersistence.saveHideBottomBar(context, value)
-
-        var temporarySystemBars: Boolean
-            get() = AirPlayPersistence.loadTemporarySystemBars(context)
-            set(value) = AirPlayPersistence.saveTemporarySystemBars(context, value)
-
         var safeAreaDrawOutside: Boolean
             get() = AirPlayPersistence.loadSafeAreaDrawOutside(context)
             set(value) = AirPlayPersistence.saveSafeAreaDrawOutside(context, value)
@@ -223,10 +197,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
         var mainDisplayDisableSafeArea: Boolean
             get() = AirPlayPersistence.loadMainDisplayDisableSafeArea(context)
             set(value) = AirPlayPersistence.saveMainDisplayDisableSafeArea(context, value)
-
-        var blackCornerRadiusDp: Int
-            get() = AirPlayPersistence.loadBlackCornerRadiusDp(context)
-            set(value) = AirPlayPersistence.saveBlackCornerRadiusDp(context, value)
 
         fun loadSafeAreaRect(widthPixels: Int, heightPixels: Int): SafeAreaRect? =
             AirPlayPersistence.loadSafeAreaRect(context, widthPixels, heightPixels)
@@ -248,10 +218,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
         var disableMediaKeyAudioFocus: Boolean
             get() = AirPlayPersistence.loadDisableMediaKeyAudioFocus(context)
             set(value) = AirPlayPersistence.saveDisableMediaKeyAudioFocus(context, value)
-
-        var advancedAudioChannelMapping: Boolean
-            get() = AirPlayPersistence.loadAdvancedAudioChannelMapping(context)
-            set(value) = AirPlayPersistence.saveAdvancedAudioChannelMapping(context, value)
 
         var mediaAudioChannel: Int
             get() = AirPlayPersistence.loadMediaAudioChannel(context)
@@ -298,10 +264,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
         var callVoiceFilter: Boolean
             get() = AirPlayPersistence.loadCallVoiceFilter(context)
             set(value) = AirPlayPersistence.saveCallVoiceFilter(context, value)
-
-        var callSpeakerphone: Boolean
-            get() = AirPlayPersistence.loadCallSpeakerphone(context)
-            set(value) = AirPlayPersistence.saveCallSpeakerphone(context, value)
     }
 
     internal class IdentitySettings(private val context: Context) {

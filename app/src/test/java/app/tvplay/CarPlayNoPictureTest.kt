@@ -176,7 +176,7 @@ class CarPlayNoPictureTest {
         val controller = mock(CarPlayController::class.java)
         `when`(controller.nowPlayingSnapshot()).thenReturn(CarPlayNowPlaying())
         CarPlayBackgroundSession.store(controller, sink, 1280, 720, Any(),
-            CarPlaySessionDisplay(1280, 720, Surface.ROTATION_0, false, false, 1280, 720)) {}
+            CarPlaySessionDisplay(1280, 720, Surface.ROTATION_0, 1280, 720)) {}
         val host = host()
         ReflectionHelpers.setField(host, "smoothVideo", false)
         assertTrue(ReflectionHelpers.callInstanceMethod<Boolean>(host, "adoptBackgroundSession"))

@@ -40,7 +40,6 @@ object AirPlayPersistence {
     private const val KEY_UI_SCALE_PERCENT = "ui_scale_percent"
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
-    private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
     private const val KEY_AUDIO_FOCUS_ENABLED = "audio_focus_enabled"
     private const val KEY_AUDIO_FOCUS_AUTO_YIELD = "audio_focus_auto_yield"
     private const val KEY_NAVIGATION_PROMPT_AUDIO_FOCUS = "navigation_prompt_audio_focus"
@@ -66,8 +65,6 @@ object AirPlayPersistence {
     private const val KEY_OEM_LABEL = "oem_label"
     private const val KEY_APP_APPEARANCE = "app_appearance"
     private const val KEY_CARPLAY_NIGHT_MODE = "carplay_night_mode"
-    private const val KEY_CARPLAY_NIGHT_START = "carplay_night_start_minute"
-    private const val KEY_CARPLAY_NIGHT_END = "carplay_night_end_minute"
     private const val KEY_FPS = "display_fps"
     private const val KEY_MEDIA_BUFFER_MS = "media_buffer_ms" // wireless; was shared by both transports
     private const val KEY_WIRED_MEDIA_BUFFER_MS = "wired_media_buffer_ms"
@@ -77,7 +74,6 @@ object AirPlayPersistence {
     private const val KEY_CAR_BLUETOOTH_AUDIO = "car_bluetooth_audio"
     private const val KEY_CALL_ECHO_CANCELLATION = "call_echo_cancellation"
     private const val KEY_CALL_VOICE_FILTER = "call_voice_filter"
-    private const val KEY_CALL_SPEAKERPHONE = "call_speakerphone"
     private const val KEY_SMOOTH_VIDEO = "smooth_video"
     private const val KEY_MTK_DECODER_TUNING = "mtk_decoder_tuning"
     private const val KEY_DIRECT_VIDEO_OUTPUT = "direct_video_output"
@@ -88,13 +84,8 @@ object AirPlayPersistence {
     private const val KEY_MAX_DETECTED_WIDTH = "display_max_detected_width"
     private const val KEY_MAX_DETECTED_HEIGHT = "display_max_detected_height"
     private const val KEY_RIGHT_HAND_DRIVE = "right_hand_drive"
-    private const val KEY_HIDE_TOP_BAR = "hide_top_bar"
-    private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
-    private const val KEY_TEMPORARY_SYSTEM_BARS = "temporary_system_bars"
     private const val KEY_SAFE_AREA_DRAW_OUTSIDE = "safe_area_draw_outside"
     private const val KEY_MAIN_DISPLAY_DISABLE_SAFE_AREA = "main_display_disable_safe_area"
-    private const val KEY_BLACK_CORNER_RADIUS = "black_corner_radius_dp"
-    private const val KEY_ADAPT_PIP_RESOLUTION = "adapt_pip_resolution"
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     private const val KEY_EXTERNAL_CONTROLLER = "external_controller"
     private const val KEY_MFI_TARGET = "mfi_target"
@@ -164,16 +155,6 @@ object AirPlayPersistence {
     fun saveHevcSoftwareDecoderEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_HEVC_SOFTWARE_DECODER, enabled)
-            .apply()
-    }
-
-    fun loadAdvancedAudioChannelMapping(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_ADVANCED_AUDIO_CHANNEL_MAPPING, false)
-
-    fun saveAdvancedAudioChannelMapping(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_ADVANCED_AUDIO_CHANNEL_MAPPING, enabled)
             .apply()
     }
 
@@ -547,24 +528,6 @@ object AirPlayPersistence {
             .putString(KEY_CARPLAY_NIGHT_MODE, mode.key).apply()
     }
 
-    fun loadCarPlayNightSchedule(context: Context): CarPlayNightSchedule {
-        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val defaults = CarPlayNightSchedule()
-        val start = preferences.getInt(KEY_CARPLAY_NIGHT_START, defaults.startMinute)
-        val end = preferences.getInt(KEY_CARPLAY_NIGHT_END, defaults.endMinute)
-        return CarPlayNightSchedule(
-            start.takeIf { it in 0 until 24 * 60 } ?: defaults.startMinute,
-            end.takeIf { it in 0 until 24 * 60 } ?: defaults.endMinute,
-        )
-    }
-
-    fun saveCarPlayNightSchedule(context: Context, schedule: CarPlayNightSchedule) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putInt(KEY_CARPLAY_NIGHT_START, schedule.startMinute)
-            .putInt(KEY_CARPLAY_NIGHT_END, schedule.endMinute)
-            .apply()
-    }
-
     fun loadFps(context: Context): Int = AirPlayDisplaySettings.sanitizeFps(
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_FPS, 30),
@@ -683,13 +646,6 @@ object AirPlayPersistence {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_CALL_VOICE_FILTER, enabled).apply()
     }
 
-    fun loadCallSpeakerphone(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_CALL_SPEAKERPHONE, false)
-
-    fun saveCallSpeakerphone(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_CALL_SPEAKERPHONE, enabled).apply()
-    }
-
     fun saveFps(context: Context, fps: Int) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putInt(KEY_FPS, AirPlayDisplaySettings.sanitizeFps(fps))
@@ -743,13 +699,6 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadAdaptPipResolution(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ADAPT_PIP_RESOLUTION, false)
-
-    fun saveAdaptPipResolution(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ADAPT_PIP_RESOLUTION, enabled).apply()
-    }
-
     fun loadRightHandDrive(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_RIGHT_HAND_DRIVE, false)
@@ -757,37 +706,6 @@ object AirPlayPersistence {
     fun saveRightHandDrive(context: Context, rightHandDrive: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_RIGHT_HAND_DRIVE, rightHandDrive)
-            .apply()
-    }
-
-    fun loadHideTopBar(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_HIDE_TOP_BAR, true)
-
-    fun saveHideTopBar(context: Context, hide: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_HIDE_TOP_BAR, hide)
-            .apply()
-    }
-
-    fun loadHideBottomBar(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_HIDE_BOTTOM_BAR, true)
-
-    fun saveHideBottomBar(context: Context, hide: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_HIDE_BOTTOM_BAR, hide)
-            .apply()
-    }
-
-    /** Optional three-finger upward reveal; does not alter the saved bar visibility preference. */
-    fun loadTemporarySystemBars(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_TEMPORARY_SYSTEM_BARS, false)
-
-    fun saveTemporarySystemBars(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_TEMPORARY_SYSTEM_BARS, enabled)
             .apply()
     }
 
@@ -810,18 +728,6 @@ object AirPlayPersistence {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_MAIN_DISPLAY_DISABLE_SAFE_AREA, disable)
             .apply()
-    }
-
-    /** Local video overlay; does not alter the iPhone's display or safe-area negotiation. */
-    fun loadBlackCornerRadiusDp(context: Context): Int =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt(KEY_BLACK_CORNER_RADIUS, 0)
-            .takeIf { it in CarPlayBlackCornerOverlay.RADII_DP } ?: 0
-
-    fun saveBlackCornerRadiusDp(context: Context, value: Int) {
-        require(value in CarPlayBlackCornerOverlay.RADII_DP)
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putInt(KEY_BLACK_CORNER_RADIUS, value).apply()
     }
 
     fun loadSafeAreaRect(context: Context, widthPixels: Int, heightPixels: Int): SafeAreaRect? {

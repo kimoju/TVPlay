@@ -8,8 +8,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppAppearanceTest {
-    private val schedule = CarPlayNightSchedule(startMinute = 18 * 60, endMinute = 6 * 60)
-
     @After fun resetRuntime() = AppAppearanceRuntime.resetForTest()
 
     @Test fun stableKeysRoundTripAndUnknownValuesDefaultToDark() {
@@ -22,26 +20,21 @@ class AppAppearanceTest {
 
     @Test fun explicitAppearancesIgnoreCarPlayAndHostState() {
         for (mode in CarPlayNightMode.entries) {
-            assertTrue(resolveAppNight(AppAppearance.DARK, mode, schedule, false, 12 * 60, false))
-            assertFalse(resolveAppNight(AppAppearance.LIGHT, mode, schedule, true, 23 * 60, true))
+            assertTrue(resolveAppNight(AppAppearance.DARK, mode, false, false))
+            assertFalse(resolveAppNight(AppAppearance.LIGHT, mode, true, true))
         }
     }
 
     @Test fun autoUsesTheLiveHostResultWhenAvailable() {
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.DAY, schedule, false, 12 * 60, true))
-        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.NIGHT, schedule, true, 23 * 60, false))
+        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.DAY, false, true))
+        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.NIGHT, true, false))
     }
 
     @Test fun autoFallsBackToTheSavedCarPlayPolicyOutsideTheHost() {
-        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.DAY, schedule, true, 23 * 60, null))
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.NIGHT, schedule, false, 12 * 60, null))
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SYSTEM, schedule, true, 12 * 60, null))
-        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SYSTEM, schedule, false, 23 * 60, null))
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.AMBIENT, schedule, true, 12 * 60, null))
-        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.AMBIENT, schedule, false, 23 * 60, null))
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SCHEDULE, schedule, false, 23 * 60, null))
-        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SCHEDULE, schedule, false, 0, null))
-        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SCHEDULE, schedule, true, 12 * 60, null))
+        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.DAY, true, null))
+        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.NIGHT, false, null))
+        assertTrue(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SYSTEM, true, null))
+        assertFalse(resolveAppNight(AppAppearance.AUTO, CarPlayNightMode.SYSTEM, false, null))
     }
 
     @Test fun runtimePublishesOnlyChangesAndProtectsTheCurrentOwner() {
@@ -76,12 +69,5 @@ class AppAppearanceTest {
 
         assertTrue(failure is IllegalStateException)
         assertEquals("observer failed", failure?.message)
-    }
-
-    @Test fun appearanceRepaintWaitsForEitherWheelKeyLearningPath() {
-        assertFalse(shouldDeferAppearanceRender(windowKeyLearning = false, serviceKeyLearning = false))
-        assertTrue(shouldDeferAppearanceRender(windowKeyLearning = true, serviceKeyLearning = false))
-        assertTrue(shouldDeferAppearanceRender(windowKeyLearning = false, serviceKeyLearning = true))
-        assertTrue(shouldDeferAppearanceRender(windowKeyLearning = true, serviceKeyLearning = true))
     }
 }

@@ -31,14 +31,4 @@ class CarPlayNightModePersistenceTest {
             assertEquals(60, AirPlayPersistence.loadFps(context))
         }
     }
-
-    @Test fun scheduleTimesPersistAndInvalidStoredMinutesUseDefaults() {
-        assertEquals(CarPlayNightSchedule(), AirPlayPersistence.loadCarPlayNightSchedule(context))
-        val custom = CarPlayNightSchedule(19 * 60 + 30, 5 * 60 + 15)
-        AirPlayPersistence.saveCarPlayNightSchedule(context, custom)
-        assertEquals(custom, AirPlayPersistence.loadCarPlayNightSchedule(context))
-        prefs.edit().putInt("carplay_night_start_minute", -1)
-            .putInt("carplay_night_end_minute", 24 * 60).apply()
-        assertEquals(CarPlayNightSchedule(), AirPlayPersistence.loadCarPlayNightSchedule(context))
-    }
 }

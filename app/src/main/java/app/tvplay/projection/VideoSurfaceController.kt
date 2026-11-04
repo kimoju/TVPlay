@@ -2,7 +2,6 @@ package app.tvplay.projection
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.graphics.RectF
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Handler
@@ -13,7 +12,6 @@ import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
-import app.tvplay.CarPlayBlackCornerOverlay
 import app.tvplay.CarPlaySessionDisplay
 import app.tvplay.CarPlaySurfaceBounds
 import app.tvplay.VideoDecoderInfo
@@ -36,19 +34,6 @@ internal object VideoSurfaceController {
         if (display == null) {
             return CarPlayVideoLayout(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
         }
-        display.viewAreas?.let { areas ->
-            val area = areas.layoutArea(areas.current)
-            if (area.width != display.width || area.height != display.height) {
-                val scaleX = viewWidth.toFloat() / area.width
-                val scaleY = viewHeight.toFloat() / area.height
-                return CarPlayVideoLayout(
-                    -area.originX * scaleX,
-                    -area.originY * scaleY,
-                    display.width * scaleX,
-                    display.height * scaleY,
-                )
-            }
-        }
         return CarPlayVideoLayout.fit(display.width, display.height, viewWidth, viewHeight)
     }
 
@@ -56,7 +41,6 @@ internal object VideoSurfaceController {
         videoView: View?,
         fallbackVideoView: SurfaceView?,
         currentFallbackBounds: CarPlaySurfaceBounds?,
-        blackCornerOverlay: CarPlayBlackCornerOverlay?,
         display: CarPlaySessionDisplay?,
         viewWidth: Int,
         viewHeight: Int,
@@ -64,9 +48,6 @@ internal object VideoSurfaceController {
         val view = videoView ?: return currentFallbackBounds
         if (viewWidth <= 0 || viewHeight <= 0) return currentFallbackBounds
         val content = computeContentRect(display, viewWidth, viewHeight)
-        blackCornerOverlay?.setContentBounds(
-            RectF(content.left, content.top, content.left + content.width, content.top + content.height),
-        )
         if (fallbackVideoView != null) {
             val bounds = CarPlaySurfaceBounds.from(content)
             if (currentFallbackBounds != bounds) {

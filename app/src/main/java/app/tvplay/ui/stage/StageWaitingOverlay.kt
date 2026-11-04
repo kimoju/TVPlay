@@ -56,6 +56,7 @@ object StageWaitingOverlay {
         onSettingsClicked: () -> Unit,
         onDisconnectClicked: () -> Unit,
         onBluetoothSettingsClicked: (() -> Unit)? = null,
+        onSwitchModeClicked: (() -> Unit)? = null,
     ): ProjectionWaitingStageBindings {
         val density = context.resources.displayMetrics.density
         val pad = (24 * density).toInt()
@@ -152,6 +153,18 @@ object StageWaitingOverlay {
         } else {
             null
         }
+        val switchModeButton = if (onSwitchModeClicked != null) {
+            createTvButton(
+                context = context,
+                text = "切换连接模式",
+                fillColor = waitingColors.buttonFill,
+                textColor = Color.WHITE,
+                strokeColor = waitingColors.buttonBorder,
+                onClick = onSwitchModeClicked,
+            )
+        } else {
+            null
+        }
         val settingsButton = createTvButton(
             context = context,
             text = context.getString(R.string.settings),
@@ -184,6 +197,17 @@ object StageWaitingOverlay {
             if (bluetoothButton != null) {
                 addView(
                     bluetoothButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        rightMargin = smallPad
+                    },
+                )
+            }
+            if (switchModeButton != null) {
+                addView(
+                    switchModeButton,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -373,8 +397,13 @@ object StageWaitingOverlay {
         wirelessEnabled: Boolean = true,
         wirelessHotspotMode: TvWirelessMode = TvWirelessMode.LAN_WIFI,
     ): String {
-        if (status is CarPlayStatus.Failed && status.knownCause != null) {
-            return context.getString(ConnectionFailureGuidance.stage(status.knownCause!!))
+        if (status is CarPlayStatus.Failed) {
+            if (status.knownCause != null) {
+                return context.getString(ConnectionFailureGuidance.stage(status.knownCause!!))
+            }
+            if (status.startupFailure == WirelessStartupFailure.HOTSPOT_CONFIGURATION && status.message.isNotBlank()) {
+                return status.message
+            }
         }
         val message = describeStatus(status, context.resources, wirelessEnabled, wirelessHotspotMode)
         val englishResources = context.createConfigurationContext(

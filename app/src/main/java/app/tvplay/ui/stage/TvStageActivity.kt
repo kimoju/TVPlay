@@ -139,6 +139,11 @@ class TvStageActivity : Activity() {
     private var lastStatus: CarPlayStatus? = null
     @Volatile
     private var restartGeneration = 0
+    @Volatile
+    private var teardownInProgress = false
+    @Volatile
+    private var pendingStartAfterTeardown = false
+    private val retiringPipelines = java.util.concurrent.CopyOnWriteArraySet<TvAvRenderPipeline>()
     private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "tvplay-stage-teardown").apply { isDaemon = true }
     }
@@ -189,11 +194,17 @@ class TvStageActivity : Activity() {
             }
         }
         reconnectAttempts = 0
-        sessionEngine?.notifyBluetoothPeerChanged()
-        if (sessionEngine == null || lastStatus is CarPlayStatus.Failed) {
-            cancelScheduledReconnect()
-            reconnectNow()
+        val engine = sessionEngine
+        if (engine != null && !engine.isClosed()) {
+            engine.notifyBluetoothPeerChanged()
+            if (lastStatus is CarPlayStatus.Failed || lastStatus is CarPlayStatus.ControlEnded) {
+                cancelScheduledReconnect()
+                reconnectNow()
+            }
+            return
         }
+        cancelScheduledReconnect()
+        reconnectNow()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -420,6 +431,7 @@ class TvStageActivity : Activity() {
                     override fun surfaceCreated(holder: SurfaceHolder) {
                         activeSurface = holder.surface
                         avPipeline?.setMainSurface(holder.surface, surfaceView.width, surfaceView.height)
+                        avPipeline?.refreshPicture()
                     }
 
                     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -429,7 +441,12 @@ class TvStageActivity : Activity() {
                     }
 
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
-                        avPipeline?.clearSurface(110, holder.surface)
+                        val surface = holder.surface
+                        val live = avPipeline
+                        val detaches = (listOfNotNull(live) + retiringPipelines).distinct()
+                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = false) }
+                        detaches.forEach { it.await() }
+                        live?.clearSurface(110, surface)
                         activeSurface = null
                     }
                 },
@@ -461,9 +478,13 @@ class TvStageActivity : Activity() {
                 }
 
                 override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-                    activeSurface?.let {
-                        avPipeline?.clearSurface(110, it)
-                        it.release()
+                    activeSurface?.let { surface ->
+                        val live = avPipeline
+                        val detaches = (listOfNotNull(live) + retiringPipelines).distinct()
+                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = false) }
+                        detaches.forEach { it.await() }
+                        live?.clearSurface(110, surface)
+                        surface.release()
                     }
                     activeSurface = null
                     return true
@@ -500,6 +521,7 @@ class TvStageActivity : Activity() {
             onSettingsClicked = ::returnToWorkbench,
             onDisconnectClicked = ::disconnectAndExit,
             onBluetoothSettingsClicked = ::openBluetoothSettings,
+            onSwitchModeClicked = ::openConnectionModePicker,
         )
         rootFrame.addView(
             waitingBindings.stageOverlay,
@@ -532,6 +554,10 @@ class TvStageActivity : Activity() {
     }
 
     private fun startOrAttachSession(adoptExisting: Boolean = true) {
+        if (teardownInProgress) {
+            pendingStartAfterTeardown = true
+            return
+        }
         val shouldAdopt = adoptExisting &&
             !PendingReconnect.isPending() &&
             sessionEngine == null &&
@@ -541,14 +567,23 @@ class TvStageActivity : Activity() {
         if (shouldAdopt && adoptBackgroundSession()) {
             return
         }
-        if (sessionEngine != null) {
-            stopActiveSession()
-        } else if (CarPlayBackgroundSession.hasSession()) {
-            CarPlayBackgroundSession.stop {}
+        if (sessionEngine != null || avPipeline != null || CarPlayBackgroundSession.hasSession()) {
+            reconnectNow()
+            return
         }
+        lastStatus = null
         val controllerGeneration = ++restartGeneration
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
+        val lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+        waitingBindings.connectionInstructionsView.text = StageWaitingOverlay.connectionInstructions(
+            context = this,
+            status = null,
+            wirelessEnabled = wirelessEnabled,
+            wirelessHotspotMode = wirelessMode,
+            existingWifiSsid = lanSsid,
+        )
+        waitingBindings.connectionHelpView.visibility = View.GONE
         if (wirelessEnabled) {
             TvPlayBluetooth.sanitizeSavedPhone(this)
         }
@@ -988,7 +1023,7 @@ class TvStageActivity : Activity() {
             } else if (status is CarPlayStatus.Failed) {
                 if (!streamingActive) {
                     firstFrameRendered = false
-                    val retryAllowed = status.startupFailure != WirelessStartupFailure.BLUETOOTH_UNUSABLE &&
+                    val retryAllowed = status.startupFailure?.retryable != false &&
                         !status.wifiResetRequired
                     if (retryAllowed) {
                         val delayMillis = computeReconnectDelayMillis(
@@ -1014,8 +1049,13 @@ class TvStageActivity : Activity() {
         if (requestCode == REQUEST_STAGE_PERMISSIONS) {
             if (grantResults.any { it == PackageManager.PERMISSION_GRANTED } && !streamingActive) {
                 reconnectAttempts = 0
-                cancelScheduledReconnect()
-                reconnectNow()
+                val engine = sessionEngine
+                if (engine != null && !engine.isClosed() && lastStatus !is CarPlayStatus.Failed) {
+                    engine.notifyBluetoothPeerChanged()
+                } else {
+                    cancelScheduledReconnect()
+                    reconnectNow()
+                }
             }
         } else if (requestCode == REQUEST_BLUETOOTH_DISCOVERABLE_PERMISSION) {
             if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
@@ -1042,6 +1082,51 @@ class TvStageActivity : Activity() {
         }
         reconnectRunnable = task
         mainHandler.postDelayed(task, delayMillis)
+    }
+
+    private fun openConnectionModePicker() {
+        val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
+        val currentMode = TvPreferencesStore.loadWirelessHotspotMode(this)
+        val currentIndex = when {
+            !currentWireless -> 2
+            currentMode == TvWirelessMode.LAN_WIFI -> 1
+            else -> 0
+        }
+        val options = arrayOf(
+            "无线 · Wi-Fi Direct 5GHz 直连（推荐：免路由器密码，点对点直连）",
+            "无线 · 家庭局域网模式（电视与 iPhone 连接同一 Wi-Fi，需配置密码）",
+            "USB 有线连接模式（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("切换 CarPlay 连接模式")
+            .setSingleChoiceItems(options, currentIndex) { dialog, which ->
+                dialog.dismiss()
+                when (which) {
+                    0 -> {
+                        TvPreferencesStore.saveWirelessEnabled(this, true)
+                        TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
+                        permissionsPromptedThisSession = false
+                        reconnectAttempts = 0
+                        reconnectNow()
+                    }
+                    1 -> {
+                        TvPreferencesStore.saveWirelessEnabled(this, true)
+                        TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.LAN_WIFI)
+                        permissionsPromptedThisSession = false
+                        reconnectAttempts = 0
+                        reconnectNow()
+                    }
+                    2 -> {
+                        TvPreferencesStore.saveWirelessEnabled(this, false)
+                        permissionsPromptedThisSession = false
+                        vpnPromptedThisSession = false
+                        reconnectAttempts = 0
+                        reconnectNow()
+                    }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun openBluetoothSettings() {
@@ -1250,10 +1335,21 @@ class TvStageActivity : Activity() {
         }
     }
 
+    private fun closeRetiringPipeline(pipeline: TvAvRenderPipeline) {
+        pipeline.close()
+        pipeline.whenVideoReleased { retiringPipelines.remove(pipeline) }
+        pipeline.awaitVideoReleased(SINK_RELEASE_WAIT_MILLIS)
+    }
+
     private fun reconnectNow() {
         cancelScheduledReconnect()
         PendingReconnect.clear()
         waitingBindings.reconnectBannerView.visibility = View.GONE
+        lastStatus = null
+        if (teardownInProgress) {
+            pendingStartAfterTeardown = true
+            return
+        }
         val oldEngine = sessionEngine ?: CarPlayBackgroundSession.snapshot()?.controller
         val oldPipeline = avPipeline ?: CarPlayBackgroundSession.snapshot()?.sink
         if (oldEngine == null && oldPipeline == null) {
@@ -1261,12 +1357,15 @@ class TvStageActivity : Activity() {
             return
         }
         val generation = ++restartGeneration
+        teardownInProgress = true
+        pendingStartAfterTeardown = false
         activeAirPlaySession = null
         streamingActive = false
         firstFrameRendered = false
         fpsHudOverlay.stop()
         TvMediaKeyRouter.release(this)
         sessionEngine = null
+        oldPipeline?.let(retiringPipelines::add)
         avPipeline = null
         CarPlayBackgroundSession.clear(oldEngine, keepOwner = true)
         waitingBindings.stageStatusView.text = "正在重置连接并重新启动投屏会话..."
@@ -1274,9 +1373,11 @@ class TvStageActivity : Activity() {
         teardownExecutor.execute {
             oldEngine?.close()
             oldEngine?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
-            oldPipeline?.close()
+            oldPipeline?.let(::closeRetiringPipeline)
             mainHandler.post {
-                if (!isFinishing && !isDestroyed && generation == restartGeneration) {
+                teardownInProgress = false
+                if (!isFinishing && !isDestroyed && (generation == restartGeneration || pendingStartAfterTeardown)) {
+                    pendingStartAfterTeardown = false
                     startOrAttachSession(adoptExisting = false)
                 }
             }
@@ -1308,16 +1409,24 @@ class TvStageActivity : Activity() {
     }
 
     private fun stopActiveSession() {
-        val currentEngine = sessionEngine
+        val currentEngine = sessionEngine ?: CarPlayBackgroundSession.snapshot()?.controller
+        val currentPipeline = avPipeline ?: CarPlayBackgroundSession.snapshot()?.sink
         activeAirPlaySession = null
         streamingActive = false
         firstFrameRendered = false
+        lastStatus = null
         TvMediaKeyRouter.release(this)
-        currentEngine?.close()
         sessionEngine = null
-        avPipeline?.close()
+        currentPipeline?.let(retiringPipelines::add)
         avPipeline = null
         CarPlayBackgroundSession.clear(currentEngine)
+        if (currentEngine != null || currentPipeline != null) {
+            teardownExecutor.execute {
+                currentEngine?.close()
+                currentEngine?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
+                currentPipeline?.let(::closeRetiringPipeline)
+            }
+        }
     }
 
     private fun cancelScheduledReconnect() {
@@ -1353,6 +1462,7 @@ class TvStageActivity : Activity() {
         private const val REQUEST_STAGE_PERMISSIONS = 2002
         private const val REQUEST_BLUETOOTH_DISCOVERABLE_PERMISSION = 2003
         private const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
+        private const val SINK_RELEASE_WAIT_MILLIS = 1_500L
 
         fun connectionInstructions(
             context: Context,

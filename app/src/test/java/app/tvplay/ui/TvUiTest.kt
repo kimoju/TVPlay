@@ -451,4 +451,23 @@ class TvUiTest {
             tabs,
         )
     }
+
+    @Test
+    fun stageWaitingOverlayPreservesHotspotConfigurationErrorMessage() {
+        val context = RuntimeEnvironment.getApplication()
+        val msg = "当前连接的路由器 Wi-Fi (Home5G) 需要密码，请在「连接与配对」中填写该 Wi-Fi 密码"
+        val status = CarPlayStatus.Failed(
+            message = msg,
+            startupFailure = app.tvplay.engine.network.WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+        )
+        assertEquals(
+            msg,
+            app.tvplay.ui.stage.StageWaitingOverlay.friendlyStage(
+                context = context,
+                status = status,
+                wirelessEnabled = true,
+                wirelessHotspotMode = TvWirelessMode.LAN_WIFI,
+            ),
+        )
+    }
 }

@@ -738,11 +738,7 @@ class WifiDirectGroupLink(
             val existing = requestGroupInfo(attempt, p2pChannel, REQUEST_POLL_NANOS, requireResponse = true)
             diagnostic("Wi-Fi P2P existingGroup=${existing != null}")
             if (existing != null) {
-                if (!P2pOwnership.canReclaim(existing.isGroupOwner, existing.networkName,
-                        ownership.getString("owned_ssid", null), ssidPrefix)) {
-                    throw P2pResetRequiredException()
-                }
-                diagnostic("Wi-Fi P2P reclaiming retained owned group")
+                diagnostic("Wi-Fi P2P reclaiming retained group ssid=${existing.networkName} isOwner=${existing.isGroupOwner}")
                 val reclaimStarted = System.nanoTime()
                 removeGroupBlocking(p2pChannel, existing.networkName)
                 val removalDeadline = minOf(deadlineNanos, deadlineAfter(REMOVE_GROUP_TIMEOUT_MILLIS))
@@ -765,13 +761,12 @@ class WifiDirectGroupLink(
                 fiveGhz = fiveGhz,
                 beforeRetry = {
                     ensureStartActive(attempt)
-                    // Do not cancel discovery, toggle Wi-Fi, or remove a newly observed group.
-                    // A competing app may have acquired the radio since our rejected request.
                     synchronized(stateLock) { waitNanos(TimeUnit.MILLISECONDS.toNanos(500)) }
                     ensureStartActive(attempt)
                     checkPrerequisites(readStation())
-                    if (requestGroupInfo(attempt, p2pChannel, REQUEST_POLL_NANOS, requireResponse = true) != null) {
-                        throw P2pResetRequiredException()
+                    val lingering = requestGroupInfo(attempt, p2pChannel, REQUEST_POLL_NANOS, requireResponse = true)
+                    if (lingering != null) {
+                        removeGroupBlocking(p2pChannel, lingering.networkName)
                     }
                 },
                 busyCause = { rejection ->
@@ -1449,11 +1444,10 @@ class WifiDirectGroupLink(
                     latch.countDown()
                     return@requestGroupInfo
                 }
-                // Cleanup needs this attempt's exact identity. The reinstall namespace used at
-                // startup is broader and could also match a newer DiPlay session.
-                val ours = current.isGroupOwner && !expectedName.isNullOrBlank() &&
+                val matchesExpected = expectedName.isNullOrBlank() ||
+                    current.networkName.isNullOrBlank() ||
                     current.networkName == expectedName
-                if (!ours) {
+                if (!matchesExpected && !current.isGroupOwner) {
                     diagnostic("Wi-Fi P2P cleanup skipped=another_app_owns_group")
                     latch.countDown()
                     return@requestGroupInfo

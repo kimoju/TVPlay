@@ -105,6 +105,14 @@ class TvConfigTest {
         assertEquals(TvTransportMode.WIRED, sessionConfig.transport)
         assertEquals(6, sessionConfig.hostMac.size)
         assertEquals("TVPlay", sessionConfig.identification.name)
+
+        val lanConfig = MfiAssetInstaller.buildSessionConfig(
+            context = context,
+            transport = TvTransportMode.WIRELESS,
+            wirelessMode = TvWirelessMode.LAN_WIFI,
+            lanWifiSsid = "",
+        )
+        assertEquals("", lanConfig.lanWifiSsid)
     }
 
     @Test

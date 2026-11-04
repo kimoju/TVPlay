@@ -1083,6 +1083,7 @@ class TvSessionEngine(
                 try {
                     if (config.transport == TvTransportMode.WIRELESS) {
                         closeBestEffort("wireless stack") { closeWirelessStack(service) }
+                        closeBestEffort("AirPlay wireless service") { service?.detach() }
                     } else {
                         closeBestEffort("CSM") { csm?.close() }
                         csm = null
@@ -1456,7 +1457,6 @@ class TvSessionEngine(
             }
 
             onStatus(CarPlayStatus.WaitingForPairedIphone)
-            startAccessoryIap2Server(adapter, generation)
             val connectedLink = establishWirelessBluetoothLink(adapter, startedHotspot, generation, hostBluetoothMac)
             val device = connectedLink.device
             val socket = connectedLink.socket
@@ -2551,17 +2551,27 @@ class TvSessionEngine(
         val waitDeadlineNanos = System.nanoTime() + PAIRING_WAIT_TIMEOUT_MILLIS * 1_000_000L
         var targetDevice: BluetoothDevice? = null
         var loggedWaitingForPairing = false
+        var accessoryServerStarted = false
         while (targetDevice == null) {
             if (isStaleWirelessRun(generation)) {
+                closeAccessoryIap2Server()
                 throw InterruptedIOException("Wireless Bluetooth selection cancelled")
             }
             takeAcceptedBluetoothSocket()?.let { inbound ->
+                closeAccessoryIap2Server()
                 return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
             }
-            if (!adapter.isEnabled) throw IOException(BluetoothRadioCheck.RADIO_OFF)
+            if (!adapter.isEnabled) {
+                closeAccessoryIap2Server()
+                throw IOException(BluetoothRadioCheck.RADIO_OFF)
+            }
             try {
                 targetDevice = selectWirelessBluetoothDevice(adapter)
             } catch (failure: ConnectionFailureException) {
+                if (!accessoryServerStarted) {
+                    accessoryServerStarted = true
+                    startAccessoryIap2Server(adapter, generation)
+                }
                 val waitWindowMillis = if (failure.reason == ConnectionFailureCause.IPHONE_NOT_CHOSEN) {
                     12_000L
                 } else {
@@ -2587,6 +2597,12 @@ class TvSessionEngine(
             }
         }
 
+        takeAcceptedBluetoothSocket()?.let { inbound ->
+            closeAccessoryIap2Server()
+            return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+        }
+        closeAccessoryIap2Server()
+
         var device: BluetoothDevice = requireNotNull(targetDevice)
         debugLog(
             "wireless selected Bluetooth target name=${runCatching { device.name }.getOrNull() ?: "unknown"} " +
@@ -2598,11 +2614,14 @@ class TvSessionEngine(
         var lastError: Throwable? = null
         for (attempt in 1..MAX_RFCOMM_ATTEMPTS) {
             if (isStaleWirelessRun(generation)) {
+                closeAccessoryIap2Server()
                 throw InterruptedIOException("Wireless RFCOMM connect cancelled")
             }
             takeAcceptedBluetoothSocket()?.let { inbound ->
+                closeAccessoryIap2Server()
                 return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
             }
+            closeAccessoryIap2Server()
             if (!adapter.isEnabled) throw IOException(BluetoothRadioCheck.RADIO_OFF)
             debugLog(
                 "wireless RFCOMM connecting attempt=$attempt/$MAX_RFCOMM_ATTEMPTS " +
@@ -2626,16 +2645,11 @@ class TvSessionEngine(
                     "Bluetooth connect completed attempt=$attempt elapsedMs=$connectMillis " +
                         "socketReportedConnected=${runCatching { socket.isConnected }.getOrNull() ?: "unknown"}",
                 )
-                closeAccessoryIap2Server()
                 return ConnectedBluetoothLink(device, socket, connectMillis)
             } catch (error: Throwable) {
                 runCatching { socket.close() }
                 synchronized(wirelessResourceLock) {
                     if (bluetoothSocket === socket) bluetoothSocket = null
-                }
-                takeAcceptedBluetoothSocket()?.let { inbound ->
-                    debugLog("wireless using inbound iAP2 RFCOMM socket after outbound connect failure")
-                    return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
                 }
                 connectionDiagnostic(
                     "Bluetooth connect failed attempt=$attempt elapsedMs=${elapsedMillis(bluetoothStarted)} " +
@@ -2657,10 +2671,13 @@ class TvSessionEngine(
                     "wireless RFCOMM connect attempt $attempt/$MAX_RFCOMM_ATTEMPTS failed " +
                         "(${error.message}); retrying in ${RFCOMM_RETRY_DELAY_MILLIS}ms while keeping hotspot alive",
                 )
+                startAccessoryIap2Server(adapter, generation)
                 waitForBluetoothPeerChange(RFCOMM_RETRY_DELAY_MILLIS)
                 takeAcceptedBluetoothSocket()?.let { inbound ->
+                    closeAccessoryIap2Server()
                     return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
                 }
+                closeAccessoryIap2Server()
                 runCatching { selectWirelessBluetoothDevice(adapter) }.getOrNull()?.let { refreshed ->
                     device = refreshed
                 }
@@ -2899,7 +2916,11 @@ class TvSessionEngine(
             wirelessActiveReported.set(false)
             wirelessHandoffFellBack.set(false)
 
-            if (service != null && owner != null) closeBestEffort("AirPlay service") { service.detachWireless(owner) }
+            if (service != null) {
+                closeBestEffort("AirPlay service") {
+                    if (owner != null) service.detachWireless(owner) else service.detach()
+                }
+            }
         }
 
     private fun isBluetoothDeviceConnected(device: BluetoothDevice): Boolean = try {

@@ -136,7 +136,7 @@ object MfiAssetInstaller {
         wirelessMode: TvWirelessMode = TvPreferencesStore.loadWirelessMode(context),
         wirelessBluetoothAddress: String? = TvPreferencesStore.loadPairedPhoneAddress(context),
         wifiDirectPreferredChannel: Int = TvPreferencesStore.loadWifiDirectChannel(context),
-        lanWifiSsid: String = TvPreferencesStore.loadLanSsid(context).ifBlank { "TVPlay" },
+        lanWifiSsid: String = TvPreferencesStore.loadLanSsid(context),
         lanWifiPassphrase: String = TvPreferencesStore.loadLanPassphrase(context),
         lanNetworkInterface: String? = TvPreferencesStore.loadLanInterface(context)
             .trim()
@@ -148,15 +148,7 @@ object MfiAssetInstaller {
         val compactId = deviceIdHex.replace(":", "")
         val resolvedManufacturer = manufacturer.trim().ifBlank { TvPreferencesStore.DEFAULT_MANUFACTURER }
         val resolvedModel = model.trim().ifBlank { TvPreferencesStore.DEFAULT_MODEL }
-        val effectiveLanSsid = if (
-            transport == TvTransportMode.WIRELESS &&
-            wirelessMode == TvWirelessMode.LAN_WIFI &&
-            lanWifiSsid.trim().isEmpty()
-        ) {
-            "TVPlay"
-        } else {
-            lanWifiSsid.trim()
-        }
+        val effectiveLanSsid = lanWifiSsid.trim()
         return TvSessionConfig(
             iphoneDevices = iphoneDevices,
             hostMac = hostMacBytes(identity),

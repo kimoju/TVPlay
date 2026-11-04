@@ -107,6 +107,7 @@ class LanNetworkLink(
                 var channel = 0
                 var apBssid: ByteArray? = null
                 var liveSsid: String? = null
+                var observedSecurity = -1
                 if (configured == null && wifi != null) {
                     val capabilities = network?.let { runCatching { connectivity.getNetworkCapabilities(it) }.getOrNull() }
                     val networkInfo = if (Build.VERSION.SDK_INT >= 31) capabilities?.transportInfo as? WifiInfo else null
@@ -118,24 +119,41 @@ class LanNetworkLink(
                     frequency = info?.frequency?.takeIf { it > 0 }
                     channel = frequency?.let(::wifiFrequencyMhzToChannel) ?: 0
                     apBssid = accessPointAddress(info?.bssid)
+                    if (Build.VERSION.SDK_INT >= 31 && info != null) {
+                        observedSecurity = info.currentSecurityType
+                    }
                 }
                 val configuredSsid = ssid.trim().takeUnless { it.isEmpty() || it.equals("TVPlay", ignoreCase = true) }
                 val effectiveSsid = configuredSsid ?: liveSsid
-                if (configured == null) {
-                    if (liveSsid != null && configuredSsid != null && !liveSsid.equals(configuredSsid, ignoreCase = false)) {
-                        throw WirelessStartupException(
-                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                            "已配置的 Wi-Fi 名称 ($configuredSsid) 与电视当前连接的 Wi-Fi ($liveSsid) 不一致，请在连接设置中核对",
-                        )
-                    }
-                    if (effectiveSsid == null) {
-                        throw WirelessStartupException(
-                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                            "家庭局域网模式需要先在「连接与配对」中填写家庭路由器 Wi-Fi 名称与密码，或改用「Wi-Fi Direct 5GHz 直连」模式",
-                        )
+                if (configured == null && liveSsid != null && configuredSsid != null && !liveSsid.equals(configuredSsid, ignoreCase = false)) {
+                    throw WirelessStartupException(
+                        WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                        "已配置的 Wi-Fi 名称 ($configuredSsid) 与电视当前连接的 Wi-Fi ($liveSsid) 不一致，请在连接设置中核对",
+                    )
+                }
+                if (effectiveSsid == null) {
+                    throw WirelessStartupException(
+                        WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                        "家庭局域网模式需要先在「连接与配对」中填写路由器 Wi-Fi 名称与密码，或点击下方「切换连接模式」改用「Wi-Fi Direct 直连」模式",
+                    )
+                }
+                if (configured == null && Build.VERSION.SDK_INT >= 31) {
+                    when (observedSecurity) {
+                        WifiInfo.SECURITY_TYPE_OPEN -> if (passphrase.isNotEmpty()) {
+                            throw WirelessStartupException(
+                                WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                                "当前连接的 Wi-Fi ($effectiveSsid) 为开放网络（无密码），请在连接设置中清空 Wi-Fi 密码",
+                            )
+                        }
+                        WifiInfo.SECURITY_TYPE_PSK, WifiInfo.SECURITY_TYPE_SAE -> if (passphrase.isEmpty()) {
+                            throw WirelessStartupException(
+                                WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                                "当前连接的路由器 Wi-Fi ($effectiveSsid) 需要密码，请在「连接与配对」中填写该 Wi-Fi 密码，或点击「切换连接模式」改用无需密码的「Wi-Fi Direct 直连」",
+                            )
+                        }
                     }
                 }
-                val finalSsid = effectiveSsid ?: "TVPlay"
+                val finalSsid = effectiveSsid
 
                 synchronized(lock) {
                     check(!closed) { "ExistingWifiManager is closed" }

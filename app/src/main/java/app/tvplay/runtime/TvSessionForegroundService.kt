@@ -1,5 +1,6 @@
 package app.tvplay.runtime
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -32,19 +34,39 @@ class TvSessionForegroundService : Service() {
         val status = intent?.getStringExtra("status") ?: getString(R.string.waiting_for_iphone)
         val notification = buildNotification(status)
         if (Build.VERSION.SDK_INT >= 29) {
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            if (
+                Build.VERSION.SDK_INT >= 30 &&
+                checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            ) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
             runCatching {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                    types,
                 )
             }.onFailure {
-                runCatching { startForeground(NOTIFICATION_ID, notification) }
+                runCatching {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                    )
+                }.onFailure {
+                    runCatching { startForeground(NOTIFICATION_ID, notification) }
+                }
             }
         } else {
             runCatching { startForeground(NOTIFICATION_ID, notification) }
         }
         return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        CarPlayBackgroundSession.stop()
+        stopSelf()
     }
 
     private fun buildNotification(status: String): Notification {

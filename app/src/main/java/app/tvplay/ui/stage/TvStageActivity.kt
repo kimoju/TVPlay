@@ -1,7 +1,11 @@
 package app.tvplay.ui.stage
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -31,11 +35,13 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import app.tvplay.R
 import app.tvplay.config.MfiAssetInstaller
 import app.tvplay.config.TvDeviceCapabilities
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvPreferencesStore
+import app.tvplay.engine.session.isNonPhoneBluetoothAccessory
 import java.util.concurrent.Executors
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
@@ -129,6 +135,8 @@ class TvStageActivity : Activity() {
     private var vpnPromptedThisSession = false
     private var permissionsPromptedThisSession = false
     private var reconnectRunnable: Runnable? = null
+    private var reconnectAttempts = 0
+    private var lastStatus: CarPlayStatus? = null
     @Volatile
     private var restartGeneration = 0
     private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -137,14 +145,54 @@ class TvStageActivity : Activity() {
     private var bluetoothReceiverRegistered = false
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
-            if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) != BluetoothAdapter.STATE_ON) {
-                return
-            }
             if (isFinishing || isDestroyed || streamingActive) return
             if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return
+            when (intent.action) {
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) != BluetoothAdapter.STATE_ON) {
+                        return
+                    }
+                    reconnectAttempts = 0
+                    cancelScheduledReconnect()
+                    reconnectNow()
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                    if (bondState != BluetoothDevice.BOND_BONDED) return
+                    handleBluetoothPeerReady(extractBluetoothDevice(intent))
+                }
+                BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    handleBluetoothPeerReady(extractBluetoothDevice(intent))
+                }
+            }
+        }
+    }
+
+    private fun extractBluetoothDevice(intent: Intent): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+    @SuppressLint("MissingPermission")
+    private fun handleBluetoothPeerReady(device: BluetoothDevice?) {
+        if (device != null) {
+            val rawName = runCatching { device.name }.getOrNull()
+            val majorClass = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
+            if (isNonPhoneBluetoothAccessory(rawName, majorClass)) return
+            val address = runCatching { device.address }.getOrNull()?.takeIf { it.isNotBlank() }
+            TvPlayBluetooth.sanitizeSavedPhone(this)
+            if (address != null && TvPreferencesStore.loadPairedPhoneAddress(this) == null) {
+                TvPreferencesStore.savePairedPhone(this, address, rawName?.ifBlank { "我的 iPhone" } ?: "我的 iPhone")
+            }
+        }
+        reconnectAttempts = 0
+        sessionEngine?.notifyBluetoothPeerChanged()
+        if (sessionEngine == null || lastStatus is CarPlayStatus.Failed) {
             cancelScheduledReconnect()
-            sessionEngine?.reconnectIphone() ?: reconnectNow()
+            reconnectNow()
         }
     }
 
@@ -156,7 +204,11 @@ class TvStageActivity : Activity() {
         runCatching {
             registerReceiver(
                 bluetoothStateReceiver,
-                IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+                IntentFilter().apply {
+                    addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                    addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                    addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                },
             )
             bluetoothReceiverRegistered = true
         }
@@ -660,6 +712,17 @@ class TvStageActivity : Activity() {
             microphoneEnabled = micEnabled,
         )
 
+        if (wirelessEnabled) {
+            val bonded = TvPlayBluetooth.bondedDevices(this)
+            TvPlayBluetooth.sanitizeSavedPhone(this, bonded)
+            if (TvPreferencesStore.loadPairedPhoneAddress(this) == null) {
+                val singleIphone = bonded.filter { it.isLikelyIphone }.singleOrNull()
+                if (singleIphone != null) {
+                    TvPreferencesStore.savePairedPhone(this, singleIphone.address, singleIphone.name)
+                }
+            }
+        }
+
         val sessionConfig = MfiAssetInstaller.buildSessionConfig(
             context = this,
             identity = identity,
@@ -878,6 +941,7 @@ class TvStageActivity : Activity() {
     private fun onCarPlayStatusChanged(status: CarPlayStatus, controllerGeneration: Int) {
         mainHandler.post {
             if (isFinishing || isDestroyed || controllerGeneration != restartGeneration) return@post
+            lastStatus = status
             val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
             val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
             val lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
@@ -910,17 +974,30 @@ class TvStageActivity : Activity() {
             }
 
             if (status is CarPlayStatus.WirelessActive || status is CarPlayStatus.WirelessActiveFallback) {
+                reconnectAttempts = 0
                 cancelScheduledReconnect()
                 streamingActive = true
             } else if (status is CarPlayStatus.RunningControl) {
+                reconnectAttempts = 0
                 cancelScheduledReconnect()
-            } else if (status is CarPlayStatus.ControlEnded || status is CarPlayStatus.Failed) {
-                streamingActive = false
-                firstFrameRendered = false
-                val retryAllowed = status !is CarPlayStatus.Failed ||
-                    status.startupFailure != WirelessStartupFailure.BLUETOOTH_UNUSABLE
-                if (retryAllowed) {
+            } else if (status is CarPlayStatus.ControlEnded) {
+                if (!streamingActive) {
+                    firstFrameRendered = false
                     scheduleAutoReconnect(3_500L)
+                }
+            } else if (status is CarPlayStatus.Failed) {
+                if (!streamingActive) {
+                    firstFrameRendered = false
+                    val retryAllowed = status.startupFailure != WirelessStartupFailure.BLUETOOTH_UNUSABLE &&
+                        !status.wifiResetRequired
+                    if (retryAllowed) {
+                        val delayMillis = computeReconnectDelayMillis(
+                            startupDelay = null,
+                            reason = status.message,
+                            reconnectAttempts = reconnectAttempts++,
+                        )
+                        scheduleAutoReconnect(delayMillis)
+                    }
                 }
             }
             refreshOverlayVisibility()
@@ -936,8 +1013,13 @@ class TvStageActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_STAGE_PERMISSIONS) {
             if (grantResults.any { it == PackageManager.PERMISSION_GRANTED } && !streamingActive) {
+                reconnectAttempts = 0
                 cancelScheduledReconnect()
-                sessionEngine?.reconnectIphone() ?: startOrAttachSession(adoptExisting = false)
+                reconnectNow()
+            }
+        } else if (requestCode == REQUEST_BLUETOOTH_DISCOVERABLE_PERMISSION) {
+            if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
+                requestBluetoothDiscoverable()
             }
         }
     }
@@ -955,7 +1037,7 @@ class TvStageActivity : Activity() {
         val task = Runnable {
             reconnectRunnable = null
             if (!isFinishing && !isDestroyed && !streamingActive) {
-                sessionEngine?.reconnectIphone() ?: reconnectNow()
+                reconnectNow()
             }
         }
         reconnectRunnable = task
@@ -963,6 +1045,51 @@ class TvStageActivity : Activity() {
     }
 
     private fun openBluetoothSettings() {
+        val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+        val options = arrayOf(
+            "开启本机蓝牙可见（推荐：让 iPhone 在蓝牙设置中直接搜到「$btName」）",
+            "打开电视系统蓝牙设置（进入系统蓝牙界面配对）",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("电视与 iPhone 蓝牙配对")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> requestBluetoothDiscoverable()
+                    1 -> launchSystemBluetoothSettings()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun requestBluetoothDiscoverable() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+                REQUEST_BLUETOOTH_DISCOVERABLE_PERMISSION,
+            )
+            return
+        }
+        val discoverableIntent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
+            putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+        }
+        runCatching {
+            startActivity(discoverableIntent)
+            val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+            Toast.makeText(
+                this,
+                "请在弹窗中点击「允许」，随后在 iPhone「设置 → 蓝牙」底部点击「$btName」配对",
+                Toast.LENGTH_LONG,
+            ).show()
+        }.onFailure {
+            launchSystemBluetoothSettings()
+        }
+    }
+
+    private fun launchSystemBluetoothSettings() {
         val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -1224,6 +1351,7 @@ class TvStageActivity : Activity() {
     companion object {
         private const val REQUEST_STAGE_VPN_PERMISSION = 2001
         private const val REQUEST_STAGE_PERMISSIONS = 2002
+        private const val REQUEST_BLUETOOTH_DISCOVERABLE_PERMISSION = 2003
         private const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
 
         fun connectionInstructions(

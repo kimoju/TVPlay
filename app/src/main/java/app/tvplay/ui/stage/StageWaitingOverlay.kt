@@ -357,12 +357,12 @@ object StageWaitingOverlay {
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidHint = existingWifiSsid.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
                 "1. 确保电视与 iPhone 连接至同一局域网 Wi-Fi$ssidHint\n" +
-                    "2. 在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
+                    "2. 若尚未配对，可点击下方「电视蓝牙配对」开启电视蓝牙可见，再在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
                     "3. 在 iPhone 弹窗中确认「使用 CarPlay 车载」，即可全屏投屏"
             }
             else ->
                 "1. 当前处于 Wi-Fi Direct 5GHz 直连模式\n" +
-                    "2. 在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
+                    "2. 若尚未配对，可点击下方「电视蓝牙配对」开启电视蓝牙可见，再在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
                     "3. 蓝牙握手后将自动建立点对点无线 CarPlay 通道"
         }
     }

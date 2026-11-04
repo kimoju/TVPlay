@@ -3,6 +3,7 @@ package app.tvplay.ui.workbench
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -336,6 +337,11 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                     includeAccessories = false,
                 )
             }
+            REQUEST_BLUETOOTH_DISCOVERABLE -> {
+                if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
+                    requestBluetoothDiscoverable(launchStageAfter = pendingChoosePhoneLaunchAfterSelect)
+                }
+            }
         }
     }
 
@@ -408,29 +414,36 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val devices = if (includeAccessories) allBonded else allBonded.filter { !it.isAccessory }
         if (devices.isEmpty()) {
             val onlyAccessoriesPaired = allBonded.isNotEmpty()
+            val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
             val builder = appDialogBuilder(this)
                 .setTitle("尚未配对 iPhone")
                 .setMessage(
-                    if (onlyAccessoriesPaired) {
-                        "当前仅检测到电视蓝牙遥控器或音频外设，尚未发现已配对的 iPhone。\n\n" +
-                            "请按以下步骤配对：\n" +
-                            "1. 点击「打开电视蓝牙设置」\n" +
-                            "2. 在 iPhone 上打开「设置 → 蓝牙」并保持在该页面\n" +
-                            "3. 在电视或 iPhone 上点击对方名称完成配对，随后返回 TVPlay"
+                    (if (onlyAccessoriesPaired) {
+                        "当前仅检测到电视蓝牙遥控器或音频外设，尚未发现已配对的 iPhone。\n\n"
                     } else {
-                        "请先在电视系统蓝牙设置中与 iPhone 完成蓝牙配对，然后返回此处选择该 iPhone。"
-                    },
+                        "尚未检测到已配对的 iPhone。\n\n"
+                    }) +
+                        "推荐配对方式：\n" +
+                        "1. 点击下方「开启蓝牙可见并等待连接」并允许可见\n" +
+                        "2. 在 iPhone 上打开「设置 → 蓝牙」，在底部「其他设备」中点击「$btName」\n" +
+                        "3. 配对完成后将自动建立无线 CarPlay 投屏",
                 )
-                .setPositiveButton("打开电视蓝牙设置") { _, _ ->
-                    openSystemBluetoothSettings()
+                .setPositiveButton("开启蓝牙可见并等待连接（推荐）") { _, _ ->
+                    requestBluetoothDiscoverable(launchStageAfter = launchAfterSelect)
                 }
-                .setNegativeButton("取消", null)
+                .setNegativeButton("系统蓝牙设置") { _, _ ->
+                    launchSystemBluetoothSettings()
+                }
             if (onlyAccessoriesPaired) {
                 builder.setNeutralButton("显示全部蓝牙设备") { _, _ ->
                     doShowChooseIphoneDialog(
                         launchAfterSelect = launchAfterSelect,
                         includeAccessories = true,
                     )
+                }
+            } else if (launchAfterSelect) {
+                builder.setNeutralButton("直接进入等待画面") { _, _ ->
+                    openStageActivity(wireless = true)
                 }
             }
             builder.show()
@@ -583,6 +596,60 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     }
 
     private fun openSystemBluetoothSettings() {
+        val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+        val options = arrayOf(
+            "开启本机蓝牙可见（推荐：让 iPhone 在蓝牙设置中直接搜到「$btName」）",
+            "打开电视系统蓝牙设置（进入系统蓝牙界面配对）",
+        )
+        appDialogBuilder(this)
+            .setTitle("电视与 iPhone 蓝牙配对")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> requestBluetoothDiscoverable(launchStageAfter = false)
+                    1 -> launchSystemBluetoothSettings()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun requestBluetoothDiscoverable(launchStageAfter: Boolean) {
+        pendingChoosePhoneLaunchAfterSelect = launchStageAfter
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            val started = runCatching {
+                requestPermissions(
+                    arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+                    REQUEST_BLUETOOTH_DISCOVERABLE,
+                )
+                true
+            }.getOrDefault(false)
+            if (started) return
+        }
+        if (launchStageAfter) {
+            openStageActivity(wireless = true)
+        }
+        val discoverableIntent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
+            putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+        }
+        runCatching {
+            startActivity(discoverableIntent)
+            val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+            Toast.makeText(
+                this,
+                "请在弹窗中点击「允许」，随后在 iPhone「设置 → 蓝牙」底部点击「$btName」配对",
+                Toast.LENGTH_LONG,
+            ).show()
+        }.onFailure {
+            if (!launchStageAfter) {
+                launchSystemBluetoothSettings()
+            }
+        }
+    }
+
+    private fun launchSystemBluetoothSettings() {
         val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -639,6 +706,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         private const val REQUEST_VPN_PERMISSION = 1002
         private const val REQUEST_SAVE_DIAGNOSTIC_LOG = 1003
         private const val REQUEST_BLUETOOTH_CONNECT_FOR_DIALOG = 1004
+        private const val REQUEST_BLUETOOTH_DISCOVERABLE = 1005
 
         fun isLauncherIntent(intent: Intent?): Boolean =
             intent?.action == Intent.ACTION_MAIN &&

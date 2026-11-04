@@ -105,4 +105,13 @@
     <string name="connection_help_general">Retry the connection. If it fails again, return to TVPlay and save a diagnostic report.</string>
     <string name="connection_help_wifi_direct">Keep the device\'s Wi-Fi and Bluetooth on and the iPhone unlocked nearby, then retry. If it keeps failing, forget the receiver on the iPhone under Settings → General → CarPlay and connect again.</string>
     <string name="connection_help_existing_wifi">Make sure the device and the iPhone are on the same Wi-Fi network and its name and password match TVPlay settings, then retry.</string>
+    <string name="waiting_for_iphone">Waiting for iPhone…</string>
+    <string name="carplay_connection">CarPlay Connection</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="starting_carplay">Starting CarPlay…</string>
+    <string name="reconnect">Reconnect</string>
+    <string name="reconnect_for_new_settings">Reconnect to apply new settings</string>
+    <string name="settings">Settings</string>
+    <string name="turn_on_bluetooth_before_starting_wireless_carplay">Turn on Bluetooth before starting wireless CarPlay.</string>
+    <string name="permissions_are_required_to_start_carplay">Permissions are required to start CarPlay.</string>
 </resources>

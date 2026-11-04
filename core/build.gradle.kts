@@ -9,26 +9,7 @@ android {
     defaultConfig {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
-
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
-        }
-
-        externalNativeBuild {
-            ndkBuild {
-                arguments("APP_PLATFORM=android-24")
-            }
-        }
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
-
-    ndkVersion = "28.2.13676358"
-
-    externalNativeBuild {
-        ndkBuild {
-            path = file("src/main/jni/Android.mk")
-        }
     }
 
     compileOptions {

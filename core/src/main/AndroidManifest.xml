@@ -19,7 +19,6 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- No maxSdkVersion: MIUI 13 on Android 12 still checks BLUETOOTH for RFCOMM connections (#671). -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 
@@ -38,7 +37,7 @@
 
     <application android:usesCleartextTraffic="true">
         <service
-            android:name="app.tvplay.network.CarPlayVpnService"
+            android:name="app.tvplay.engine.network.UsbTunnelVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false" />
     </application>

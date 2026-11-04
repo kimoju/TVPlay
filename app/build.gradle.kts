@@ -1,11 +1,12 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.compose)
 }
 
 // Optional local-only input. CI and ordinary source builds contain no accessory identity.
-val localAuthenticationAssets = providers.environmentVariable("DIPLAY_AUTH_ASSETS_DIR")
-    .orNull?.let { file(it).canonicalFile }
+val localAuthenticationAssets = (
+    providers.environmentVariable("TVPLAY_AUTH_ASSETS_DIR").orNull
+        ?: providers.environmentVariable("DIPLAY_AUTH_ASSETS_DIR").orNull
+    )?.let { file(it).canonicalFile }
 
 android {
     namespace = "app.tvplay"
@@ -57,10 +58,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    buildFeatures {
-        compose = true
-    }
-
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all { it.maxHeapSize = "2g" }
@@ -69,19 +66,8 @@ android {
 
 dependencies {
     implementation(project(":core"))
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.app.projected)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.exoplayer.hls)
-    implementation(libs.androidx.media3.ui)
-    debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
     testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("org.mockito:mockito-core:5.20.0")
@@ -120,7 +106,7 @@ val verifyStandaloneAuthentication by tasks.registering {
     val directory = localAuthenticationAssets
     doLast {
         check(directory != null) {
-            "Standalone TVPlay builds require DIPLAY_AUTH_ASSETS_DIR; assembleDebug alone is source-only."
+            "Standalone TVPlay builds require TVPLAY_AUTH_ASSETS_DIR; assembleDebug alone is source-only."
         }
         check(listOf("identity.pk8", "certificate.p7b").all {
             directory.resolve("offline-mfi/$it").let { file -> file.isFile && file.length() > 0 }

@@ -101,4 +101,13 @@
     <string name="connection_help_general">请重试连接。如仍失败，请返回 TVPlay 导出诊断日志。</string>
     <string name="connection_help_wifi_direct">保持电视的 Wi-Fi 和蓝牙开启，iPhone 解锁并放在附近，然后重试。如果仍然失败，请在 iPhone 的“设置 → 通用 → CarPlay 车载”中忘记此设备，再重新连接。</string>
     <string name="connection_help_existing_wifi">请确认电视和 iPhone 连接的是同一个 Wi-Fi 网络，且网络名称和密码与 TVPlay 设置一致，然后重试。</string>
+    <string name="waiting_for_iphone">正在等待 iPhone 连接…</string>
+    <string name="carplay_connection">CarPlay 投屏连接</string>
+    <string name="disconnect">断开连接</string>
+    <string name="starting_carplay">正在启动 CarPlay…</string>
+    <string name="reconnect">立即重连</string>
+    <string name="reconnect_for_new_settings">重新连接后新设置即可生效</string>
+    <string name="settings">返回设置</string>
+    <string name="turn_on_bluetooth_before_starting_wireless_carplay">启动无线 CarPlay 前请先开启蓝牙。</string>
+    <string name="permissions_are_required_to_start_carplay">需要授予连接权限才能启动 CarPlay。</string>
 </resources>

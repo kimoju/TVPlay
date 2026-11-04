@@ -3,13 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_ASSETS_DIR="${ROOT_DIR}/.private/runtime-assets"
-export DIPLAY_AUTH_ASSETS_DIR="${DIPLAY_AUTH_ASSETS_DIR:-${DEFAULT_ASSETS_DIR}}"
+export TVPLAY_AUTH_ASSETS_DIR="${TVPLAY_AUTH_ASSETS_DIR:-${DIPLAY_AUTH_ASSETS_DIR:-${DEFAULT_ASSETS_DIR}}}"
 
-PK8_FILE="${DIPLAY_AUTH_ASSETS_DIR}/offline-mfi/identity.pk8"
-P7B_FILE="${DIPLAY_AUTH_ASSETS_DIR}/offline-mfi/certificate.p7b"
+PK8_FILE="${TVPLAY_AUTH_ASSETS_DIR}/offline-mfi/identity.pk8"
+P7B_FILE="${TVPLAY_AUTH_ASSETS_DIR}/offline-mfi/certificate.p7b"
 
 if [[ ! -f "${PK8_FILE}" || ! -f "${P7B_FILE}" ]]; then
-  echo "Error: MFi authentication assets not found in ${DIPLAY_AUTH_ASSETS_DIR}/offline-mfi/" >&2
+  echo "Error: MFi authentication assets not found in ${TVPLAY_AUTH_ASSETS_DIR}/offline-mfi/" >&2
   echo "Expected:" >&2
   echo "  - ${PK8_FILE}" >&2
   echo "  - ${P7B_FILE}" >&2

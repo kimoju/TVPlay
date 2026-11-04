@@ -14,9 +14,19 @@ Set `ANDROID_HOME` or `local.properties` if Gradle cannot find the SDK.
 
 ## Architecture
 
-TVPlay is a dedicated Apple CarPlay receiver for Android TV, TV boxes, projectors, and large-screen displays, organized into two modules:
-- **`:core` (`app.tvplay.*`)**: CarPlay / AirPlay / iAP2 / MFi / Media / Network / Transport protocol engine and native JNI libraries.
-- **`:app` (`app.tvplay`)**:
-  - **10-Foot TV Workbench (`TvPlayWorkbenchActivity`)**: Dual-pane Apple TV-style layout with a live connection stage & 3-step connection guide on the left (`WorkbenchStagePane`), and a 4-tab D-pad-friendly settings panel (`CONNECTION`, `DISPLAY`, `AUDIO`, `ABOUT`) on the right (`WorkbenchSettingsPane`).
-  - **Fullscreen CarPlay Projection (`TvPlayProjectionActivity`)**: Hardware-accelerated H.264/HEVC projection decomposed into `ProjectionSessionManager`, `VideoSurfaceController`, `RemoteInputDispatcher`, `ProjectionWaitingView`, and `QuickControlOverlayView` (`KEYCODE_MENU` or long-pressing `KEYCODE_BACK`).
-  - **Settings Repository (`TvPlaySettingsRepository` / `AirPlayPersistence`)**: Structured domain settings (`connection`, `display`, `audio`, `identity`).
+TVPlay is a pure Kotlin/Java Apple CarPlay receiver purpose-built for Android TV, TV boxes, projectors, and large-screen displays, organized into two modules with zero JNI/NDK code:
+
+- **`:core` (`app.tvplay.engine.*`)**:
+  - **`auth`**: `AccessoryIdentity`, `HomeKitPairingCipher`, `MfiAuthProvider`, `MfiSapHandshake`, `UsbLockdownClient`
+  - **`protocol.iap2`**: `Iap2FrameCodec`, `Iap2LinkLayer`, `Iap2ControlHandler`
+  - **`protocol.rtsp`**: `RtspBinaryCodec`, `RtspHidDispatcher`, `RtspStreamChannels`, `RtspControlSession`
+  - **`network`**: `BonjourServiceAdvertiser`, `LanNetworkLink`, `WifiDirectGroupLink`, `WirelessLinkManager`, `BluetoothRfcommAcceptor`, `UsbGadgetTransport`, `UsbTunnelVpnService`
+  - **`av`**: `ViewportLayoutMath`, `HardwareVideoDecoder`, `PcmAudioRenderer`, `VoiceMicRecorder`, `TvAvRenderPipeline`
+  - **`session`**: `TvSessionConfig`, `TvSessionState`, `TvSessionEngine`
+- **`:app` (`app.tvplay.*`)**:
+  - **`config`**: `MfiAssetInstaller`, `TvDeviceCapabilities`, `TvPreferencesStore`, `TvSettingsRepository`
+  - **`remote`**: `TvRemoteKeyMap`, `TvRemoteInputController`, `TvVideoColorFilter`
+  - **`runtime`**: `TvDiagnosticsLogger`, `TvLaunchReceivers`, `TvMediaKeyRouter`, `TvProjectionSessionHost`, `TvSessionForegroundService`
+  - **`ui.theme`**: `TvColorScheme`, `TvUiComponents`
+  - **`ui.workbench`**: `TvWorkbenchActivity`, `WorkbenchHeroStage`, `WorkbenchSettingsTabs`
+  - **`ui.stage`**: `TvStageActivity`, `TvVideoSurfaceHost`, `StageWaitingOverlay`, `StageQuickControlOverlay`, `StagePictureTuningOverlay`, `StageFpsHudOverlay`

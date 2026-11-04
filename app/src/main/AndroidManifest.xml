@@ -28,19 +28,19 @@
         android:roundIcon="@drawable/ic_carplay"
         android:supportsRtl="true"
         android:resizeableActivity="true"
-        android:theme="@style/Theme.Xcertplay">
+        android:theme="@style/Theme.TVPlay">
 
         <meta-data
             android:name="android.allow_multiple_resumed_activities"
             android:value="true" />
 
         <provider
-            android:name="app.tvplay.CrashRecordInstaller"
+            android:name="app.tvplay.runtime.CrashRecordInstaller"
             android:authorities="${applicationId}.crash-record"
             android:exported="false" />
 
         <provider
-            android:name="app.tvplay.DiagnosticReportProvider"
+            android:name="app.tvplay.runtime.DiagnosticReportProvider"
             android:authorities="${applicationId}.diagnostic-reports"
             android:exported="false"
             android:grantUriPermissions="true">
@@ -50,12 +50,12 @@
         </provider>
 
         <activity
-            android:name="app.tvplay.TvPlayWorkbenchActivity"
+            android:name="app.tvplay.ui.workbench.TvWorkbenchActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:resizeableActivity="true"
             android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
-            android:theme="@style/Theme.Xcertplay">
+            android:theme="@style/Theme.TVPlay">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -64,19 +64,19 @@
         </activity>
 
         <service
-            android:name="app.tvplay.TvPlaySessionService"
+            android:name="app.tvplay.runtime.TvSessionForegroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|microphone" />
 
         <activity
-            android:name="app.tvplay.TvPlayProjectionActivity"
+            android:name="app.tvplay.ui.stage.TvStageActivity"
             android:taskAffinity="${applicationId}.carplay"
             android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
-            android:theme="@style/Theme.Xcertplay"
+            android:theme="@style/Theme.TVPlay"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
@@ -86,14 +86,8 @@
                 android:resource="@xml/usb_device_filter" />
         </activity>
 
-        <activity
-            android:name="app.tvplay.CarPlayVideoActivity"
-            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
-            android:exported="false"
-            android:theme="@style/Theme.Xcertplay" />
-
         <receiver
-            android:name="app.tvplay.BootReceiver"
+            android:name="app.tvplay.runtime.BootAutoStartReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>
@@ -102,7 +96,7 @@
         </receiver>
 
         <receiver
-            android:name="app.tvplay.PhoneBluetoothReceiver"
+            android:name="app.tvplay.runtime.BluetoothAutoConnectReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>

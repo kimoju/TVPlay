@@ -1,0 +1,81 @@
+package app.tvplay.engine.auth
+
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class EngineAuthTest {
+
+    @Test
+    fun accessoryIdentityGeneratesValidEd25519KeyPair() {
+        val identity = AccessoryIdentity.generate()
+        assertEquals(32, identity.privateKey.size)
+        assertEquals(32, identity.publicKey.size)
+        assertEquals(64, identity.publicKeyHex.length)
+        assertTrue(identity.pairingId.isNotBlank())
+    }
+
+    @Test
+    fun pairingRegistrySavesAndDefensivelyCopiesPublicKeys() {
+        var savedId: String? = null
+        val registry = PairingRegistry { id, _ -> savedId = id }
+        val key = ByteArray(32) { it.toByte() }
+        registry.save("controller-1", key)
+        key[0] = 99
+        assertEquals("controller-1", savedId)
+        val retrieved = registry.get("controller-1")
+        assertNotNull(retrieved)
+        assertEquals(0.toByte(), retrieved!![0])
+        registry.clear()
+        assertNull(registry.get("controller-1"))
+    }
+
+    @Test
+    fun ed25519SignAndVerifyRoundTrip() {
+        val pair = AirPlayCrypto.ed25519Generate()
+        val message = "tvplay-homekit-test".asciiBytes()
+        val signature = AirPlayCrypto.ed25519Sign(pair.privateKey, message)
+        assertEquals(64, signature.size)
+        assertTrue(AirPlayCrypto.ed25519Verify(pair.publicKey, message, signature))
+        val tampered = message.copyOf().also { it[0] = (it[0].toInt() xor 0xff).toByte() }
+        assertFalse(AirPlayCrypto.ed25519Verify(pair.publicKey, tampered, signature))
+    }
+
+    @Test
+    fun x25519KeyAgreementProducesMatchingSharedSecret() {
+        val alice = AirPlayCrypto.x25519Generate()
+        val bob = AirPlayCrypto.x25519Generate()
+        val secretAlice = AirPlayCrypto.x25519SharedSecret(alice.privateKey, bob.publicKey)
+        val secretBob = AirPlayCrypto.x25519SharedSecret(bob.privateKey, alice.publicKey)
+        assertEquals(32, secretAlice.size)
+        assertArrayEquals(secretAlice, secretBob)
+    }
+
+    @Test
+    fun chacha20Poly1305EncryptAndDecryptRoundTrip() {
+        val key = ByteArray(32) { (it * 3 + 1).toByte() }
+        val nonce = AirPlayCrypto.nonce64(1L)
+        val plaintext = "Hello TVPlay HomeKit Pairing".asciiBytes()
+        val aad = "header".asciiBytes()
+        val ciphertext = AirPlayCrypto.chachaSeal(key, nonce, plaintext, aad)
+        assertEquals(plaintext.size + 16, ciphertext.size)
+        val decrypted = AirPlayCrypto.chachaOpen(key, nonce, ciphertext, aad)
+        assertArrayEquals(plaintext, decrypted)
+    }
+
+    @Test
+    fun tlv8CodecFragmentsAndReassemblesLargePayloads() {
+        val largePayload = ByteArray(600) { (it and 0xff).toByte() }
+        val encoded = Tlv8Codec.encode(
+            0x06 to byteArrayOf(0x03),
+            0x05 to largePayload,
+        )
+        val decoded = Tlv8Codec.decode(encoded)
+        assertArrayEquals(byteArrayOf(0x03), decoded[0x06])
+        assertArrayEquals(largePayload, decoded[0x05])
+    }
+}

@@ -67,7 +67,6 @@ import app.tvplay.transport.Ch341I2cTransport
 import app.tvplay.transport.Ch341UsbHost
 import app.tvplay.transport.Ch341UsbSession
 import app.tvplay.transport.Iap2IdentificationConfig
-import app.tvplay.transport.Iap2LocationProvider
 import app.tvplay.transport.Iap2UsbMuxHost
 import app.tvplay.transport.Iap2UsbSession
 import app.tvplay.transport.Iap2WiredCarPlayEndpoint
@@ -166,14 +165,7 @@ class CarPlayController(
     private val loadPairRecord: () -> LockdownPairRecord? = { null },
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
     private val clearPairRecord: () -> Unit = {},
-    private val locationProvider: Iap2LocationProvider? = null,
-    private val vehicleStatusProvider: app.tvplay.transport.VehicleStatusProvider? = null,
 ) : Closeable {
-    init {
-        require(!config.locationReportingEnabled || locationProvider != null) {
-            "A location provider is required when location reporting is enabled"
-        }
-    }
 
     private enum class Phase { IDLE, MFI, WIRELESS, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
@@ -716,7 +708,6 @@ class CarPlayController(
                     mfiSession = null
                     wirelessRuntimeIdentification = null
                     wirelessAirPlayEndpoint = null
-                    closeBestEffort("location provider") { locationProvider?.close() }
                 } finally {
                     executor.shutdownNow()
                     var executorTerminated = false
@@ -1201,19 +1192,6 @@ class CarPlayController(
     }
 
     private fun startPhone() {
-        if (config.locationReportingEnabled) {
-            val started = try {
-                locationProvider?.start() == true
-            } catch (error: Throwable) {
-                Log.w(
-                    IphoneCarPlayConfiguration.TAG,
-                    "Could not prewarm the Android location provider",
-                    error,
-                )
-                false
-            }
-            debugLog("location provider prewarmed=$started")
-        }
         if (config.transport == CarPlayTransport.WIRELESS) {
             startWireless()
         } else {
@@ -1650,11 +1628,7 @@ class CarPlayController(
         }
         wirelessTunnelChannel = channel
         val generation = wirelessGeneration.get()
-        debugLog(
-            "wireless iAP2 runtime tunnel control starting " +
-                "location=${identification.locationInformationEnabled} " +
-                "vehicleStatus=${identification.vehicleStatusEnabled}",
-        )
+        debugLog("wireless iAP2 runtime tunnel control starting")
         return try {
             tunnelExecutor.execute {
                 try {
@@ -1665,8 +1639,6 @@ class CarPlayController(
                         identification = identification,
                         endpoint = endpoint,
                         timeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
-                        locationProvider = locationProvider,
-                        vehicleStatusProvider = vehicleStatusProvider,
                         onReady = {
                             onWirelessTunnelReady(generation)
                         },
@@ -2338,18 +2310,12 @@ class CarPlayController(
                 },
             )
             wiredStartWatchdog = startWatchdog
-            debugLog(
-                "wired iAP2 runtime control starting " +
-                    "location=${config.identification.locationInformationEnabled} " +
-                    "vehicleStatus=${config.identification.vehicleStatusEnabled}",
-            )
+            debugLog("wired iAP2 runtime control starting")
             val result = Iap2WiredControlClient(csm, Iap2MfiAuthenticationClient(mfi)).run(
                 identification = config.identification,
                 endpoint = endpoint,
                 availableCurrentMilliAmps = config.availableCurrentMilliAmps,
                 timeoutMillis = controlLoopTimeoutMillis(),
-                locationProvider = locationProvider,
-                vehicleStatusProvider = vehicleStatusProvider,
                 onIncoming = ::onRouteFrame,
                 onProgress = { message ->
                     if (message == Iap2WiredControlClient.START_SESSION_AGAIN_PROGRESS) {
@@ -2799,7 +2765,6 @@ class CarPlayController(
 
     private fun controlLoopTimeoutMillis(): Long = when {
         config.transport == CarPlayTransport.WIRED -> Iap2WiredControlClient.NO_TIMEOUT_MILLIS
-        config.locationReportingEnabled -> LOCATION_CONTROL_LOOP_TIMEOUT_MILLIS
         // Identification/authentication remain bounded. The bootstrap loop can extend this
         // deadline only once this generation has actually rendered a CarPlay frame.
         else -> CONTROL_LOOP_TIMEOUT_MILLIS
@@ -3086,7 +3051,6 @@ class CarPlayController(
         private const val WIRELESS_PREFS = "diplay_wireless"
         private const val HOTSPOT_FAMILY_PREFERENCE_KEY = "hotspot_address_family"
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
-        private const val LOCATION_CONTROL_LOOP_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L

@@ -337,8 +337,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         temporarySystemBarsVisible = false
         applyFullscreenMode()
     }
-    private var harmanFullscreenEnabled = false
-    private var harmanFullscreenApplied = false
     private var safeAreaDrawOutside = true
     private var mainDisplayDisableSafeArea = false
     private var blackCornerRadiusDp = 0
@@ -599,7 +597,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
     private fun loadPersistedSettings() {
         carPlayDock = CarPlayDock.load(this)
         carPlayNightMode = AirPlayPersistence.loadCarPlayNightMode(this)
-        ambientDelaySeconds = AirPlayPersistence.loadAmbientDelaySeconds(this)
         nightSchedule = AirPlayPersistence.loadCarPlayNightSchedule(this)
         nightModeController.configure(
             carPlayNightMode,
@@ -636,7 +633,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         hideTopBar = AirPlayPersistence.loadHideTopBar(this)
         hideBottomBar = AirPlayPersistence.loadHideBottomBar(this)
         temporarySystemBarsEnabled = AirPlayPersistence.loadTemporarySystemBars(this)
-        harmanFullscreenEnabled = AirPlayPersistence.loadHarmanFullscreen(this)
         safeAreaDrawOutside = AirPlayPersistence.loadSafeAreaDrawOutside(this)
         mainDisplayDisableSafeArea = AirPlayPersistence.loadMainDisplayDisableSafeArea(this)
         blackCornerRadiusDp = AirPlayPersistence.loadBlackCornerRadiusDp(this)
@@ -803,12 +799,10 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         super.onResume()
         hostAppearanceResumed = true
         val savedNightMode = AirPlayPersistence.loadCarPlayNightMode(this)
-        val savedDelay = AirPlayPersistence.loadAmbientDelaySeconds(this)
         val savedSchedule = AirPlayPersistence.loadCarPlayNightSchedule(this)
         val systemNight = nightModeOrNull(resources.configuration.uiMode) ?: true
-        if (savedNightMode != carPlayNightMode || savedDelay != ambientDelaySeconds || savedSchedule != nightSchedule) {
+        if (savedNightMode != carPlayNightMode || savedSchedule != nightSchedule) {
             carPlayNightMode = savedNightMode
-            ambientDelaySeconds = savedDelay
             nightSchedule = savedSchedule
             nightModeController.configure(carPlayNightMode, systemNight, 15f, ambientDelaySeconds, nightSchedule)
         }
@@ -837,13 +831,10 @@ open class TvPlayProjectionActivity : ComponentActivity() {
         if (!menuOpen) {
             val savedHideTopBar = AirPlayPersistence.loadHideTopBar(this)
             val savedHideBottomBar = AirPlayPersistence.loadHideBottomBar(this)
-            val savedHarmanFullscreen = AirPlayPersistence.loadHarmanFullscreen(this)
             systemBarsChanged = hideTopBar != savedHideTopBar ||
-                hideBottomBar != savedHideBottomBar ||
-                harmanFullscreenEnabled != savedHarmanFullscreen
+                hideBottomBar != savedHideBottomBar
             hideTopBar = savedHideTopBar
             hideBottomBar = savedHideBottomBar
-            harmanFullscreenEnabled = savedHarmanFullscreen
         }
         maybeStartCarPlay()
         applyFullscreenMode()
@@ -1620,8 +1611,6 @@ open class TvPlayProjectionActivity : ComponentActivity() {
             loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },
             savePairRecord = { record -> AirPlayPersistence.saveLockdownRecord(this, record) },
             clearPairRecord = { AirPlayPersistence.clearLockdownRecord(this) },
-            locationProvider = null,
-            vehicleStatusProvider = null,
         )
         controller = next
         CarPlayMediaKeys.attach(this, next)
@@ -2397,21 +2386,11 @@ open class TvPlayProjectionActivity : ComponentActivity() {
 
     private fun applyFullscreenMode() {
         val multiWindow = isMultiWindowActive()
-        if (harmanFullscreenEnabled) {
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            HarmanFullscreenCompat.apply(window)
-            harmanFullscreenApplied = true
-            return
-        }
-        if (harmanFullscreenApplied) {
-            HarmanFullscreenCompat.clear(window)
-            harmanFullscreenApplied = false
-        }
         val hideTop = hideTopBar && !multiWindow
         val hideBottom = hideBottomBar && !multiWindow
         WindowCompat.setDecorFitsSystemWindows(window, !(hideTop && hideBottom))
         val controller = WindowInsetsControllerCompat(window, window.decorView)
-        val peek = temporarySystemBarsVisible && !multiWindow && !harmanFullscreenEnabled
+        val peek = temporarySystemBarsVisible && !multiWindow
         if (hideTop && !peek) {
             controller.hide(WindowInsetsCompat.Type.statusBars())
         } else {
@@ -2428,7 +2407,7 @@ open class TvPlayProjectionActivity : ComponentActivity() {
 
     private fun showTemporarySystemBars(): Boolean {
         if (!temporarySystemBarsEnabled || (!hideTopBar && !hideBottomBar) ||
-            harmanFullscreenEnabled || gestureFingerCount <= 0 || isMultiWindowActive()) {
+            gestureFingerCount <= 0 || isMultiWindowActive()) {
             return false
         }
         mainHandler.removeCallbacks(hideTemporarySystemBars)

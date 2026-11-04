@@ -6,7 +6,6 @@ import app.tvplay.iap2.message.Iap2Messages
 import app.tvplay.iap2.session.Iap2Session
 import app.tvplay.iap2.wire.Iap2Frame
 import app.tvplay.iap2.wire.Iap2Parameter
-import app.tvplay.transport.Iap2VehicleStatus.electricVehicleComponents
 import java.io.IOException
 import kotlin.math.min
 
@@ -50,14 +49,6 @@ data class Iap2IdentificationConfig(
     val externalAccessoryProtocol: String = "app.tvplay",
     /** Non-null selects the wireless Bluetooth and WirelessCarPlay transport components. */
     val wireless: Iap2WirelessIdentification? = null,
-    /** Advertises and enables iAP2 LocationInformation from the accessory to the phone. */
-    val locationInformationEnabled: Boolean = false,
-    /** Declares an electric vehicle and answers the phone's vehicle-status subscription. */
-    val vehicleStatusEnabled: Boolean = false,
-    /** The charging inlets declared with [vehicleStatusEnabled]. */
-    val chargingConnectors: EvChargingConnectors = EvChargingConnectors.CCS2_TYPE2,
-    /** Also offer wheel speed ($PASCD) in the location component; needs [locationInformationEnabled]. */
-    val vehicleSpeedEnabled: Boolean = false,
 ) {
     constructor(
         name: String,
@@ -115,25 +106,10 @@ internal enum class Iap2WirelessLinkRole {
     RUNTIME_TUNNEL,
 }
 
-/**
- * Builds identification for one wireless link. Long-lived accessory data must not be advertised on
- * Bluetooth: iOS can bind Location or Vehicle to that endpoint and reject the same data on Wi-Fi
- * after RFCOMM closes.
- */
 internal fun Iap2IdentificationConfig.forWirelessLink(
-    role: Iap2WirelessLinkRole,
+    @Suppress("UNUSED_PARAMETER") role: Iap2WirelessLinkRole,
     wirelessIdentification: Iap2WirelessIdentification,
-): Iap2IdentificationConfig {
-    val wirelessConfig = copy(wireless = wirelessIdentification)
-    return when (role) {
-        Iap2WirelessLinkRole.BLUETOOTH_BOOTSTRAP -> wirelessConfig.copy(
-            locationInformationEnabled = false,
-            vehicleStatusEnabled = false,
-            vehicleSpeedEnabled = false,
-        )
-        Iap2WirelessLinkRole.RUNTIME_TUNNEL -> wirelessConfig
-    }
-}
+): Iap2IdentificationConfig = copy(wireless = wirelessIdentification)
 
 /** Identification failures distinguished from the underlying iAP2 transport failure. */
 sealed class Iap2IdentificationException(message: String) : IOException(message) {
@@ -301,23 +277,8 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
         /** Builds the smallest honest LIVI-compatible wired or wireless IdentificationInformation. */
         fun identificationInformation(config: Iap2IdentificationConfig, omitted: Set<Int> = emptySet()): Iap2Frame {
             val wireless = config.wireless
-            var sentMessages = if (config.locationInformationEnabled) {
-                MESSAGES_SENT_BY_ACCESSORY + LOCATION_INFORMATION
-            } else {
-                MESSAGES_SENT_BY_ACCESSORY
-            }
-            var receivedMessages = if (config.locationInformationEnabled) {
-                MESSAGES_RECEIVED_FROM_PHONE + START_LOCATION_INFORMATION + STOP_LOCATION_INFORMATION
-            } else {
-                MESSAGES_RECEIVED_FROM_PHONE
-            }
-            if (config.vehicleStatusEnabled) {
-                sentMessages += Iap2VehicleStatus.VEHICLE_STATUS_UPDATE
-                receivedMessages += intArrayOf(
-                    Iap2VehicleStatus.START_VEHICLE_STATUS_UPDATES,
-                    Iap2VehicleStatus.STOP_VEHICLE_STATUS_UPDATES,
-                )
-            }
+            val sentMessages = MESSAGES_SENT_BY_ACCESSORY
+            val receivedMessages = MESSAGES_RECEIVED_FROM_PHONE
             return Iap2Messages.build(Iap2Endpoints.IDENTIFICATION_INFORMATION) {
                 string(0, config.name)
                 string(1, config.modelIdentifier)
@@ -377,25 +338,12 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                         void(5)
                     }
                 }
-                if (config.vehicleStatusEnabled) electricVehicleComponents(config.manufacturer, config.chargingConnectors)
-                if (config.locationInformationEnabled) {
-                    group(22) {
-                        u16(0, 0)
-                        string(1, config.name)
-                        void(17)
-                        void(18)
-                        if (config.vehicleSpeedEnabled) void(20)
-                    }
-                }
                 group(30) {
                     u16(0, 42)
                     string(1, "RouteGuidance")
-                    // Without these limits the iPhone may omit road names from 0x5201/0x5202.
                     u16(2, 64) // MaxCurrentRoadNameLength
                     u16(4, 64) // MaxAfterManeuverRoadNameLength
                     u16(6, 8)
-                    // The iPhone only sends 0x5204 lane guidance when the accessory says it can
-                    // store it; without these two it stays silent and no lane data arrives at all.
                     u16(7, 64) // MaxLaneGuidanceDescriptionLength
                     u16(8, 8) // MaxLaneGuidanceStorageCapacity
                 }
@@ -447,9 +395,6 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
         private const val ACCESSORY_WIFI_CONFIGURATION_INFORMATION = 0x5703
-        private const val LOCATION_INFORMATION = 0xfffb
-        private const val START_LOCATION_INFORMATION = 0xfffa
-        private const val STOP_LOCATION_INFORMATION = 0xfffc
         private val WIRELESS_PHONE_MESSAGES = intArrayOf(0x4e0d, 0x4e0e, 0x5702)
     }
 }

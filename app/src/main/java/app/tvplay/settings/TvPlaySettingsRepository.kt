@@ -8,7 +8,6 @@ import app.tvplay.CarPlayNightMode
 import app.tvplay.CarPlayNightSchedule
 import app.tvplay.DefaultConnectionMode
 import app.tvplay.TvPlayPreferences
-import app.tvplay.UsbChargingCurrent
 import app.tvplay.airplay.AirPlayIdentity
 import app.tvplay.airplay.AirPlayPhysicalSizeBasis
 import app.tvplay.airplay.CarPlayDisplayScale
@@ -117,10 +116,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
             TvPlayPreferences.savePhone(context, address, name)
         }
 
-        var usbChargingCurrent: UsbChargingCurrent
-            get() = AirPlayPersistence.loadUsbChargingCurrent(context)
-            set(value) = AirPlayPersistence.saveUsbChargingCurrent(context, value)
-
         var externalController: Boolean
             get() = AirPlayPersistence.loadExternalController(context)
             set(value) = AirPlayPersistence.saveExternalController(context, value)
@@ -181,10 +176,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
             get() = AirPlayPersistence.loadCarPlayNightSchedule(context)
             set(value) = AirPlayPersistence.saveCarPlayNightSchedule(context, value)
 
-        var ambientDelaySeconds: Int
-            get() = AirPlayPersistence.loadAmbientDelaySeconds(context)
-            set(value) = AirPlayPersistence.saveAmbientDelaySeconds(context, value)
-
         var appAppearance: AppAppearance
             get() = AirPlayPersistence.loadAppAppearance(context)
             set(value) = AirPlayPersistence.saveAppAppearance(context, value)
@@ -224,10 +215,6 @@ internal class TvPlaySettingsRepository(private val context: Context) {
         var temporarySystemBars: Boolean
             get() = AirPlayPersistence.loadTemporarySystemBars(context)
             set(value) = AirPlayPersistence.saveTemporarySystemBars(context, value)
-
-        var harmanFullscreen: Boolean
-            get() = AirPlayPersistence.loadHarmanFullscreen(context)
-            set(value) = AirPlayPersistence.saveHarmanFullscreen(context, value)
 
         var safeAreaDrawOutside: Boolean
             get() = AirPlayPersistence.loadSafeAreaDrawOutside(context)

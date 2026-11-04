@@ -77,9 +77,6 @@ internal object ProjectionSessionManager {
                 firmwareVersion = "1.0.0",
                 hardwareVersion = "1.0",
                 carPlayUsbInterfaceNumber = 3,
-                locationInformationEnabled = false,
-                vehicleStatusEnabled = false,
-                vehicleSpeedEnabled = false,
             ),
             label = "TVPlay",
             hostName = "tvplay-${compactId.lowercase()}",
@@ -97,8 +94,6 @@ internal object ProjectionSessionManager {
             existingWifiSsid = existingWifiSsid,
             existingWifiPassphrase = existingWifiPassphrase,
             existingWifiInterface = existingWifiInterface.trim().takeIf { it.isNotEmpty() },
-            locationReportingEnabled = false,
-            availableCurrentMilliAmps = AirPlayPersistence.loadUsbChargingCurrent(context).milliAmps,
         )
     }
 

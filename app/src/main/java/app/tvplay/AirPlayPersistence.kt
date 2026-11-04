@@ -68,7 +68,6 @@ object AirPlayPersistence {
     private const val KEY_CARPLAY_NIGHT_MODE = "carplay_night_mode"
     private const val KEY_CARPLAY_NIGHT_START = "carplay_night_start_minute"
     private const val KEY_CARPLAY_NIGHT_END = "carplay_night_end_minute"
-    private const val KEY_AMBIENT_LUX_THRESHOLD = "ambient_lux_threshold"
     private const val KEY_FPS = "display_fps"
     private const val KEY_MEDIA_BUFFER_MS = "media_buffer_ms" // wireless; was shared by both transports
     private const val KEY_WIRED_MEDIA_BUFFER_MS = "wired_media_buffer_ms"
@@ -92,17 +91,12 @@ object AirPlayPersistence {
     private const val KEY_HIDE_TOP_BAR = "hide_top_bar"
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
     private const val KEY_TEMPORARY_SYSTEM_BARS = "temporary_system_bars"
-    private const val KEY_HARMAN_FULLSCREEN = "harman_fullscreen"
-    private const val KEY_CARPLAY_SAME_TASK = "carplay_same_task"
     private const val KEY_SAFE_AREA_DRAW_OUTSIDE = "safe_area_draw_outside"
     private const val KEY_MAIN_DISPLAY_DISABLE_SAFE_AREA = "main_display_disable_safe_area"
     private const val KEY_BLACK_CORNER_RADIUS = "black_corner_radius_dp"
     private const val KEY_ADAPT_PIP_RESOLUTION = "adapt_pip_resolution"
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
-    private const val KEY_BT_SUSPEND_DURING_CARPLAY = "bt_suspend_during_carplay"
-    private const val KEY_BT_SUSPEND_DELAY = "bt_suspend_delay_seconds"
     private const val KEY_EXTERNAL_CONTROLLER = "external_controller"
-    private const val KEY_USB_CHARGING_CURRENT = "usb_charging_current"
     private const val KEY_MFI_TARGET = "mfi_target"
     private const val KEY_MFI_I2C_PATH = "mfi_i2c_path"
     private const val KEY_REMOTE_MFI_SERVER = "remote_mfi_server"
@@ -114,15 +108,6 @@ object AirPlayPersistence {
     const val DEFAULT_MODEL = "TVPlay"
     const val DEFAULT_OEM_LABEL = "TVPlay"
     const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-1"
-
-    fun loadAmbientDelaySeconds(context: Context): Int =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt("ambient_delay_seconds", 2).coerceIn(0, 60)
-
-    fun saveAmbientDelaySeconds(context: Context, seconds: Int) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putInt("ambient_delay_seconds", seconds.coerceIn(0, 60)).apply()
-    }
 
     fun loadDisplayScalePercent(context: Context): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -279,17 +264,6 @@ object AirPlayPersistence {
             .putInt(KEY_NAVIGATION_AUDIO_ATTENUATION,
                 app.tvplay.media.NavigationAudioGain.clamp(db))
             .apply()
-    }
-
-    /** Applies a nonzero setup-guide default only when no current or legacy choice exists. */
-    fun applySetupNavigationAudioChannelDefault(context: Context, channel: Int): Boolean {
-        if (channel !in AUDIO_CHANNELS || channel == 0) return false
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (prefs.contains(KEY_NAVIGATION_AUDIO_CHANNEL) || prefs.contains(KEY_NAVIGATION_STREAM_TYPE)) return false
-        prefs.edit()
-            .putInt(KEY_NAVIGATION_AUDIO_CHANNEL, channel)
-            .apply()
-        return true
     }
 
     fun loadWirelessEnabled(context: Context): Boolean =
@@ -510,24 +484,6 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadBtSuspendDuringCarplay(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_BT_SUSPEND_DURING_CARPLAY, false)
-
-    fun saveBtSuspendDuringCarplay(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_BT_SUSPEND_DURING_CARPLAY, enabled).apply()
-    }
-
-    fun loadBtSuspendDelaySeconds(context: Context): Int =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt(KEY_BT_SUSPEND_DELAY, 10).let { if (it in listOf(5, 10, 15, 30)) it else 10 }
-
-    fun saveBtSuspendDelaySeconds(context: Context, seconds: Int) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putInt(KEY_BT_SUSPEND_DELAY, if (seconds in listOf(5, 10, 15, 30)) seconds else 10).apply()
-    }
-
     /** Keys from a paired keyboard, remote or rotary controller drive CarPlay's knob alongside touch. */
     fun loadExternalController(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_EXTERNAL_CONTROLLER, false)
@@ -535,15 +491,6 @@ object AirPlayPersistence {
     fun saveExternalController(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_EXTERNAL_CONTROLLER, enabled).apply()
-    }
-
-    fun loadUsbChargingCurrent(context: Context): UsbChargingCurrent = UsbChargingCurrent.fromKey(
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_USB_CHARGING_CURRENT, null),
-    )
-
-    fun saveUsbChargingCurrent(context: Context, current: UsbChargingCurrent) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_USB_CHARGING_CURRENT, current.key).apply()
     }
 
     fun loadManufacturer(context: Context): String =
@@ -841,27 +788,6 @@ object AirPlayPersistence {
     fun saveTemporarySystemBars(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_TEMPORARY_SYSTEM_BARS, enabled)
-            .apply()
-    }
-
-    fun loadHarmanFullscreen(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_HARMAN_FULLSCREEN, false)
-
-    fun saveHarmanFullscreen(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_HARMAN_FULLSCREEN, enabled)
-            .apply()
-    }
-
-    /** Opens CarPlay in DiPlay's own task, for launchers that show that task in a card (#463). */
-    fun loadCarPlaySameTask(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_CARPLAY_SAME_TASK, false)
-
-    fun saveCarPlaySameTask(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_CARPLAY_SAME_TASK, enabled)
             .apply()
     }
 

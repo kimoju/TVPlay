@@ -41,17 +41,4 @@ class CarPlayNightModePersistenceTest {
             .putInt("carplay_night_end_minute", 24 * 60).apply()
         assertEquals(CarPlayNightSchedule(), AirPlayPersistence.loadCarPlayNightSchedule(context))
     }
-
-    @Test fun existingSavedDefaultsAreNotOverwritten() {
-        prefs.edit().putInt("ambient_delay_seconds", 5).commit()
-        assertEquals(5, AirPlayPersistence.loadAmbientDelaySeconds(context))
-    }
-
-    @Test fun transitionDelayPersistsIncludingImmediateSwitching() {
-        assertEquals(2, AirPlayPersistence.loadAmbientDelaySeconds(context))
-        AirPlayPersistence.saveAmbientDelaySeconds(context, 1)
-        assertEquals(1, AirPlayPersistence.loadAmbientDelaySeconds(context))
-        AirPlayPersistence.saveAmbientDelaySeconds(context, 0)
-        assertEquals(0, AirPlayPersistence.loadAmbientDelaySeconds(context))
-    }
 }

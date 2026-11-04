@@ -24,8 +24,6 @@ class Iap2WirelessControlClient(
         identification: Iap2IdentificationConfig,
         endpoint: Iap2WirelessCarPlayEndpoint,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
-        locationProvider: Iap2LocationProvider? = null,
-        vehicleStatusProvider: VehicleStatusProvider? = null,
         onReady: () -> Unit = {},
         beforeStartSession: () -> Unit = {},
         onStartSessionSent: (Iap2StartSessionSent) -> Unit = {},
@@ -43,11 +41,7 @@ class Iap2WirelessControlClient(
         }
 
         val deadline = WirelessControlDeadline(timeoutMillis)
-        val identified = identification.withVehicleStatusFrom(vehicleStatusProvider)
-        if (identified.vehicleStatusEnabled != identification.vehicleStatusEnabled) {
-            onProgress("iap2 no battery reading: not declaring an electric vehicle")
-        }
-        Iap2IdentificationClient(session).identify(identified, deadline.requireRemaining(), onProgress)
+        Iap2IdentificationClient(session).identify(identification, deadline.requireRemaining(), onProgress)
         onProgress("iap2 identification accepted")
         var stage = Iap2WirelessControlStage.IDENTIFIED
 
@@ -74,12 +68,35 @@ class Iap2WirelessControlClient(
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
         var wirelessCarPlayAvailableSeen = false
-        val location = Iap2LocationReporter(locationProvider, onProgress)
-        val vehicleStatus = Iap2VehicleStatusReporter(vehicleStatusProvider, onProgress)
-        try {
-            while (true) {
-                val remaining = deadline.remainingMillis(keepAliveAfterDeadline)
-                if (remaining == 0L) {
+        while (true) {
+            val remaining = deadline.remainingMillis(keepAliveAfterDeadline)
+            if (remaining == 0L) {
+                return Iap2WirelessControlResult(
+                    Iap2WirelessControlTerminal.TIMED_OUT,
+                    stage,
+                    forwardedFrames,
+                    wifiConfigurationsSent,
+                    carPlayStartSessionsSent,
+                    transportNotificationSeen,
+                    postTransportWiFiConfigurationsSent,
+                    wirelessCarPlayAvailableSeen,
+                )
+            }
+            val incoming = session.recv(remaining)
+            if (incoming == null) {
+                if (session.isClosed) {
+                    return Iap2WirelessControlResult(
+                        Iap2WirelessControlTerminal.CHANNEL_CLOSED,
+                        stage,
+                        forwardedFrames,
+                        wifiConfigurationsSent,
+                        carPlayStartSessionsSent,
+                        transportNotificationSeen,
+                        postTransportWiFiConfigurationsSent,
+                        wirelessCarPlayAvailableSeen,
+                    )
+                }
+                if (deadline.remainingMillis(keepAliveAfterDeadline) == 0L) {
                     return Iap2WirelessControlResult(
                         Iap2WirelessControlTerminal.TIMED_OUT,
                         stage,
@@ -91,142 +108,101 @@ class Iap2WirelessControlClient(
                         wirelessCarPlayAvailableSeen,
                     )
                 }
-                location.tick(::sendControl)
-                vehicleStatus.tick(::sendControl)
-                val pollTimeout = vehicleStatus.pollTimeout(location.pollTimeout(remaining))
-                val incoming = session.recv(pollTimeout)
-                if (incoming == null) {
-                    if (session.isClosed) {
-                        return Iap2WirelessControlResult(
-                            Iap2WirelessControlTerminal.CHANNEL_CLOSED,
-                            stage,
-                            forwardedFrames,
-                            wifiConfigurationsSent,
-                            carPlayStartSessionsSent,
-                            transportNotificationSeen,
-                            postTransportWiFiConfigurationsSent,
-                            wirelessCarPlayAvailableSeen,
-                        )
+                continue
+            }
+
+            when (incoming.messageId) {
+                REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
+                    onProgress("iap2 rx=0x5702 request-wifi-configuration")
+                    val postTransport = transportNotificationSeen
+                    val sentCount = if (postTransport) {
+                        postTransportWiFiConfigurationsSent
+                    } else {
+                        preTransportWiFiConfigurationsSent
                     }
-                    if (deadline.remainingMillis(keepAliveAfterDeadline) == 0L) {
-                        return Iap2WirelessControlResult(
-                            Iap2WirelessControlTerminal.TIMED_OUT,
-                            stage,
-                            forwardedFrames,
-                            wifiConfigurationsSent,
-                            carPlayStartSessionsSent,
-                            transportNotificationSeen,
-                            postTransportWiFiConfigurationsSent,
-                            wirelessCarPlayAvailableSeen,
-                        )
+                    val limit = if (postTransport) {
+                        MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS
+                    } else {
+                        MAX_PRE_TRANSPORT_WIFI_CONFIGURATION_SENDS
                     }
-                    continue
+                    if (sentCount >= limit) {
+                        onProgress(
+                            "iap2 0x5703 ignored: maximum Wi-Fi configuration sends reached",
+                        )
+                    } else {
+                        sendControl(accessoryWiFiConfiguration(endpoint))
+                        stage = later(
+                            stage,
+                            if (postTransport) {
+                                Iap2WirelessControlStage.POST_TRANSPORT_WIFI_CONFIG_SENT
+                            } else {
+                                Iap2WirelessControlStage.WIFI_CONFIG_SENT
+                            },
+                        )
+                        wifiConfigurationsSent++
+                        if (postTransport) {
+                            postTransportWiFiConfigurationsSent++
+                        } else {
+                            preTransportWiFiConfigurationsSent++
+                        }
+                        onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
+                    }
                 }
 
-                when (incoming.messageId) {
-                    REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
-                        onProgress("iap2 rx=0x5702 request-wifi-configuration")
-                        val postTransport = transportNotificationSeen
-                        val sentCount = if (postTransport) {
-                            postTransportWiFiConfigurationsSent
-                        } else {
-                            preTransportWiFiConfigurationsSent
-                        }
-                        val limit = if (postTransport) {
-                            MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS
-                        } else {
-                            MAX_PRE_TRANSPORT_WIFI_CONFIGURATION_SENDS
-                        }
-                        if (sentCount >= limit) {
-                            onProgress(
-                                "iap2 0x5703 ignored: maximum Wi-Fi configuration sends reached",
-                            )
-                        } else {
-                            sendControl(accessoryWiFiConfiguration(endpoint))
-                            stage = later(
-                                stage,
-                                if (postTransport) {
-                                    Iap2WirelessControlStage.POST_TRANSPORT_WIFI_CONFIG_SENT
-                                } else {
-                                    Iap2WirelessControlStage.WIFI_CONFIG_SENT
-                                },
-                            )
-                            wifiConfigurationsSent++
-                            if (postTransport) {
-                                postTransportWiFiConfigurationsSent++
-                            } else {
-                                preTransportWiFiConfigurationsSent++
-                            }
-                            onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
-                        }
-                    }
+                CARPLAY_AVAILABILITY -> {
+                    onProgress("iap2 rx=0x4300 carplay-availability")
+                    onProgress(carPlayAvailabilityDiagnostic(incoming))
+                    beforeStartSession()
+                    sendStartSession(endpoint, ::sendControl, onStartSessionSent)
+                    stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
+                    carPlayStartSessionsSent++
+                    onProgress("iap2 tx=0x4301 carplay-start-session")
+                }
 
-                    CARPLAY_AVAILABILITY -> {
-                        onProgress("iap2 rx=0x4300 carplay-availability")
-                        onProgress(carPlayAvailabilityDiagnostic(incoming))
-                        beforeStartSession()
-                        sendStartSession(endpoint, ::sendControl, onStartSessionSent)
-                        stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
-                        carPlayStartSessionsSent++
-                        onProgress("iap2 tx=0x4301 carplay-start-session")
-                    }
+                WIRELESS_CARPLAY_UPDATE -> {
+                    val available = Iap2WirelessMessages.wirelessCarPlayAvailability(incoming)
+                    if (available) wirelessCarPlayAvailableSeen = true
+                    onProgress("iap2 rx=0x4e0d wireless-carplay-update available=$available")
+                }
 
-                    WIRELESS_CARPLAY_UPDATE -> {
-                        val available = Iap2WirelessMessages.wirelessCarPlayAvailability(incoming)
-                        if (available) wirelessCarPlayAvailableSeen = true
-                        onProgress("iap2 rx=0x4e0d wireless-carplay-update available=$available")
-                    }
-
-                    DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION -> {
-                        transportNotificationSeen = true
-                        val identifiers = Iap2WirelessMessages.deviceTransportIdentifier(incoming)
-                        stage = later(stage, Iap2WirelessControlStage.TRANSPORT_NOTIFIED)
+                DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION -> {
+                    transportNotificationSeen = true
+                    val identifiers = Iap2WirelessMessages.deviceTransportIdentifier(incoming)
+                    stage = later(stage, Iap2WirelessControlStage.TRANSPORT_NOTIFIED)
+                    onProgress(
+                        "iap2 rx=0x4e0e device-transport-identifier " +
+                            "bluetooth=${identifiers.bluetoothMac ?: "none"} " +
+                            "usb=${identifiers.usbTransportIdentifier ?: "none"}; " +
+                            "resending 0x5703",
+                    )
+                    if (
+                        postTransportWiFiConfigurationsSent >=
+                        MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS
+                    ) {
                         onProgress(
-                            "iap2 rx=0x4e0e device-transport-identifier " +
-                                "bluetooth=${identifiers.bluetoothMac ?: "none"} " +
-                                "usb=${identifiers.usbTransportIdentifier ?: "none"}; " +
-                                "resending 0x5703",
+                            "iap2 post-transport 0x5703 ignored: " +
+                                "maximum Wi-Fi configuration sends reached",
                         )
-                        if (
-                            postTransportWiFiConfigurationsSent >=
-                            MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS
-                        ) {
-                            onProgress(
-                                "iap2 post-transport 0x5703 ignored: " +
-                                    "maximum Wi-Fi configuration sends reached",
-                            )
-                        } else {
-                            sendControl(accessoryWiFiConfiguration(endpoint))
-                            stage = later(
-                                stage,
-                                Iap2WirelessControlStage.POST_TRANSPORT_WIFI_CONFIG_SENT,
-                            )
-                            wifiConfigurationsSent++
-                            postTransportWiFiConfigurationsSent++
-                            onProgress(
-                                "iap2 tx=0x5703 post-transport accessory-wifi-configuration",
-                            )
-                        }
+                    } else {
+                        sendControl(accessoryWiFiConfiguration(endpoint))
+                        stage = later(
+                            stage,
+                            Iap2WirelessControlStage.POST_TRANSPORT_WIFI_CONFIG_SENT,
+                        )
+                        wifiConfigurationsSent++
+                        postTransportWiFiConfigurationsSent++
+                        onProgress(
+                            "iap2 tx=0x5703 post-transport accessory-wifi-configuration",
+                        )
                     }
+                }
 
-                    Iap2VehicleStatus.START_VEHICLE_STATUS_UPDATES, Iap2VehicleStatus.STOP_VEHICLE_STATUS_UPDATES -> {
-                        vehicleStatus.handle(incoming, ::sendControl)
-                    }
-
-                    Iap2LocationMessages.START_LOCATION_INFORMATION,
-                    Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
-                        location.handle(incoming, ::sendControl)
-                    }
-
-                    else -> {
-                        rxLog.line(incoming.messageId)?.let(onProgress)
-                        onIncoming(incoming)
-                        forwardedFrames++
-                    }
+                else -> {
+                    rxLog.line(incoming.messageId)?.let(onProgress)
+                    onIncoming(incoming)
+                    forwardedFrames++
                 }
             }
-        } finally {
-            locationProvider?.stop()
         }
     }
 

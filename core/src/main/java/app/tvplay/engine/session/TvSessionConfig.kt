@@ -56,6 +56,7 @@ data class TvStreamServerConfig(
     val model: String = "TVPlay",
     val oemLabel: String = "TVPlay",
     val icons: List<TvIconAsset> = emptyList(),
+    val rightHandDrive: Boolean = false,
     val mainBufferedAudio: Boolean = false,
 ) {
     val bufferedAudioOutputEnabled: Boolean
@@ -96,8 +97,8 @@ data class TvAccessoryIdentitySpec(
     val firmwareVersion: String,
     val hardwareVersion: String,
     val carPlayUsbInterfaceNumber: Int = 0,
-    val language: String = "zh",
-    val externalAccessoryProtocol: String = "app.tvplay",
+    val language: String = "en",
+    val externalAccessoryProtocol: String = "com.shilapi.xcertplay",
     val wireless: TvWirelessIdentitySpec? = null,
 ) {
     init {

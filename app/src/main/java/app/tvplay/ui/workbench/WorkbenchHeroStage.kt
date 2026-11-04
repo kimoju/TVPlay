@@ -28,9 +28,9 @@ typealias WorkbenchStagePane = WorkbenchHeroStage
  * Left pane of the 10-foot Apple TV-style workbench (`TvWorkbenchActivity`).
  *
  * Displays:
- * 1. Live wireless CarPlay receiver stage card (active session badge, primary launch CTA).
- * 2. Quick wireless mode switcher (`Wi-Fi Direct 5GHz 直连` vs `家庭局域网 Wi-Fi / 网线`).
- * 3. 3-step visual iPhone wireless connection guide with the TV's Bluetooth name.
+ * 1. Live wireless / USB CarPlay receiver stage card (active session badge, primary launch CTA).
+ * 2. Quick transport mode switcher (`无线 CarPlay` vs `USB 有线 CarPlay`, plus `Wi-Fi Direct` vs `家庭局域网`).
+ * 3. 3-step visual iPhone connection guide.
  */
 class WorkbenchHeroStage(
     private val context: Context,
@@ -39,7 +39,8 @@ class WorkbenchHeroStage(
     val root: FrameLayout = FrameLayout(context)
     var primaryLaunchButton: View = View(context)
         private set
-    var onLaunchProjection: (() -> Unit)? = null
+    var onLaunchProjection: ((Boolean) -> Unit)? = null
+    var onSelectTransportMode: ((Boolean) -> Unit)? = null
     var onSelectWirelessMode: ((TvWirelessMode) -> Unit)? = null
     var onOpenBluetoothSettings: (() -> Unit)? = null
 
@@ -48,11 +49,12 @@ class WorkbenchHeroStage(
         pendingReconnect: Boolean = false,
         onDisconnectSession: () -> Unit = {},
     ) {
+        val wirelessEnabled = settings.connection.wirelessEnabled
         val wirelessMode = settings.connection.wirelessHotspotMode
-        val modeLabel = if (wirelessMode == TvWirelessMode.LAN_WIFI) {
-            "家庭局域网 Wi-Fi / 网线直连"
-        } else {
-            "Wi-Fi Direct 5GHz 免配置直连"
+        val modeLabel = when {
+            !wirelessEnabled -> "USB 有线数据线直连"
+            wirelessMode == TvWirelessMode.LAN_WIFI -> "无线 · 家庭局域网 Wi-Fi / 网线直连"
+            else -> "无线 · Wi-Fi Direct 5GHz 免配置直连"
         }
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
         val pairedAddress = settings.connection.pairedPhoneAddress
@@ -61,12 +63,13 @@ class WorkbenchHeroStage(
         } else {
             "自动识别已配对的 iPhone"
         }
-        val hotspotSummary = when (wirelessMode) {
-            TvWirelessMode.LAN_WIFI -> {
+        val hotspotSummary = when {
+            !wirelessEnabled -> "USB 有线模式 · 支持即插即用低延迟投屏（无需蓝牙配对）"
+            wirelessMode == TvWirelessMode.LAN_WIFI -> {
                 val ssid = settings.connection.existingWifiSsid
                 if (ssid.isNotBlank()) "局域网 Wi-Fi：$ssid" else "局域网模式（自动接入电视当前 Wi-Fi 或网线）"
             }
-            TvWirelessMode.WIFI_DIRECT -> {
+            else -> {
                 val ch = settings.connection.wifiP2pPreferredChannel
                 "Wi-Fi Direct 5GHz 点对点通道 · 信道：${if (ch == 0) "自动优选" else ch.toString()}"
             }
@@ -79,6 +82,7 @@ class WorkbenchHeroStage(
 
         val view = build(
             model = StageModel(
+                wirelessEnabled = wirelessEnabled,
                 wirelessMode = wirelessMode,
                 wirelessModeLabel = modeLabel,
                 bluetoothDeviceName = btName,
@@ -91,11 +95,17 @@ class WorkbenchHeroStage(
             palette = TvColorScheme.resolve(context),
             callbacks = object : Callbacks {
                 override fun onStartOrEnterProjection() {
-                    onLaunchProjection?.invoke()
+                    onLaunchProjection?.invoke(settings.connection.wirelessEnabled)
+                }
+
+                override fun onChooseTransportMode(wireless: Boolean) {
+                    if (settings.connection.wirelessEnabled != wireless) {
+                        onSelectTransportMode?.invoke(wireless)
+                    }
                 }
 
                 override fun onChooseWirelessMode(mode: TvWirelessMode) {
-                    if (settings.connection.wirelessHotspotMode != mode) {
+                    if (!settings.connection.wirelessEnabled || settings.connection.wirelessHotspotMode != mode) {
                         onSelectWirelessMode?.invoke(mode)
                     }
                 }
@@ -120,6 +130,7 @@ class WorkbenchHeroStage(
     }
 
     data class StageModel(
+        val wirelessEnabled: Boolean,
         val wirelessMode: TvWirelessMode,
         val wirelessModeLabel: String,
         val bluetoothDeviceName: String,
@@ -132,6 +143,7 @@ class WorkbenchHeroStage(
 
     interface Callbacks {
         fun onStartOrEnterProjection()
+        fun onChooseTransportMode(wireless: Boolean)
         fun onChooseWirelessMode(mode: TvWirelessMode)
         fun onStopSession()
         fun onOpenBluetoothSettings()
@@ -169,8 +181,8 @@ class WorkbenchHeroStage(
             }
         }
         val statusText = when {
-            model.sessionActive -> "已连接 iPhone · 正在无线投屏"
-            model.sessionRunning -> "后台待命 · 等待 iPhone 蓝牙连接"
+            model.sessionActive -> "已连接 iPhone · 正在投屏"
+            model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待 iPhone 蓝牙连接" else "后台待命 · 等待 iPhone USB 连接"
             else -> "就绪 · 内置离线 MFi 认证 · 点击下方开启投屏"
         }
         badgeRow.addView(statusDot)
@@ -190,16 +202,21 @@ class WorkbenchHeroStage(
         }
         titleCol.addView(
             label(
-                "无线 Apple CarPlay 电视接收端",
+                "Apple CarPlay 电视接收端",
                 23,
                 palette.primaryText,
                 bold = true,
             ),
         )
         titleCol.addView(space(dp(4)))
+        val subtitleLine = if (model.wirelessEnabled) {
+            "${model.wirelessModeLabel} · 电视蓝牙：${model.bluetoothDeviceName}"
+        } else {
+            "${model.wirelessModeLabel} · 支持插入数据线自动启动"
+        }
         titleCol.addView(
             label(
-                "${model.wirelessModeLabel} · 电视蓝牙：${model.bluetoothDeviceName}",
+                subtitleLine,
                 14,
                 palette.secondaryText,
             ),
@@ -234,7 +251,8 @@ class WorkbenchHeroStage(
             text = when {
                 model.sessionActive -> "进入全屏 CarPlay 画面"
                 model.sessionRunning -> "打开全屏投屏等待画面"
-                else -> "立即启动全屏 CarPlay 投屏"
+                model.wirelessEnabled -> "立即启动无线 CarPlay 投屏"
+                else -> "立即启动 USB 有线 CarPlay 投屏"
             }
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             minHeight = dp(56)
@@ -265,86 +283,152 @@ class WorkbenchHeroStage(
         column.addView(heroCard)
         column.addView(space(dp(16)))
 
-        // 2. Quick Wireless Mode Switcher
+        // 2. Quick Transport & Wireless Mode Switcher
         val modeCard = card(palette, highlighted = false)
-        modeCard.addView(label("无线传输模式切换", 16, palette.primaryText, bold = true))
+        modeCard.addView(label("连接模式切换（无线 / USB 有线）", 16, palette.primaryText, bold = true))
         modeCard.addView(space(dp(10)))
-        val switchRow = row()
-        val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
-        val directBtn = TvPlayButton(context).apply {
-            text = if (isDirect) "✓ Wi-Fi Direct 直连" else "Wi-Fi Direct 直连"
+
+        val transportRow = row()
+        val wirelessBtn = TvPlayButton(context).apply {
+            text = if (model.wirelessEnabled) "✓ 无线 CarPlay" else "无线 CarPlay"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             style(
-                if (isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                if (model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
             )
-            setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
+            setOnClickListener { callbacks.onChooseTransportMode(true) }
         }
-        val lanBtn = TvPlayButton(context).apply {
-            text = if (!isDirect) "✓ 家庭局域网 / 网线" else "家庭局域网 / 网线"
+        val usbBtn = TvPlayButton(context).apply {
+            text = if (!model.wirelessEnabled) "✓ USB 有线直连" else "USB 有线直连"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             style(
-                if (!isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                if (!model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
             )
-            setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.LAN_WIFI) }
+            setOnClickListener { callbacks.onChooseTransportMode(false) }
         }
-        switchRow.addView(
-            directBtn,
+        transportRow.addView(
+            wirelessBtn,
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) },
         )
-        switchRow.addView(
-            lanBtn,
+        transportRow.addView(
+            usbBtn,
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
-        modeCard.addView(switchRow)
+        modeCard.addView(transportRow)
+
+        if (model.wirelessEnabled) {
+            modeCard.addView(space(dp(10)))
+            val switchRow = row()
+            val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
+            val directBtn = TvPlayButton(context).apply {
+                text = if (isDirect) "✓ Wi-Fi Direct 直连" else "Wi-Fi Direct 直连"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                style(
+                    if (isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                    palette,
+                    overlay = false,
+                )
+                setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
+            }
+            val lanBtn = TvPlayButton(context).apply {
+                text = if (!isDirect) "✓ 家庭局域网 / 网线" else "家庭局域网 / 网线"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                style(
+                    if (!isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                    palette,
+                    overlay = false,
+                )
+                setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.LAN_WIFI) }
+            }
+            switchRow.addView(
+                directBtn,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) },
+            )
+            switchRow.addView(
+                lanBtn,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            modeCard.addView(switchRow)
+        }
         column.addView(modeCard)
         column.addView(space(dp(16)))
 
         // 3. 3-Step Visual Connection Guide
         val guideCard = card(palette, highlighted = false)
-        guideCard.addView(label("3 步无线连接 iPhone 指南", 17, palette.primaryText, bold = true))
-        guideCard.addView(space(dp(12)))
-
-        if (isDirect) {
+        if (!model.wirelessEnabled) {
+            guideCard.addView(label("3 步 USB 有线连接 iPhone 指南", 17, palette.primaryText, bold = true))
+            guideCard.addView(space(dp(12)))
             guideCard.addView(
                 stepItem(
                     "1",
-                    "开启 iPhone 与电视的蓝牙和 Wi-Fi",
-                    "Wi-Fi Direct 免配置直连模式无需填写路由器密码，自动建立 5GHz 高速无线通道。",
+                    "使用支持数据传输的 USB 线连接电视与 iPhone",
+                    "请插在电视或机顶盒的 USB 接口上（仅充电线无法传输 CarPlay 数据）。",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(10)))
+            guideCard.addView(
+                stepItem(
+                    "2",
+                    "解锁 iPhone 并点击「信任此电脑」",
+                    "在 iPhone 弹窗点击「信任」并输入锁屏密码，同时在电视弹窗允许 USB 设备访问。",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(10)))
+            guideCard.addView(
+                stepItem(
+                    "3",
+                    "点击上方「立即启动 USB 有线 CarPlay 投屏」",
+                    "首次使用 USB 模式时，若系统弹出本地虚拟网卡授权请点击允许（仅用于读取 USB 网卡视频流）。",
                     palette,
                 ),
             )
         } else {
+            val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
+            guideCard.addView(label("3 步无线连接 iPhone 指南", 17, palette.primaryText, bold = true))
+            guideCard.addView(space(dp(12)))
+            if (isDirect) {
+                guideCard.addView(
+                    stepItem(
+                        "1",
+                        "开启 iPhone 与电视的蓝牙和 Wi-Fi",
+                        "Wi-Fi Direct 免配置直连模式无需填写路由器密码，自动建立 5GHz 高速无线通道。",
+                        palette,
+                    ),
+                )
+            } else {
+                guideCard.addView(
+                    stepItem(
+                        "1",
+                        "将电视与 iPhone 连接至同一家庭路由器",
+                        "电视可通过 Wi-Fi 或千兆网线接入路由器，确保与 iPhone 处于同一局域网。",
+                        palette,
+                    ),
+                )
+            }
+            guideCard.addView(space(dp(10)))
             guideCard.addView(
                 stepItem(
-                    "1",
-                    "将电视与 iPhone 连接至同一家庭路由器",
-                    "电视可通过 Wi-Fi 或千兆网线接入路由器，确保与 iPhone 处于同一局域网。",
+                    "2",
+                    "蓝牙配对「${model.bluetoothDeviceName}」",
+                    "在 iPhone「设置 → 蓝牙」中搜索并配对本电视（当前目标：${model.pairedPhoneSummary}）。",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(10)))
+            guideCard.addView(
+                stepItem(
+                    "3",
+                    "点击上方「立即启动无线 CarPlay 投屏」",
+                    "首次连接时在 iPhone 弹窗确认「使用 CarPlay 车载」，即可进入 60fps 全屏画面。",
                     palette,
                 ),
             )
         }
-        guideCard.addView(space(dp(10)))
-        guideCard.addView(
-            stepItem(
-                "2",
-                "蓝牙配对「${model.bluetoothDeviceName}」",
-                "在 iPhone「设置 → 蓝牙」中搜索并配对本电视（当前目标：${model.pairedPhoneSummary}）。",
-                palette,
-            ),
-        )
-        guideCard.addView(space(dp(10)))
-        guideCard.addView(
-            stepItem(
-                "3",
-                "点击上方「立即启动全屏 CarPlay 投屏」",
-                "首次连接时在 iPhone 弹窗确认「使用 CarPlay 车载」，即可进入 60fps 全屏画面。",
-                palette,
-            ),
-        )
 
         column.addView(guideCard)
         scroll.addView(column)

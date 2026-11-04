@@ -2,7 +2,6 @@ package app.tvplay.ui.workbench
 
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
 import android.provider.Settings
@@ -15,9 +14,10 @@ import androidx.core.view.setPadding
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvSettingsRepository
+import app.tvplay.config.WiredPermissions
 import app.tvplay.config.WirelessPermissions
 import app.tvplay.engine.network.BluetoothRadioCheck
-import app.tvplay.engine.session.TvWirelessMode
+import app.tvplay.engine.network.UsbTunnelVpnService
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.DiagnosticExportStore
 import app.tvplay.runtime.PendingReconnect
@@ -39,7 +39,7 @@ typealias TvPlayWorkbenchActivity = TvWorkbenchActivity
  * Primary 10-foot Android TV setup & control workbench for TVPlay.
  *
  * Uses an Apple TV / Android TV dual-pane layout:
- * - Left pane ([WorkbenchHeroStage]): Live receiver stage, wireless mode switcher, 3-step connection guide, and primary Launch CTA.
+ * - Left pane ([WorkbenchHeroStage]): Live receiver stage, wireless/USB mode switcher, 3-step connection guide, and primary Launch CTA.
  * - Right pane ([WorkbenchSettingsTabs]): Tabbed D-pad-friendly settings (`CONNECTION`, `DISPLAY`, `AUDIO`, `ABOUT`).
  */
 open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
@@ -52,11 +52,11 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private lateinit var settings: TvSettingsRepository
     private lateinit var stagePane: WorkbenchHeroStage
     private lateinit var settingsPane: WorkbenchSettingsTabs
+    private var pendingWirelessLaunch: Boolean = true
     private val themeModeDiagnostics = ThemeModeDiagnostics()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = TvSettingsRepository(this)
-        settings.connection.wirelessEnabled = true
         appNight = resolveAppNightNow()
         AppAppearanceRuntime.publishHost(this, appNight)
         setTheme(if (appNight) R.style.Theme_TVPlay else R.style.Theme_TVPlay_Light)
@@ -72,7 +72,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
 
         if (savedInstanceState == null && shouldAutoLaunchProjection(intent)) {
-            launchProjectionStage()
+            val wireless = intent.getBooleanExtra("wireless", settings.connection.wirelessEnabled)
+            launchProjectionStage(wireless)
         }
     }
 
@@ -84,7 +85,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             return
         }
         if (shouldAutoLaunchProjection(intent)) {
-            launchProjectionStage()
+            val wireless = intent.getBooleanExtra("wireless", settings.connection.wirelessEnabled)
+            launchProjectionStage(wireless)
         }
     }
 
@@ -111,7 +113,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
-            launchProjectionStage()
+            launchProjectionStage(settings.connection.wirelessEnabled)
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -129,8 +131,16 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
 
         stagePane = WorkbenchHeroStage(this, settings).apply {
-            onLaunchProjection = {
-                launchProjectionStage()
+            onLaunchProjection = { wireless ->
+                launchProjectionStage(wireless)
+            }
+            onSelectTransportMode = { wireless ->
+                settings.connection.wirelessEnabled = wireless
+                if (CarPlayBackgroundSession.hasSession()) {
+                    PendingReconnect.mark()
+                }
+                refreshWorkbenchStatus()
+                settingsPane.refresh()
             }
             onSelectWirelessMode = { mode ->
                 settings.connection.wirelessEnabled = true
@@ -147,7 +157,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
 
         settingsPane = WorkbenchSettingsTabs(this, settings).apply {
-            onChooseIphoneClicked = { showChooseIphoneDialog() }
+            onChooseIphoneClicked = { showChooseIphoneDialog(launchAfterSelect = false) }
             onPairBluetoothClicked = { openSystemBluetoothSettings() }
             onSaveDiagnosticLogClicked = { exportDiagnosticReport() }
             onSettingChanged = {
@@ -196,30 +206,78 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         return intent.hasExtra("wireless") || intent.hasExtra("auto_connect_token")
     }
 
-    private fun launchProjectionStage() {
-        settings.connection.wirelessEnabled = true
-        val missingPermissions = WirelessPermissions.missing(
-            context = this,
-            wirelessMode = settings.connection.wirelessHotspotMode,
-        )
-        if (missingPermissions.isNotEmpty()) {
-            requestPermissions(missingPermissions.toTypedArray(), REQUEST_PROJECTION_PERMISSIONS)
-            return
+    private fun launchProjectionStage(
+        wireless: Boolean = settings.connection.wirelessEnabled,
+        skipPermissionPrompt: Boolean = false,
+    ) {
+        pendingWirelessLaunch = wireless
+        settings.connection.wirelessEnabled = wireless
+
+        if (!skipPermissionPrompt) {
+            val missingPermissions = if (wireless) {
+                WirelessPermissions.missing(
+                    context = this,
+                    wirelessMode = settings.connection.wirelessHotspotMode,
+                )
+            } else {
+                WiredPermissions.missing(this)
+            }
+            if (missingPermissions.isNotEmpty()) {
+                val requestStarted = runCatching {
+                    requestPermissions(missingPermissions.toTypedArray(), REQUEST_PROJECTION_PERMISSIONS)
+                    true
+                }.getOrDefault(false)
+                if (requestStarted) return
+            }
         }
 
-        if (!BluetoothRadioCheck.isOn(this)) {
-            Toast.makeText(
-                this,
-                getString(R.string.turn_on_bluetooth_before_starting_wireless_carplay),
-                Toast.LENGTH_LONG,
-            ).show()
-            openSystemBluetoothSettings()
-            return
+        if (wireless) {
+            if (!BluetoothRadioCheck.isOn(this)) {
+                Toast.makeText(
+                    this,
+                    getString(R.string.turn_on_bluetooth_before_starting_wireless_carplay),
+                    Toast.LENGTH_LONG,
+                ).show()
+                openSystemBluetoothSettings()
+                return
+            }
+
+            if (settings.connection.pairedPhoneAddress == null) {
+                val bonded = TvPlayBluetooth.bondedDevices(this)
+                val iPhones = bonded.filter { it.name.contains("iPhone", ignoreCase = true) }
+                when {
+                    iPhones.size == 1 -> {
+                        val single = iPhones.single()
+                        settings.connection.savePairedPhone(single.address, single.name)
+                    }
+                    bonded.size > 1 -> {
+                        showChooseIphoneDialog(launchAfterSelect = true)
+                        return
+                    }
+                    bonded.size == 1 -> {
+                        val single = bonded.single()
+                        settings.connection.savePairedPhone(single.address, single.name)
+                    }
+                }
+            }
+        } else {
+            val vpnPrepare = UsbTunnelVpnService.prepare(this)
+            if (vpnPrepare != null) {
+                val dialogStarted = runCatching {
+                    startActivityForResult(vpnPrepare, REQUEST_VPN_PERMISSION)
+                    true
+                }.getOrDefault(false)
+                if (dialogStarted) return
+            }
         }
 
+        openStageActivity(wireless)
+    }
+
+    private fun openStageActivity(wireless: Boolean) {
         startActivity(
             CarPlayScreen.intent(this)
-                .putExtra("wireless", true),
+                .putExtra("wireless", wireless),
         )
     }
 
@@ -231,38 +289,35 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_PROJECTION_PERMISSIONS) {
-            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                launchProjectionStage()
-            } else {
-                Toast.makeText(
-                    this,
-                    getString(R.string.permissions_are_required_to_start_carplay),
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
+            launchProjectionStage(pendingWirelessLaunch, skipPermissionPrompt = true)
         }
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_SAVE_DIAGNOSTIC_LOG) {
-            val uri = data?.data ?: return
-            val report = TvDiagnosticsLogger.buildReport(this)
-            runCatching {
-                DiagnosticExportStore.write(contentResolver, uri, report)
-                Toast.makeText(this, "诊断日志报告已保存", Toast.LENGTH_SHORT).show()
-            }.onFailure { error ->
-                Toast.makeText(
-                    this,
-                    "保存诊断日志失败：${error.message}",
-                    Toast.LENGTH_LONG,
-                ).show()
+        when (requestCode) {
+            REQUEST_VPN_PERMISSION -> {
+                openStageActivity(pendingWirelessLaunch)
+            }
+            REQUEST_SAVE_DIAGNOSTIC_LOG -> {
+                val uri = data?.data ?: return
+                val report = TvDiagnosticsLogger.buildReport(this)
+                runCatching {
+                    DiagnosticExportStore.write(contentResolver, uri, report)
+                    Toast.makeText(this, "诊断日志报告已保存", Toast.LENGTH_SHORT).show()
+                }.onFailure { error ->
+                    Toast.makeText(
+                        this,
+                        "保存诊断日志失败：${error.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
         }
     }
 
-    private fun showChooseIphoneDialog() {
+    private fun showChooseIphoneDialog(launchAfterSelect: Boolean = false) {
         val bonded = TvPlayBluetooth.bondedDevices(this)
         if (bonded.isEmpty()) {
             appDialogBuilder(this)
@@ -293,6 +348,9 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 refreshWorkbenchStatus()
                 settingsPane.refresh()
                 dialog.dismiss()
+                if (launchAfterSelect) {
+                    openStageActivity(wireless = true)
+                }
             }
             .setNeutralButton("系统蓝牙设置") { _, _ ->
                 openSystemBluetoothSettings()
@@ -355,6 +413,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     companion object {
         private const val REQUEST_PROJECTION_PERMISSIONS = 1001
+        private const val REQUEST_VPN_PERMISSION = 1002
         private const val REQUEST_SAVE_DIAGNOSTIC_LOG = 1003
 
         fun isLauncherIntent(intent: Intent?): Boolean =

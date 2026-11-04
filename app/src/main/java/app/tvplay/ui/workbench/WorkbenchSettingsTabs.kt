@@ -33,7 +33,7 @@ import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
 
 enum class SettingsCategory(val title: String) {
-    CONNECTION("无线连接"),
+    CONNECTION("连接与配对"),
     DISPLAY("显示与画质"),
     AUDIO("音频与麦克风"),
     ABOUT("系统与诊断"),
@@ -203,6 +203,24 @@ class WorkbenchSettingsTabs(
     private fun buildConnectionPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(4), dp(4), dp(16))
+
+        addView(sectionHeader("主连接方式（无线 / USB 有线）"))
+        addView(
+            cycleCard(
+                title = "CarPlay 连接模式",
+                subtitle = "支持无线 CarPlay（蓝牙握手 + 高速 Wi-Fi）与 USB 有线数据线直连双模式",
+                options = listOf(
+                    true to "无线 CarPlay 投屏",
+                    false to "USB 有线数据线直连",
+                ),
+                current = settings.connection.wirelessEnabled,
+            ) { wireless ->
+                settings.connection.wirelessEnabled = wireless
+                onSettingChanged?.invoke()
+                refresh()
+            },
+            cardLayoutParams(),
+        )
 
         addView(sectionHeader("蓝牙配对与目标 iPhone"))
         val phoneAddress = settings.connection.pairedPhoneAddress

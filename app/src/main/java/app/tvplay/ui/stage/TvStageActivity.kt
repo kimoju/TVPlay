@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -27,6 +28,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
 import app.tvplay.config.MfiAssetInstaller
+import app.tvplay.config.TvDeviceCapabilities
 import app.tvplay.config.TvPreferencesStore
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
@@ -117,10 +119,12 @@ class TvStageActivity : Activity() {
     private var streamingActive = false
     private var firstFrameRendered = false
     private var sessionHevc = false
+    private var vpnPromptedThisSession = false
     private var reconnectRunnable: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyLaunchIntentMode(intent)
         CarPlayScreen.forwarded(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveFullscreen()
@@ -154,6 +158,30 @@ class TvStageActivity : Activity() {
         }
 
         startOrAttachSession()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val previousWireless = TvPreferencesStore.loadWirelessEnabled(this)
+        applyLaunchIntentMode(intent)
+        val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
+        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED || previousWireless != currentWireless) {
+            reconnectNow()
+        }
+    }
+
+    private fun applyLaunchIntentMode(launchIntent: Intent?) {
+        if (launchIntent == null) return
+        when {
+            launchIntent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                TvPreferencesStore.saveWirelessEnabled(this, false)
+            }
+            launchIntent.hasExtra("wireless") -> {
+                val wireless = launchIntent.getBooleanExtra("wireless", TvPreferencesStore.loadWirelessEnabled(this))
+                TvPreferencesStore.saveWirelessEnabled(this, wireless)
+            }
+        }
     }
 
     override fun onResume() {
@@ -361,7 +389,7 @@ class TvStageActivity : Activity() {
         waitingBindings = StageWaitingOverlay.build(
             context = this,
             waitingColors = waitingColors,
-            wirelessEnabled = true,
+            wirelessEnabled = wirelessEnabled,
             wirelessHotspotMode = wirelessMode,
             existingWifiSsid = lanSsid,
             onReconnectClicked = ::reconnectNow,
@@ -402,8 +430,20 @@ class TvStageActivity : Activity() {
     private fun startOrAttachSession() {
         PendingReconnect.clear()
         waitingBindings.reconnectBannerView.visibility = View.GONE
-        val wirelessEnabled = true
+        val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
+
+        if (!wirelessEnabled && !vpnPromptedThisSession) {
+            val vpnPrepare = UsbTunnelVpnService.prepare(this)
+            if (vpnPrepare != null) {
+                vpnPromptedThisSession = true
+                val dialogStarted = runCatching {
+                    startActivityForResult(vpnPrepare, REQUEST_STAGE_VPN_PERMISSION)
+                    true
+                }.getOrDefault(false)
+                if (dialogStarted) return
+            }
+        }
 
         runCatching { MfiAssetInstaller.ensure(this) }
             .onFailure { error ->
@@ -444,7 +484,7 @@ class TvStageActivity : Activity() {
             widthPhysicalMm = physicalMm.widthMm,
             heightPhysicalMm = physicalMm.heightMm,
             fps = fps,
-            primaryInputDevice = 2,
+            primaryInputDevice = if (TvDeviceCapabilities.shouldUseKnobAsPrimaryInput(this)) 3 else 1,
         )
         displaySpec = DisplayScaleMath.applyPercent(displaySpec, scalePercent)
         displaySpec = UiDensityScale.apply(displaySpec, uiScale)
@@ -458,12 +498,22 @@ class TvStageActivity : Activity() {
 
         val pipeline = TvAvRenderPipeline(
             context = applicationContext,
+            videoWidth = displaySpec.widthPixels,
+            videoHeight = displaySpec.heightPixels,
             preferSoftwareHevcDecoder = TvPreferencesStore.loadHevcSoftwareDecoderEnabled(this),
             audioFocusEnabled = TvPreferencesStore.loadAudioFocusEnabled(this),
             audioFocusAutoYield = TvPreferencesStore.loadAudioFocusAutoYield(this),
             mediaBufferMillis = TvPreferencesStore.loadMediaBufferMillis(this, wirelessEnabled),
             onAudioDiagnostic = TvDiagnosticsLogger::record,
-            videoPacingDelayMillis = if (videoSync) 40 + 3_000 / fps.coerceIn(30, 60) else 0,
+            onScreenStreamActiveChanged = { streamType, active ->
+                if (streamType == 110) {
+                    mainHandler.post {
+                        streamingActive = active
+                        refreshOverlayVisibility()
+                    }
+                }
+            },
+            videoPacingDelayMillis = if (videoSync && fallbackSurfaceView != null) 40 + 3_000 / fps.coerceIn(30, 60) else 0,
             mainVideoFrameRate = fps,
             vendorLowLatencyDecoder = TvPreferencesStore.loadLowLatencyDecoder(this),
             mtkDecoderTuningEnabled = TvPreferencesStore.loadMtkDecoderTuning(this),
@@ -628,7 +678,7 @@ class TvStageActivity : Activity() {
                 waitingBindings.connectionHelpView.text = StageWaitingOverlay.helpMessage(
                     context = this,
                     failed = status,
-                    wirelessEnabled = true,
+                    wirelessEnabled = wirelessEnabled,
                     wirelessMode = wirelessMode,
                 )
                 waitingBindings.connectionHelpView.visibility = View.VISIBLE
@@ -639,6 +689,8 @@ class TvStageActivity : Activity() {
             if (status is CarPlayStatus.WirelessActive || status is CarPlayStatus.WirelessActiveFallback) {
                 cancelScheduledReconnect()
                 streamingActive = true
+            } else if (status is CarPlayStatus.RunningControl) {
+                cancelScheduledReconnect()
             } else if (status is CarPlayStatus.ControlEnded || status is CarPlayStatus.Failed) {
                 streamingActive = false
                 firstFrameRendered = false
@@ -649,6 +701,14 @@ class TvStageActivity : Activity() {
                 }
             }
             refreshOverlayVisibility()
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_STAGE_VPN_PERMISSION) {
+            startOrAttachSession()
         }
     }
 
@@ -887,6 +947,8 @@ class TvStageActivity : Activity() {
     }
 
     companion object {
+        private const val REQUEST_STAGE_VPN_PERMISSION = 2001
+
         fun connectionInstructions(
             context: Context,
             status: CarPlayStatus?,

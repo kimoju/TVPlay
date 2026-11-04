@@ -745,7 +745,20 @@ class TvSessionEngine(
     private var attachCloseable: Closeable? = null
     private var lastIphoneListing: String? = null
     private var iphoneWaitStartedAt: Long? = null
+    private var vpnLatch = CountDownLatch(1)
     private val teardownComplete = CountDownLatch(1)
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            vpnService = (binder as UsbTunnelVpnService.LocalBinder).service
+            vpnLatch.countDown()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            vpnService = null
+            fail(IphoneUsbException.DeviceUnavailable("CarPlay VPN service disconnected"))
+        }
+    }
 
     /** The live AirPlay session, for a new host that adopts the running stream without a session-active callback. */
     fun activeAirPlaySession(): AirPlaySession? = activeSession?.takeIf { !closed && !it.isClosed }
@@ -2804,15 +2817,48 @@ class TvSessionEngine(
     private fun ByteArray.macString(): String =
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
-    @Synchronized
     private fun awaitVpnService(): UsbTunnelVpnService? {
         if (closed) return null
-        return vpnService ?: UsbTunnelVpnService().also { vpnService = it }
+        vpnService?.let { return it }
+        if (config.transport == TvTransportMode.WIRELESS) {
+            return synchronized(this) {
+                vpnService ?: UsbTunnelVpnService().also { vpnService = it }
+            }
+        }
+        bindVpn()
+        return try {
+            if (vpnLatch.await(VPN_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
     }
 
-    @Synchronized
+    private fun bindVpn() {
+        if (vpnBound) return
+        vpnBound = true
+        try {
+            val intent = Intent(appContext, UsbTunnelVpnService::class.java)
+            if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
+                vpnBound = false
+                vpnLatch.countDown()
+            }
+        } catch (_: Throwable) {
+            vpnBound = false
+            vpnLatch.countDown()
+        }
+    }
+
     private fun unbindVpn() {
         vpnService?.detach()
+        if (vpnBound) {
+            vpnBound = false
+            try {
+                appContext.unbindService(serviceConnection)
+            } catch (_: Exception) {
+                // The service may have already been unbound.
+            }
+        }
         vpnService = null
     }
 

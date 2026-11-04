@@ -749,6 +749,7 @@ object RtspInfoPayload {
             "name" to config.deviceName,
             "keepAliveLowPower" to false,
             "keepAliveSendStatsAsBody" to false,
+            "rightHandDrive" to config.rightHandDrive,
             "modes" to modes(),
         )
         if (!config.disableAudioOutput) {

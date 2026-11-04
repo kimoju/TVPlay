@@ -1,6 +1,7 @@
 package app.tvplay.config
 
 import android.content.Context
+import app.tvplay.R
 import app.tvplay.engine.auth.AccessoryIdentity
 import app.tvplay.engine.auth.OfflineMfiAuthProvider
 import app.tvplay.engine.av.OpusEncoderSupport
@@ -13,6 +14,7 @@ import app.tvplay.engine.session.TvTransportMode
 import app.tvplay.engine.session.TvWirelessIdentitySpec
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.engine.session.UsbDeviceFilter
+import app.tvplay.ui.theme.AirPlayIconSizing
 import java.io.File
 import java.security.MessageDigest
 
@@ -199,12 +201,13 @@ object MfiAssetInstaller {
         manufacturer: String = TvPreferencesStore.loadManufacturer(context),
         model: String = TvPreferencesStore.loadModel(context),
         oemLabel: String = TvPreferencesStore.loadOemLabel(context),
-        icons: List<TvIconAsset> = emptyList(),
+        icons: List<TvIconAsset> = loadDefaultIcons(context),
         mainBufferedAudio: Boolean = TvPreferencesStore.loadMainBufferedAudio(context),
     ): TvStreamServerConfig {
         val resolvedManufacturer = manufacturer.trim().ifBlank { TvPreferencesStore.DEFAULT_MANUFACTURER }
         val resolvedModel = model.trim().ifBlank { TvPreferencesStore.DEFAULT_MODEL }
         val resolvedOemLabel = oemLabel.trim().ifBlank { TvPreferencesStore.DEFAULT_OEM_LABEL }
+        val resolvedIcons = icons.ifEmpty { loadDefaultIcons(context) }
         return TvStreamServerConfig(
             deviceName = deviceName,
             deviceId = deviceId(identity),
@@ -220,9 +223,32 @@ object MfiAssetInstaller {
             manufacturer = resolvedManufacturer,
             model = resolvedModel,
             oemLabel = resolvedOemLabel,
-            icons = icons,
+            icons = resolvedIcons,
             mainBufferedAudio = mainBufferedAudio,
         )
+    }
+
+    /**
+     * Loads the CarPlay home-button icon (custom user icon if valid, otherwise packaged `R.raw.ic_car_home`).
+     */
+    fun loadDefaultIcons(context: Context): List<TvIconAsset> {
+        val customBytes = runCatching {
+            TvPreferencesStore.loadCustomAirPlayIconFile(context)?.readBytes()
+        }.getOrNull()
+        if (customBytes != null) {
+            decodeIconAsset(customBytes)?.let { return listOf(it) }
+            runCatching { TvPreferencesStore.clearCustomAirPlayIcon(context) }
+        }
+        val rawBytes = runCatching {
+            context.resources.openRawResource(R.raw.ic_car_home).use { it.readBytes() }
+        }.getOrNull() ?: return emptyList()
+        val decoded = decodeIconAsset(rawBytes) ?: TvIconAsset(120, 120, rawBytes)
+        return listOf(decoded)
+    }
+
+    private fun decodeIconAsset(encoded: ByteArray): TvIconAsset? {
+        val (size, bytes) = runCatching { AirPlayIconSizing.fit(encoded) }.getOrNull() ?: return null
+        return TvIconAsset(size, size, bytes)
     }
 }
 

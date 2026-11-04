@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Dark midnight backdrop -->
+    <path
+        android:fillColor="#0E1218"
+        android:pathData="M0,0h320v180h-320z" />
+
+    <!-- Subtle inner card surface -->
+    <path
+        android:fillColor="#161C24"
+        android:strokeColor="#2A3646"
+        android:strokeWidth="2"
+        android:pathData="M24,24h272a12,12 0 0,1 12,12v108a12,12 0 0,1 -12,12h-272a12,12 0 0,1 -12,-12v-108a12,12 0 0,1 12,-12z" />
+
+    <!-- TV frame accent on the left -->
+    <path
+        android:fillColor="#1E2836"
+        android:strokeColor="#A6C8FF"
+        android:strokeWidth="3"
+        android:pathData="M56,54h76a8,8 0 0,1 8,8v48a8,8 0 0,1 -8,8h-76a8,8 0 0,1 -8,-8v-48a8,8 0 0,1 8,-8z" />
+
+    <!-- TV stand base -->
+    <path
+        android:strokeColor="#A6C8FF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M76,128h36M94,118v10" />
+
+    <!-- Play triangle inside TV frame -->
+    <path
+        android:fillColor="#A6C8FF"
+        android:pathData="M85,72l24,14l-24,14z" />
+
+    <!-- Stylized "TV" and bars on the right -->
+    <path
+        android:fillColor="#EEF2F6"
+        android:pathData="M160,64h32v6h-13v30h-6v-30h-13zM198,64h6.5l9.5,27l9.5,-27h6.5l-13,36h-6z" />
+
+    <!-- Accent subtitle bar -->
+    <path
+        android:fillColor="#A6C8FF"
+        android:pathData="M160,112h96v6h-96z" />
+</vector>

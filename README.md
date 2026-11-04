@@ -131,19 +131,23 @@ TVPlay/
 
 ## 构建与验证
 
-运行全套单元测试、Lint 检查与 Debug 构建：
+项目已直接内置离线 MFi 认证资源（`app/src/main/assets/offline-mfi/`），克隆仓库后即可直接编译出完整可用的 `Release` 与 `Debug` 安装包。
+
+运行全套单元测试、Lint 检查与 Debug / Release 构建：
 
 ```sh
-./gradlew :core:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+./gradlew :core:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 ```
 
-若本地已配置离线 MFi 认证资源（位于 `.private/auth-assets/`），可直接构建独立可安装 APK：
+一键打包输出至 `dist/` 目录：
 
 ```sh
 ./scripts/build-tvplay.sh
 ```
 
-构建产物输出路径：`dist/TVPlay-standalone-debug.apk`。
+构建产物输出路径：
+- **Release 正式版**：`dist/TVPlay-release.apk`（包名 `app.tvplay`）
+- **Debug 调试版**：`dist/TVPlay-debug.apk`（包名 `app.tvplay.debug`）
 
 ---
 

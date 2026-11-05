@@ -36,6 +36,12 @@ class TvSessionForegroundService : Service() {
         val startedForeground = if (Build.VERSION.SDK_INT >= 29) {
             var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             if (
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            ) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+            if (
                 Build.VERSION.SDK_INT >= 30 &&
                 checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             ) {
@@ -129,10 +135,12 @@ class TvSessionForegroundService : Service() {
                 val intent = Intent(context, TvSessionForegroundService::class.java)
                     .putExtra("wireless", wireless)
                     .putExtra("status", status)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
+                try {
                     context.startService(intent)
+                } catch (_: IllegalStateException) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    }
                 }
             }
         }

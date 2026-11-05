@@ -131,20 +131,64 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     }
 
     @SuppressLint("GestureBackNavigation")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
+                if (handleBackNavigation()) {
+                    return true
+                }
+            } else if (event.action == KeyEvent.ACTION_DOWN) {
+                val focused = currentFocus
+                if (focused is EditText || (::settingsPane.isInitialized && settingsPane.root.hasFocus())) {
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    @SuppressLint("GestureBackNavigation")
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
             launchProjectionStage(settings.connection.wirelessEnabled)
             return true
         }
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            val focused = currentFocus
-            if (focused is EditText) {
-                focused.clearFocus()
+        if (keyCode == KeyEvent.KEYCODE_BACK && handleBackNavigation()) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    @SuppressLint("GestureBackNavigation")
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (handleBackNavigation()) {
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
+    }
+
+    private fun handleBackNavigation(): Boolean {
+        val focused = currentFocus
+        if (focused is EditText) {
+            runCatching {
+                val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                imm?.hideSoftInputFromWindow(focused.windowToken, 0)
+            }
+            focused.clearFocus()
+            if (::stagePane.isInitialized) {
+                stagePane.primaryLaunchButton.requestFocus()
+            }
+            return true
+        }
+        if (::settingsPane.isInitialized && settingsPane.root.hasFocus()) {
+            if (::stagePane.isInitialized) {
                 stagePane.primaryLaunchButton.requestFocus()
                 return true
             }
         }
-        return super.onKeyDown(keyCode, event)
+        return false
     }
 
     private fun buildWorkbenchLayout() {

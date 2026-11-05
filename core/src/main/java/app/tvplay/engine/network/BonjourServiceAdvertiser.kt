@@ -297,18 +297,23 @@ class BonjourServiceAdvertiser(
                     var lastMdnsError: Throwable? = null
                     for (address in advertisedAddresses) {
                         try {
+                            val addressHostName = if (address is Inet6Address && advertisedAddresses.size > 1) {
+                                "$hostName-v6"
+                            } else {
+                                hostName
+                            }
                             // Cache the local name to avoid reverse DNS while preserving the IPv6 scope.
                             val mdnsAddress = if (address is Inet6Address) {
                                 val scopedIface = address.scopedInterface
                                 if (scopedIface != null) {
-                                    Inet6Address.getByAddress(hostName, address.address, scopedIface)
+                                    Inet6Address.getByAddress(addressHostName, address.address, scopedIface)
                                 } else {
-                                    Inet6Address.getByAddress(hostName, address.address, address.scopeId)
+                                    Inet6Address.getByAddress(addressHostName, address.address, address.scopeId)
                                 }
                             } else {
-                                InetAddress.getByAddress(hostName, address.address)
+                                InetAddress.getByAddress(addressHostName, address.address)
                             }
-                            val dns = JmDNS.create(mdnsAddress, hostName)
+                            val dns = JmDNS.create(mdnsAddress, addressHostName)
                             interfaceMdns.add(dns)
                             dns.addServiceListener("$CARPLAY_CONTROL_SERVICE_TYPE.local.", interfaceListener)
                             dns.registerService(ServiceInfo.create(
@@ -393,7 +398,15 @@ class BonjourServiceAdvertiser(
             workerToJoin?.interrupt()
             runCatching { if (multicastLock?.isHeld == true) multicastLock.release() }
         }
-        dnsToClose.forEach { dns -> runCatching { dns.close() } }
+        if (dnsToClose.isNotEmpty()) {
+            Thread(
+                { dnsToClose.forEach { dns -> runCatching { dns.close() } } },
+                "carplay-bonjour-close",
+            ).apply {
+                isDaemon = true
+                start()
+            }
+        }
         workerToJoin?.let(::joinWorker)
     }
 

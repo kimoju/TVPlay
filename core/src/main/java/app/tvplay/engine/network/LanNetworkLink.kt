@@ -67,27 +67,29 @@ class LanNetworkLink(
         val started = System.nanoTime()
         val configured = preferredInterface?.trim()?.takeIf { it.isNotEmpty() }
         while (!closed) {
+            val allNetworks = runCatching { connectivity.allNetworks.toList() }.getOrDefault(emptyList())
             val network: Network? = if (configured != null) {
-                connectivity.allNetworks.firstOrNull {
-                    connectivity.getLinkProperties(it)?.interfaceName == configured
+                allNetworks.firstOrNull {
+                    runCatching { connectivity.getLinkProperties(it)?.interfaceName }.getOrNull() == configured
                 }
             } else {
-                val wifiNetworks = connectivity.allNetworks.filter { candidate ->
-                    connectivity.getNetworkCapabilities(candidate)?.let {
+                val wifiNetworks = allNetworks.filter { candidate ->
+                    runCatching { connectivity.getNetworkCapabilities(candidate) }.getOrNull()?.let {
                         it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
                             !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     } == true
                 }
-                val ethNetworks = connectivity.allNetworks.filter { candidate ->
-                    connectivity.getNetworkCapabilities(candidate)?.let {
+                val ethNetworks = allNetworks.filter { candidate ->
+                    runCatching { connectivity.getNetworkCapabilities(candidate) }.getOrNull()?.let {
                         it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) &&
                             !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     } == true
                 }
                 wifiNetworks.firstOrNull()
                     ?: ethNetworks.firstOrNull()
-                    ?: connectivity.activeNetwork?.takeIf { active ->
-                        connectivity.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true
+                    ?: runCatching { connectivity.activeNetwork }.getOrNull()?.takeIf { active ->
+                        runCatching { connectivity.getNetworkCapabilities(active) }.getOrNull()
+                            ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true
                     }
             }
             val properties = network?.let { runCatching { connectivity.getLinkProperties(it) }.getOrNull() }
@@ -98,12 +100,12 @@ class LanNetworkLink(
             }
             val name = properties?.interfaceName ?: configured ?: fallbackIface?.name
             val iface = fallbackIface ?: name?.let { runCatching { NetworkInterface.getByName(it) }.getOrNull() }
-            val linkAddresses: List<InetAddress> = when {
-                properties != null && properties.linkAddresses.isNotEmpty() ->
-                    properties.linkAddresses.map { it.address }
-                iface != null -> Collections.list(iface.inetAddresses)
-                else -> emptyList()
-            }
+            val propAddresses = properties?.linkAddresses?.mapNotNull { it.address }.orEmpty()
+            val ifaceAddresses = iface?.let {
+                runCatching { Collections.list(it.inetAddresses) }.getOrDefault(emptyList())
+            }.orEmpty()
+            val linkAddresses: List<InetAddress> = (propAddresses + ifaceAddresses)
+                .distinctBy { it.address.toList() }
             val address = if (iface == null) null else wirelessHostAddress(linkAddresses, iface.index)
             if (iface != null && name != null && address != null) {
                 val addresses = existingWifiHostAddresses(linkAddresses, iface.index)
@@ -195,6 +197,13 @@ class LanNetworkLink(
                 }
                 val current = if (network == null) null else runCatching { connectivity.getLinkProperties(network) }.getOrNull()
                 if ((current != null && !sameLink(current)) || invalidated.get()) {
+                    synchronized(lock) {
+                        selected = null
+                        if (callbackRegistered) {
+                            runCatching { connectivity.unregisterNetworkCallback(callback) }
+                            callbackRegistered = false
+                        }
+                    }
                     throw IOException("局域网网络在启动期间发生变化，正在重新连接")
                 }
                 onDiagnostic(
@@ -248,9 +257,17 @@ class LanNetworkLink(
     }.getOrNull()
 
     private fun sameLink(properties: LinkProperties): Boolean {
-        if (properties.interfaceName != interfaceName) return false
+        val currentIfaceName = interfaceName
+        if (properties.interfaceName != null && properties.interfaceName != currentIfaceName) return false
         val bound = host ?: return true
-        return properties.linkAddresses.any { it.address.address.contentEquals(bound.address) }
+        if (properties.linkAddresses.any { it.address.address.contentEquals(bound.address) }) {
+            return true
+        }
+        val liveIface = currentIfaceName?.let { runCatching { NetworkInterface.getByName(it) }.getOrNull() }
+        val liveAddresses = liveIface?.let {
+            runCatching { Collections.list(it.inetAddresses) }.getOrDefault(emptyList())
+        }.orEmpty()
+        return liveAddresses.any { it.address.contentEquals(bound.address) }
     }
 
     private fun security(): Iap2WirelessSecurity =

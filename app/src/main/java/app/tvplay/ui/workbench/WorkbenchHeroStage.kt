@@ -121,6 +121,8 @@ class WorkbenchHeroStage(
         )
         val hadFocus = root.hasFocus()
         val focusedTag = if (hadFocus) root.findFocus()?.tag as? String else null
+        val previousFocusability = root.descendantFocusability
+        root.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         root.removeAllViews()
         root.addView(
             view,
@@ -129,8 +131,12 @@ class WorkbenchHeroStage(
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
-        if (hadFocus && focusedTag != null) {
-            view.findViewWithTag<View>(focusedTag)?.requestFocus()
+        root.descendantFocusability = previousFocusability
+        if (hadFocus) {
+            val restored = focusedTag?.let { view.findViewWithTag<View>(it) }?.requestFocus() == true
+            if (!restored) {
+                primaryLaunchButton.requestFocus()
+            }
         }
     }
 

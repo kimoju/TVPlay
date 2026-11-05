@@ -34,6 +34,7 @@ import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.TvColorScheme
 import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
+import app.tvplay.ui.theme.appDialogBuilder
 
 enum class SettingsCategory(val title: String) {
     CONNECTION("连接与配对"),
@@ -269,7 +270,7 @@ class WorkbenchSettingsTabs(
                         "USB 有线数据线直连（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
                     )
                     val checkedIndex = transportOptions.indexOfFirst { it.first == currentTransportKey }.coerceAtLeast(0)
-                    android.app.AlertDialog.Builder(context)
+                    appDialogBuilder(context)
                         .setTitle("选择 CarPlay 连接模式")
                         .setSingleChoiceItems(dialogItems, checkedIndex) { dialog, which ->
                             dialog.dismiss()
@@ -936,6 +937,8 @@ class WorkbenchSettingsTabs(
 
         val editText = EditText(context).apply {
             tag = "input:$title"
+            isFocusable = true
+            isFocusableInTouchMode = false
             setText(initialValue)
             this.hint = hint
             setTextColor(palette.textPrimary)
@@ -955,6 +958,10 @@ class WorkbenchSettingsTabs(
                 setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
             }
             setPadding(dp(12), dp(9), dp(12), dp(9))
+            setOnClickListener {
+                isFocusableInTouchMode = true
+                requestFocus()
+            }
             addTextChangedListener(
                 object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -974,6 +981,9 @@ class WorkbenchSettingsTabs(
             }
             setOnFocusChangeListener { _, hasFocus ->
                 if (isRebuilding) return@setOnFocusChangeListener
+                if (!hasFocus) {
+                    isFocusableInTouchMode = false
+                }
                 card.background = cardBackground(focused = hasFocus)
                 if (!hasFocus) {
                     commitIfChanged(text?.toString().orEmpty())

@@ -506,7 +506,7 @@ internal object HotspotAddressPolicy {
             if (address is Inet4Address && usable(address)) {
                 return address
             }
-            if (address is Inet6Address && address.isLinkLocalAddress && linkLocal == null) {
+            if (address is Inet6Address && address.isLinkLocalAddress && address.scopeId != 0 && linkLocal == null) {
                 linkLocal = address
             }
         }
@@ -518,7 +518,7 @@ internal object HotspotAddressPolicy {
             return select(addresses)
         }
         for (address in addresses) {
-            if (address is Inet6Address && address.isLinkLocalAddress) {
+            if (address is Inet6Address && address.isLinkLocalAddress && address.scopeId != 0) {
                 return address
             }
         }
@@ -532,7 +532,13 @@ internal object HotspotAddressPolicy {
             if (address is Inet4Address && usable(address) && publishedIsIpv6) {
                 return address
             }
-            if (address is Inet6Address && address.isLinkLocalAddress && !publishedIsIpv6 && linkLocal == null) {
+            if (
+                address is Inet6Address &&
+                address.isLinkLocalAddress &&
+                address.scopeId != 0 &&
+                !publishedIsIpv6 &&
+                linkLocal == null
+            ) {
                 linkLocal = address
             }
         }

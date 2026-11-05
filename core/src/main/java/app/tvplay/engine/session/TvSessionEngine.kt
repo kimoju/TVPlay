@@ -839,13 +839,7 @@ class TvSessionEngine(
         }
 
         override fun onHostUiRequested(session: AirPlaySession) {
-            debugLog("CarPlay requested the host UI; opening the home screen")
-            runCatching {
-                appContext.startActivity(
-                    Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }.onFailure { debugLog("Home screen could not open: ${it.javaClass.simpleName}") }
+            debugLog("CarPlay requested the host UI; delegating to stage overlay")
             uiListener?.onHostUiRequested(session)
         }
 
@@ -1207,28 +1201,30 @@ class TvSessionEngine(
         phase = Phase.MFI
         onStatus(CarPlayStatus.DiscoveringMfi)
         debugLog("mfi discovery backend=OfflineMfiAuthProvider")
-        executor.execute {
-            try {
-                val signatures = AtomicInteger(0)
-                val primaryDir = File(appContext.filesDir, OfflineMfiAuthProvider.DIRECTORY)
-                val fallbackDir = File(appContext.noBackupFilesDir, OfflineMfiAuthProvider.DIRECTORY)
-                val directory = if (!File(primaryDir, "identity.pk8").isFile &&
-                    File(fallbackDir, "identity.pk8").isFile
-                ) {
-                    fallbackDir
-                } else {
-                    primaryDir
+        runCatching {
+            executor.execute {
+                try {
+                    val signatures = AtomicInteger(0)
+                    val primaryDir = File(appContext.filesDir, OfflineMfiAuthProvider.DIRECTORY)
+                    val fallbackDir = File(appContext.noBackupFilesDir, OfflineMfiAuthProvider.DIRECTORY)
+                    val directory = if (!File(primaryDir, "identity.pk8").isFile &&
+                        File(fallbackDir, "identity.pk8").isFile
+                    ) {
+                        fallbackDir
+                    } else {
+                        primaryDir
+                    }
+                    val client = OfflineMfiAuthProvider.load(directory) { size ->
+                        debugLog("mfi local signature count=${signatures.incrementAndGet()} digestBytes=$size")
+                    }
+                    if (closed || phase != Phase.MFI) return@execute
+                    mfiProvider = client
+                    debugLog("mfi local offline ready protocolMajor=${client.protocolMajor()} certificateBytes=${client.readCertificate().size}")
+                    onStatus(CarPlayStatus.MfiReady)
+                    startPhone()
+                } catch (error: Throwable) {
+                    fail(error)
                 }
-                val client = OfflineMfiAuthProvider.load(directory) { size ->
-                    debugLog("mfi local signature count=${signatures.incrementAndGet()} digestBytes=$size")
-                }
-                if (closed || phase != Phase.MFI) return@execute
-                mfiProvider = client
-                debugLog("mfi local offline ready protocolMajor=${client.protocolMajor()} certificateBytes=${client.readCertificate().size}")
-                onStatus(CarPlayStatus.MfiReady)
-                startPhone()
-            } catch (error: Throwable) {
-                fail(error)
             }
         }
     }
@@ -1256,7 +1252,9 @@ class TvSessionEngine(
             onStatus(CarPlayStatus.StartingHotspot, next)
             next
         }
-        executor.execute { runWireless(generation) }
+        runCatching {
+            executor.execute { runWireless(generation) }
+        }
     }
 
     private fun restartWireless() {
@@ -1292,8 +1290,10 @@ class TvSessionEngine(
             val watchdog = FirstTcpWatchdog(
                 listener = listenerIdentity,
                 schedule = { delay, action ->
-                    val future = startupTimer.schedule({ action() }, delay, TimeUnit.MILLISECONDS)
-                    val cancel: () -> Unit = { future.cancel(false); Unit }
+                    val future = runCatching {
+                        startupTimer.schedule({ action() }, delay, TimeUnit.MILLISECONDS)
+                    }.getOrNull()
+                    val cancel: () -> Unit = { future?.cancel(false); Unit }
                     cancel
                 },
                 onTimeout = {
@@ -1337,10 +1337,14 @@ class TvSessionEngine(
             wirelessConnectionProof.begin(generation) {
                 if (!isStaleWirelessRun(generation)) startedHotspot?.onCarPlayConfirmed()
             }
-            val preferredFamily = HotspotAddressPolicy.parseFamily(
-                appContext.getSharedPreferences(WIRELESS_PREFS, Context.MODE_PRIVATE)
-                    .getString(HOTSPOT_FAMILY_PREFERENCE_KEY, null),
-            )
+            val preferredFamily = if (config.wirelessHotspotMode == TvWirelessMode.LAN_WIFI) {
+                HotspotAddressPolicy.FAMILY_IPV4
+            } else {
+                HotspotAddressPolicy.parseFamily(
+                    appContext.getSharedPreferences(WIRELESS_PREFS, Context.MODE_PRIVATE)
+                        .getString(HOTSPOT_FAMILY_PREFERENCE_KEY, null),
+                )
+            }
             val addressRecovery = HotspotAddressRecovery(
                 sample = { hotspotCandidates(hotspotInfo, fallbackToSnapshot = false) },
                 cancelled = { isStaleWirelessRun(generation) },
@@ -1475,7 +1479,11 @@ class TvSessionEngine(
                 if (isStaleWirelessRun(generation)) return
                 bonjour = bonjourClient
                 startedHotspot?.validateReady()
-                bonjourClient.start()
+            }
+            bonjourClient.start()
+            if (isStaleWirelessRun(generation)) {
+                runCatching { bonjourClient.close() }
+                return
             }
             startedBonjour = bonjourClient
             diagnostics.start()
@@ -3021,6 +3029,12 @@ class TvSessionEngine(
 
             closeBluetoothBootstrapTransport()
 
+            if (service != null) {
+                closeBestEffort("AirPlay service") {
+                    if (owner != null) service.detachWireless(owner) else service.detach()
+                }
+            }
+
             val activeBonjour = bonjour
             bonjour = null
             if (activeBonjour != null) closeBestEffort("Bonjour") { activeBonjour.close() }
@@ -3038,12 +3052,6 @@ class TvSessionEngine(
             wirelessTunnelReady.set(false)
             wirelessActiveReported.set(false)
             wirelessHandoffFellBack.set(false)
-
-            if (service != null) {
-                closeBestEffort("AirPlay service") {
-                    if (owner != null) service.detachWireless(owner) else service.detach()
-                }
-            }
         }
 
     private fun isBluetoothDeviceConnected(device: BluetoothDevice): Boolean = try {
@@ -3153,7 +3161,11 @@ class TvSessionEngine(
             debugLog("wireless interface scan failed iface=$name error=${error.javaClass.simpleName}")
             emptyList()
         }
-        return if (scanned.isEmpty() && fallbackToSnapshot) info.hostAddresses else scanned
+        return if (fallbackToSnapshot) {
+            (scanned + info.hostAddresses).distinctBy { it.address.toList() }
+        } else {
+            scanned
+        }
     }
 
     private fun hostAddressText(address: InetAddress): String {

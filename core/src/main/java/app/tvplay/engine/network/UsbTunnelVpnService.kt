@@ -301,11 +301,18 @@ class UsbTunnelVpnService : VpnService() {
                 Log.w(TAG, "AirPlay port $busy is in use; listening on $bound instead")
             })
         } else {
-            AirPlayPortSelector.bindAll(
-                listOf(replacement.address) + replacement.additionalAddresses,
-                replacement.config.port,
-            ) { busy, bound ->
-                Log.w(TAG, "AirPlay port $busy is in use; listening on $bound instead")
+            try {
+                AirPlayPortSelector.bindAll(
+                    listOf(replacement.address) + replacement.additionalAddresses,
+                    replacement.config.port,
+                ) { busy, bound ->
+                    Log.w(TAG, "AirPlay port $busy is in use; listening on $bound instead")
+                }
+            } catch (error: IOException) {
+                Log.w(TAG, "Dual-stack AirPlay bind failed (${error.message}); falling back to primary address ${replacement.address}")
+                listOf(AirPlayPortSelector.bind(replacement.address, replacement.config.port) { busy, bound ->
+                    Log.w(TAG, "AirPlay port $busy is in use; listening on $bound instead")
+                })
             }
         }
         val server = servers.first()

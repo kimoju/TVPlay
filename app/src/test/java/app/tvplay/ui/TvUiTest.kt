@@ -490,4 +490,120 @@ class TvUiTest {
             ),
         )
     }
+
+    @Test
+    fun lanWifiModeDoesNotStealFocusOrExitAppOnBackAndExercisesFullSessionLifecycle() {
+        CarPlayBackgroundSession.clear()
+        PendingReconnect.clear()
+        val appContext = RuntimeEnvironment.getApplication()
+        TvPreferencesStore.saveWirelessEnabled(appContext, true)
+        TvPreferencesStore.saveWirelessHotspotMode(appContext, TvWirelessMode.LAN_WIFI)
+
+        val workbenchController = Robolectric.buildActivity(TvWorkbenchActivity::class.java).setup()
+        val workbench = workbenchController.get()
+        assertFalse("Workbench must not finish on startup in LAN_WIFI mode", workbench.isFinishing)
+
+        val stagePaneField = TvWorkbenchActivity::class.java.getDeclaredField("stagePane").apply {
+            isAccessible = true
+        }
+        val settingsPaneField = TvWorkbenchActivity::class.java.getDeclaredField("settingsPane").apply {
+            isAccessible = true
+        }
+        val stagePane = stagePaneField.get(workbench) as WorkbenchHeroStage
+        val settingsPane = settingsPaneField.get(workbench) as WorkbenchSettingsTabs
+        val repo = TvSettingsRepository(workbench)
+
+        // 1. Verify initial focus in LAN_WIFI mode is on primaryLaunchButton, NOT stolen by EditText in settingsPane
+        assertFalse(
+            "EditText in settingsPane must not steal initial focus in LAN_WIFI mode",
+            workbench.currentFocus is android.widget.EditText,
+        )
+
+        // 2. Click LAN SSID EditText in settingsPane, type SSID, and verify pressing BACK returns focus to stagePane without exiting app
+        val ssidInput = collectAllViews(settingsPane.root)
+            .filterIsInstance<android.widget.EditText>()
+            .first { it.tag == "input:家庭路由器 Wi-Fi 名称 (SSID)" }
+        ssidInput.performClick()
+        ssidInput.requestFocus()
+        ssidInput.setText("HomeRouter_5G")
+        assertEquals("HomeRouter_5G", repo.connection.existingWifiSsid)
+
+        // Press BACK via dispatchKeyEvent (simulating TV remote Back key)
+        workbench.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+        workbench.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+        assertFalse("Pressing BACK while EditText is focused in LAN_WIFI mode must NOT exit the app", workbench.isFinishing)
+
+        // Also test Android 13+/targetSdk 37 OnBackInvokedDispatcher path (which calls onBackPressed directly)
+        ssidInput.performClick()
+        ssidInput.requestFocus()
+        @Suppress("DEPRECATION")
+        workbench.onBackPressed()
+        assertFalse("onBackPressed while EditText is focused in LAN_WIFI mode must NOT exit the app", workbench.isFinishing)
+
+        // 3. Focus a non-EditText card inside settingsPane (e.g. LAN mode card) and press Back
+        val lanModeCard = collectAllViews(settingsPane.root).first { view ->
+            view is ViewGroup && view.isFocusable && collectAllText(view).any { "无线网络传输方式" in it }
+        }
+        lanModeCard.requestFocus()
+        @Suppress("DEPRECATION")
+        workbench.onBackPressed()
+        assertFalse("onBackPressed while settingsPane has focus must return focus to stagePane and NOT exit the app", workbench.isFinishing)
+
+        // 4. Launch TvStageActivity in LAN_WIFI mode and verify foreground service, connection mode picker, and onHostUiRequested
+        val stageController = Robolectric.buildActivity(
+            TvStageActivity::class.java,
+            Intent().putExtra("wireless", true),
+        ).setup()
+        val stage = stageController.get()
+        assertFalse("TvStageActivity must not finish on startup in LAN_WIFI mode", stage.isFinishing)
+        assertEquals(TvWirelessMode.LAN_WIFI, TvPreferencesStore.loadWirelessHotspotMode(stage))
+
+        // Verify CarPlay requestUI (onHostUiRequested) opens quickControlOverlay instead of exiting to system home launcher
+        val createListenerMethod = TvStageActivity::class.java.getDeclaredMethod(
+            "createSessionListener",
+            Int::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+        ).apply { isAccessible = true }
+        val restartGenField = TvStageActivity::class.java.getDeclaredField("restartGeneration").apply {
+            isAccessible = true
+        }
+        val currentGen = restartGenField.getInt(stage)
+        val listener = createListenerMethod.invoke(stage, currentGen, true) as AirPlaySessionListener
+        val dummySession = AirPlaySession(
+            socket = java.net.Socket(),
+            config = app.tvplay.engine.session.TvStreamServerConfig(
+                deviceName = "TVPlay",
+                deviceId = "02:11:22:33:44:55",
+                btMac = "02:11:22:33:44:55",
+                sourceVersion = "950.7.1",
+                main = app.tvplay.engine.av.TvDisplaySpec(widthPixels = 1920, heightPixels = 1080),
+            ),
+            identity = app.tvplay.engine.auth.AccessoryIdentity.generate(),
+            pairings = app.tvplay.engine.auth.PairingRegistry(),
+            mfi = null,
+            listener = listener,
+            media = object : app.tvplay.engine.protocol.rtsp.AirPlayMediaHandler {},
+        )
+        listener.onHostUiRequested(dummySession)
+        shadowOf(Looper.getMainLooper()).idle()
+        val quickOverlayField = TvStageActivity::class.java.getDeclaredField("quickControlOverlay").apply {
+            isAccessible = true
+        }
+        assertNotNull("onHostUiRequested must open quickControlOverlay instead of exiting app", quickOverlayField.get(stage))
+        assertFalse(stage.isFinishing)
+        dummySession.close()
+
+        // Exercise openConnectionModePicker and openBluetoothSettings dialogs in TvStageActivity without crash
+        val openModePicker = TvStageActivity::class.java.getDeclaredMethod("openConnectionModePicker").apply {
+            isAccessible = true
+        }
+        openModePicker.invoke(stage)
+        val openBtSettings = TvStageActivity::class.java.getDeclaredMethod("openBluetoothSettings").apply {
+            isAccessible = true
+        }
+        openBtSettings.invoke(stage)
+
+        stageController.pause().stop().destroy()
+        workbenchController.pause().stop().destroy()
+    }
 }

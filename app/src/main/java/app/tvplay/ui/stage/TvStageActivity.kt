@@ -88,6 +88,7 @@ import app.tvplay.runtime.TvDiagnosticsLogger
 import app.tvplay.runtime.TvMediaKeyRouter
 import app.tvplay.runtime.TvProjectionSessionHost
 import app.tvplay.runtime.TvSessionForegroundService
+import app.tvplay.ui.theme.appDialogBuilder
 import app.tvplay.runtime.WirelessStartupRetryBudget
 import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.TvColorScheme
@@ -323,7 +324,7 @@ class TvStageActivity : Activity() {
         pictureBinding = null
         activeSurface = null
         CarPlayScreen.destroyed(this)
-        if (isFinishing) {
+        if (isFinishing && !isProjectionVisible) {
             stopActiveSession()
         }
         super.onDestroy()
@@ -1004,6 +1005,14 @@ class TvStageActivity : Activity() {
             }
         }
 
+        override fun onHostUiRequested(session: AirPlaySession) {
+            if (controllerGeneration != restartGeneration) return
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration || isFinishing || isDestroyed) return@post
+                showQuickControlOverlay()
+            }
+        }
+
         override fun onSessionEnded(session: AirPlaySession) {
             if (controllerGeneration != restartGeneration) return
             val active = activeAirPlaySession
@@ -1210,7 +1219,7 @@ class TvStageActivity : Activity() {
             "无线 · 家庭局域网模式（电视与 iPhone 连接同一 Wi-Fi，需配置密码）",
             "USB 有线连接模式（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
         )
-        AlertDialog.Builder(this)
+        appDialogBuilder(this)
             .setTitle("切换 CarPlay 连接模式")
             .setSingleChoiceItems(options, currentIndex) { dialog, which ->
                 dialog.dismiss()
@@ -1249,7 +1258,7 @@ class TvStageActivity : Activity() {
             "开启本机蓝牙可见（推荐：让 iPhone 在蓝牙设置中直接搜到「$btName」）",
             "打开电视系统蓝牙设置（进入系统蓝牙界面配对）",
         )
-        AlertDialog.Builder(this)
+        appDialogBuilder(this)
             .setTitle("电视与 iPhone 蓝牙配对")
             .setItems(options) { _, which ->
                 when (which) {

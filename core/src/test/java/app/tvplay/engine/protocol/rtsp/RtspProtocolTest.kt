@@ -255,4 +255,88 @@ class RtspProtocolTest {
         assertArrayEquals(byteArrayOf(0xFF.toByte(), 0x5A, 0x00, 0x08), receivedIap.single())
         tunnel.close()
     }
+
+    @Test
+    fun encryptedEventChannelSerializesConcurrentCommandsWithoutNonceReordering() {
+        val writeKey = ByteArray(32) { (it + 0x21).toByte() }
+        val readKey = ByteArray(32) { (it + 0x41).toByte() }
+        val senderCipher = app.tvplay.engine.auth.ControlCipher(writeKey = writeKey, readKey = readKey)
+        val receiverCipher = app.tvplay.engine.auth.ControlCipher(writeKey = readKey, readKey = writeKey)
+
+        java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
+            val port = server.localPort
+            val receivedPlaintexts = java.util.Collections.synchronizedList(mutableListOf<ByteArray>())
+            val expectedMessages = 16
+            val readerDone = java.util.concurrent.CountDownLatch(1)
+
+            val clientSocket = java.net.Socket("127.0.0.1", port)
+            val acceptedSocket = server.accept()
+
+            Thread {
+                try {
+                    val input = acceptedSocket.getInputStream()
+                    val buf = ByteArray(4096)
+                    var encBuf = ByteArray(0)
+                    while (receivedPlaintexts.size < expectedMessages) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        val decrypted = receiverCipher.decrypt(encBuf + buf.copyOf(n))
+                        encBuf = decrypted.rest
+                        if (decrypted.data.isNotEmpty()) {
+                            val parsed = RtspMessageCodec.parseMessages(decrypted.data)
+                            for (msg in parsed.messages) {
+                                receivedPlaintexts.add(msg.body)
+                            }
+                        }
+                    }
+                } finally {
+                    readerDone.countDown()
+                }
+            }.apply { isDaemon = true; start() }
+
+            // Configure AirPlaySession with encrypted eventSocket + eventCipher
+            val config = TvStreamServerConfig(
+                deviceName = "TVPlay",
+                deviceId = "02:11:22:33:44:55",
+                btMac = "02:11:22:33:44:55",
+                sourceVersion = "950.7.1",
+                main = TvDisplaySpec(widthPixels = 1920, heightPixels = 1080),
+            )
+            val session = AirPlaySession(
+                socket = java.net.Socket(),
+                config = config,
+                identity = AccessoryIdentity.generate(),
+                pairings = app.tvplay.engine.auth.PairingRegistry(),
+                mfi = null,
+                listener = object : AirPlaySessionListener {},
+                media = object : AirPlayMediaHandler {},
+            )
+            val eventSocketField = AirPlaySession::class.java.getDeclaredField("eventSocket").apply { isAccessible = true }
+            val eventCipherField = AirPlaySession::class.java.getDeclaredField("eventCipher").apply { isAccessible = true }
+            eventSocketField.set(session, clientSocket)
+            eventCipherField.set(session, senderCipher)
+
+            // Fire 16 concurrent setNightMode + sendCommand calls from multiple threads
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+            val futures = (0 until expectedMessages).map { index ->
+                pool.submit {
+                    if (index % 2 == 0) {
+                        session.setNightMode(index % 4 == 0)
+                    } else {
+                        session.sendCommand(mapOf("type" to "requestSiri", "params" to mapOf("siriAction" to 1L)))
+                    }
+                }
+            }
+            futures.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+            pool.shutdown()
+
+            assertTrue(
+                "All concurrent encrypted /event RTSP commands must decrypt without AEAD tag failure",
+                readerDone.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            )
+            assertEquals(expectedMessages, receivedPlaintexts.size)
+            session.close()
+            acceptedSocket.close()
+        }
+    }
 }

@@ -397,7 +397,7 @@ class TvAvRenderPipeline(
     }
 
     override fun onAudioDuck(ducked: Boolean) {
-        // Navigation prompt audio overlays media on TV without car-bus attenuation hacks.
+        audioFocusCoordinator.onAudioDuck(ducked)
     }
 
     private fun updateMediaAudio(id: AudioStreamId, active: Boolean) {

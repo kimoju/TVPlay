@@ -87,6 +87,7 @@ class ScreenStream(
         try {
             val accepted = bound.acceptFrom(expectedPeer) { onDiagnostic("Video: rejected sender outside the control session") }
             socket = accepted
+            safeClose(bound)
             run(accepted)
         } catch (error: Exception) {
             if (!closed.get()) listener.onClosed(error)
@@ -1938,7 +1939,7 @@ class IapTunnel(
             val accepted = try {
                 bound.accept()
             } catch (error: Exception) {
-                if (!closed.get()) listener.onClosed(error)
+                if (!closed.get() && socket == null) listener.onClosed(error)
                 return
             }
             if (closed.get()) {
@@ -1950,12 +1951,14 @@ class IapTunnel(
                 listener.onDebug("AirPlay iAP tunnel rejected sender outside the control session")
                 continue
             }
-            accepted.setSoLinger(true, 0)
+            accepted.tcpNoDelay = true
+            accepted.keepAlive = true
             socket = accepted
             readCounter.set(0)
             peerConnected.countDown()
             listener.onOpen(accepted.remoteSocketAddress?.toString())
             run(accepted)
+            return
         }
     }
 
@@ -1988,7 +1991,7 @@ class IapTunnel(
         } finally {
             if (socket === sock) socket = null
             safeClose(sock)
-            if (!closed.get() && failure != null) listener.onClosed(failure)
+            if (!closed.get()) listener.onClosed(failure)
         }
     }
 

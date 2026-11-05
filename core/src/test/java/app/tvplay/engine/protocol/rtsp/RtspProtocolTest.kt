@@ -131,11 +131,128 @@ class RtspProtocolTest {
     fun isSameOrAuthorizedAirPlayPeerAllowsDualStackPeerAndRejectsLoopback() {
         val ipv4Peer = java.net.InetAddress.getByName("192.168.49.42")
         val ipv6LinkLocalPeer = java.net.InetAddress.getByName("fe80::1c2b:3d4e:5f6a:7b8c")
+        val ipv6UlaPeer = java.net.InetAddress.getByName("fd12:3456:789a::42")
         val loopback = java.net.InetAddress.getByName("127.0.0.1")
 
         assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4Peer, ipv4Peer))
         assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6LinkLocalPeer, ipv4Peer))
         assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4Peer, ipv6LinkLocalPeer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6UlaPeer, ipv4Peer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4Peer, ipv6UlaPeer))
         assertFalse(isSameOrAuthorizedAirPlayPeer(loopback, ipv4Peer))
+    }
+
+    @Test
+    fun screenStreamDecryptsConfigAndVideoFramesAndIapTunnelWakesOnCleanPeerEof() {
+        val loopback = java.net.InetAddress.getByName("127.0.0.1")
+        val videoKey = ByteArray(32) { (it + 1).toByte() }
+        val receivedCodecs = mutableListOf<VideoCodec>()
+        val receivedConfigs = mutableListOf<ByteArray>()
+        val receivedFrames = mutableListOf<ByteArray>()
+        val closedLatch = java.util.concurrent.CountDownLatch(1)
+
+        val screen = ScreenStream(videoKey, loopback)
+        val port = screen.listen(
+            object : ScreenStream.Listener {
+                override fun onCodec(codec: VideoCodec) {
+                    receivedCodecs += codec
+                }
+
+                override fun onConfig(codecData: ByteArray) {
+                    receivedConfigs += codecData
+                }
+
+                override fun onFrame(naluBytes: ByteArray) {
+                    receivedFrames += naluBytes
+                }
+
+                override fun onClosed(cause: Throwable?) {
+                    closedLatch.countDown()
+                }
+            },
+        )
+
+        java.net.Socket("127.0.0.1", port).use { client ->
+            val out = client.getOutputStream()
+            // Send OP_VIDEO_CONFIG (opcode = 1) with avcC box header
+            val avccRecord = byteArrayOf(1, 0x42, 0x00, 0x1e, 0xff.toByte(), 0xe1.toByte(), 0, 4, 0x67, 0x42, 0x00, 0x1e)
+            val configPayload = byteArrayOf(0, 0, 0, 12, 'a'.code.toByte(), 'v'.code.toByte(), 'c'.code.toByte(), 'C'.code.toByte()) + avccRecord
+            val configHeader = ByteArray(128).also { hdr ->
+                hdr[0] = configPayload.size.toByte()
+                hdr[4] = 1 // OP_VIDEO_CONFIG
+            }
+            out.write(configHeader)
+            out.write(configPayload)
+
+            // Send OP_VIDEO_FRAME (opcode = 0) with 4-byte length-prefixed NALU sealed with ChaCha20-Poly1305
+            val clearNalu = byteArrayOf(0, 0, 0, 4, 0x65, 0x11, 0x22, 0x33)
+            val frameHeader = ByteArray(128).also { hdr ->
+                val sealedLen = clearNalu.size + 16
+                hdr[0] = sealedLen.toByte()
+                hdr[4] = 0 // OP_VIDEO_FRAME
+            }
+            val sealedBody = app.tvplay.engine.auth.AirPlayCrypto.chachaSeal(
+                key = videoKey,
+                nonce = app.tvplay.engine.auth.AirPlayCrypto.nonce64(0L),
+                plaintext = clearNalu,
+                aad = frameHeader,
+            )
+            out.write(frameHeader)
+            out.write(sealedBody)
+            out.flush()
+        }
+
+        assertTrue(closedLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(listOf(VideoCodec.H264), receivedCodecs)
+        assertEquals(1, receivedConfigs.size)
+        assertEquals(1, receivedFrames.size)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x65, 0x11, 0x22, 0x33), receivedFrames.single())
+        screen.close()
+
+        // Verify IapTunnel decrypts comm package and signals onClosed(null) on clean peer EOF
+        val tunnelKey = ByteArray(32) { (it + 9).toByte() }
+        val receivedIap = mutableListOf<ByteArray>()
+        val tunnelClosedLatch = java.util.concurrent.CountDownLatch(1)
+        val tunnel = IapTunnel(tunnelKey, loopback, loopback)
+        val tunnelPort = tunnel.listen(
+            object : IapTunnel.Listener {
+                override fun onIap(bytes: ByteArray) {
+                    receivedIap += bytes
+                }
+
+                override fun onClosed(cause: Throwable?) {
+                    tunnelClosedLatch.countDown()
+                }
+            },
+        )
+        java.net.Socket("127.0.0.1", tunnelPort).use { client ->
+            val iapBody = byteArrayOf(0xFF.toByte(), 0x5A, 0x00, 0x08)
+            val pkg = ByteArray(32 + iapBody.size).also { buf ->
+                val total = 32 + iapBody.size
+                buf[0] = (total ushr 24).toByte()
+                buf[1] = (total ushr 16).toByte()
+                buf[2] = (total ushr 8).toByte()
+                buf[3] = total.toByte()
+                // "comm" = 0x636f6d6d at offset 16
+                buf[16] = 0x63
+                buf[17] = 0x6f
+                buf[18] = 0x6d
+                buf[19] = 0x6d
+                iapBody.copyInto(buf, 32)
+            }
+            val aad = byteArrayOf(pkg.size.toByte(), (pkg.size ushr 8).toByte())
+            val sealed = app.tvplay.engine.auth.AirPlayCrypto.chachaSeal(
+                key = tunnelKey,
+                nonce = app.tvplay.engine.auth.AirPlayCrypto.nonce64(0L),
+                plaintext = pkg,
+                aad = aad,
+            )
+            client.getOutputStream().write(aad + sealed)
+            client.getOutputStream().flush()
+        }
+        assertTrue("IapTunnel must invoke onClosed on clean peer EOF", tunnelClosedLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(1, receivedIap.size)
+        assertArrayEquals(byteArrayOf(0xFF.toByte(), 0x5A, 0x00, 0x08), receivedIap.single())
+        tunnel.close()
     }
 }

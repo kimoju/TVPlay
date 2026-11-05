@@ -191,8 +191,14 @@ object CarPlayMediaButton {
     const val KEYCODE_BYD_CARPLAY_VOICE_LONG = 328
 
     /** Whether [keyCode] is a voice key that opens Siri. */
-    fun opensSiri(keyCode: Int): Boolean = keyCode == KeyEvent.KEYCODE_VOICE_ASSIST ||
-        keyCode == KEYCODE_BYD_AUTO_MEDIA_VOICE || keyCode == KEYCODE_BYD_AUTO_MEDIA_VOICE_LONG
+    fun opensSiri(keyCode: Int): Boolean =
+        keyCode == KeyEvent.KEYCODE_VOICE_ASSIST ||
+            keyCode == KeyEvent.KEYCODE_ASSIST ||
+            keyCode == KeyEvent.KEYCODE_SEARCH ||
+            keyCode == KEYCODE_BYD_AUTO_MEDIA_VOICE ||
+            keyCode == KEYCODE_BYD_AUTO_MEDIA_VOICE_LONG ||
+            keyCode == KEYCODE_BYD_CARPLAY_VOICE ||
+            keyCode == KEYCODE_BYD_CARPLAY_VOICE_LONG
 
     /** The voice keys sent only for CarPlay; they open Siri while a CarPlay session runs. */
     fun opensSiriWhileCarPlay(keyCode: Int): Boolean =
@@ -228,6 +234,12 @@ object CarPlayMediaButton {
         return when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_NEXT -> NEXT
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> PREVIOUS
+            KeyEvent.KEYCODE_MEDIA_PLAY -> PLAY
+            KeyEvent.KEYCODE_MEDIA_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_STOP -> PAUSE
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_HEADSETHOOK,
+            KEYCODE_BYD_AUTO_MEDIA_PLAY_PAUSE -> PLAY_PAUSE
             else -> null
         }
     }

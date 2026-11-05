@@ -612,6 +612,11 @@ object TvPreferencesStore {
         prefs(context).edit()
             .putString(KEY_VIDEO_SURFACE_TYPE, surfaceType.key)
             .putBoolean(KEY_DIRECT_VIDEO_OUTPUT, surfaceType == VideoSurfaceType.SURFACE_VIEW)
+            .apply {
+                if (surfaceType == VideoSurfaceType.TEXTURE_VIEW) {
+                    putBoolean(KEY_SMOOTH_VIDEO, false)
+                }
+            }
             .apply()
     }
 

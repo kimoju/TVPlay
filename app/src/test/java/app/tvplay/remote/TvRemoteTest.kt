@@ -36,6 +36,22 @@ class TvRemoteTest {
             CarPlayRemoteAction.OpenHostMenuLongPressBack,
             TvRemoteKeyMap.resolveAction(longBack),
         )
+
+        val playPauseAction = TvRemoteKeyMap.resolveAction(
+            KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE),
+        )
+        assertEquals(
+            CarPlayRemoteAction.MediaButton(app.tvplay.engine.protocol.rtsp.CarPlayMediaButton.PLAY_PAUSE),
+            playPauseAction,
+        )
+
+        val voiceUpAction = TvRemoteKeyMap.resolveAction(
+            KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SEARCH),
+        )
+        assertEquals(
+            CarPlayRemoteAction.VoiceAssist(KeyEvent.KEYCODE_SEARCH),
+            voiceUpAction,
+        )
     }
 
     @Test

@@ -150,6 +150,8 @@ internal class AudioFocusCoordinator(
     private val active = LinkedHashMap<AudioTrack, Entry>()
     private var request: AudioFocusRequestCompat? = null
     private var requestedChannel: AudioChannel? = null
+    private var focusVolume = FULL_VOLUME
+    private var carPlayDucked = false
     private var mediaVolume = FULL_VOLUME
     private var closed = false
     private var focusGeneration = 0L
@@ -210,8 +212,16 @@ internal class AudioFocusCoordinator(
     fun close() {
         if (closed) return
         closed = true
+        carPlayDucked = false
         active.clear()
         refreshRequest()
+    }
+
+    @Synchronized
+    fun onAudioDuck(ducked: Boolean) {
+        if (closed) return
+        carPlayDucked = ducked
+        applyEffectiveMediaVolume()
     }
 
     private fun refreshRequest() {
@@ -221,7 +231,8 @@ internal class AudioFocusCoordinator(
             val abandoned = request
             request = null
             requestedChannel = null
-            mediaVolume = FULL_VOLUME
+            focusVolume = FULL_VOLUME
+            mediaVolume = if (carPlayDucked) DUCKED_VOLUME else FULL_VOLUME
             manager?.let { abandoned?.abandon(it) }
             return
         }
@@ -246,7 +257,12 @@ internal class AudioFocusCoordinator(
     }
 
     private fun setMediaVolume(volume: Float) {
-        mediaVolume = volume
+        focusVolume = volume
+        applyEffectiveMediaVolume()
+    }
+
+    private fun applyEffectiveMediaVolume() {
+        mediaVolume = if (carPlayDucked) minOf(focusVolume, DUCKED_VOLUME) else focusVolume
         active.forEach { (track, entry) -> applyMediaVolume(track, entry) }
     }
 

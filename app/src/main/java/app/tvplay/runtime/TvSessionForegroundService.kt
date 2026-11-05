@@ -33,7 +33,7 @@ class TvSessionForegroundService : Service() {
         }
         val status = intent?.getStringExtra("status") ?: getString(R.string.waiting_for_iphone)
         val notification = buildNotification(status)
-        if (Build.VERSION.SDK_INT >= 29) {
+        val startedForeground = if (Build.VERSION.SDK_INT >= 29) {
             var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             if (
                 Build.VERSION.SDK_INT >= 30 &&
@@ -47,19 +47,23 @@ class TvSessionForegroundService : Service() {
                     notification,
                     types,
                 )
-            }.onFailure {
-                runCatching {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-                    )
-                }.onFailure {
-                    runCatching { startForeground(NOTIFICATION_ID, notification) }
-                }
-            }
+                true
+            }.recoverCatching {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+                true
+            }.getOrDefault(false)
         } else {
-            runCatching { startForeground(NOTIFICATION_ID, notification) }
+            runCatching {
+                startForeground(NOTIFICATION_ID, notification)
+                true
+            }.getOrDefault(false)
+        }
+        if (!startedForeground) {
+            stopSelf()
         }
         return START_NOT_STICKY
     }

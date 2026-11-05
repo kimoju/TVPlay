@@ -41,12 +41,14 @@ object StageQuickControlOverlay {
         onCycleNightMode: () -> Unit,
         onReconnectNow: () -> Unit,
         onDisconnectAndExit: () -> Unit,
+        initialFocusIndex: Int = 0,
     ): View {
         fun dp(value: Int): Int = (value * context.resources.displayMetrics.density).roundToInt()
 
         val overlay = FrameLayout(context).apply {
             setBackgroundColor(Color.parseColor("#CC06090F"))
             isClickable = true
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         }
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -91,15 +93,20 @@ object StageQuickControlOverlay {
         val list = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
+        val buttons = mutableListOf<View>()
         fun addMenuButton(label: String, primary: Boolean = false, danger: Boolean = false, action: () -> Unit) {
+            val btn = StageWaitingOverlay.createTvButton(
+                context,
+                label = label,
+                primary = primary,
+                danger = danger,
+                onClick = action,
+            ).apply {
+                id = View.generateViewId()
+            }
+            buttons += btn
             list.addView(
-                StageWaitingOverlay.createTvButton(
-                    context,
-                    label = label,
-                    primary = primary,
-                    danger = danger,
-                    onClick = action,
-                ),
+                btn,
                 LinearLayout.LayoutParams(-1, dp(52)).apply { bottomMargin = dp(10) },
             )
         }
@@ -115,6 +122,15 @@ object StageQuickControlOverlay {
         addMenuButton("🔄 立即重新连接 iPhone", action = onReconnectNow)
         addMenuButton("⏹ 断开连接并退出投屏", danger = true, action = onDisconnectAndExit)
 
+        if (buttons.isNotEmpty()) {
+            buttons.first().nextFocusUpId = buttons.first().id
+            buttons.last().nextFocusDownId = buttons.last().id
+            buttons.forEach { btn ->
+                btn.nextFocusLeftId = btn.id
+                btn.nextFocusRightId = btn.id
+            }
+        }
+
         val scroll = ScrollView(context).apply {
             isFillViewport = true
             addView(list, ViewGroup.LayoutParams(-1, -2))
@@ -124,6 +140,8 @@ object StageQuickControlOverlay {
             card,
             FrameLayout.LayoutParams(dp(520), -2, Gravity.CENTER),
         )
+        val targetButton = buttons.getOrNull(initialFocusIndex.coerceIn(0, (buttons.size - 1).coerceAtLeast(0)))
+        targetButton?.post { targetButton.requestFocus() }
         return overlay
     }
 

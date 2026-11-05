@@ -332,9 +332,18 @@ class TvStageActivity : Activity() {
     @android.annotation.SuppressLint("GestureBackNavigation")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (quickControlOverlay?.visibility == View.VISIBLE) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK || event.keyCode == KeyEvent.KEYCODE_MENU) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK ||
+                event.keyCode == KeyEvent.KEYCODE_BUTTON_B ||
+                event.keyCode == KeyEvent.KEYCODE_MENU
+            ) {
                 if (event.action == KeyEvent.ACTION_UP) {
-                    hideQuickControlOverlay()
+                    if (suppressBackReleaseAfterLongPress &&
+                        (event.keyCode == KeyEvent.KEYCODE_BACK || event.keyCode == KeyEvent.KEYCODE_BUTTON_B)
+                    ) {
+                        suppressBackReleaseAfterLongPress = false
+                    } else {
+                        hideQuickControlOverlay()
+                    }
                 }
                 return true
             }
@@ -373,21 +382,31 @@ class TvStageActivity : Activity() {
             hasActiveScreenStream = isProjectionVisible,
             sessionActive = isProjectionVisible,
             sendKnob = { state, momentary ->
-                activeAirPlaySession?.let {
-                    it.sendKnob(state, momentary)
+                if (sessionEngine?.sendKnob(state, momentary) == true) {
                     true
-                } ?: (sessionEngine?.sendKnob(state, momentary) == true)
+                } else {
+                    activeAirPlaySession?.let {
+                        it.sendKnob(state, momentary)
+                        true
+                    } ?: false
+                }
             },
             sendMediaButton = { button ->
-                activeAirPlaySession?.let {
-                    it.sendMedia(button)
+                if (sessionEngine?.sendMedia(button) == true) {
                     true
-                } ?: (sessionEngine?.sendMedia(button) == true)
+                } else {
+                    activeAirPlaySession?.let {
+                        it.sendMedia(button)
+                        true
+                    } ?: false
+                }
             },
             onToggleQuickMenu = ::toggleQuickControlOverlay,
             onOpenQuickMenu = ::showQuickControlOverlay,
             onRequestSiri = {
-                activeAirPlaySession?.invokeSiri() ?: sessionEngine?.invokeSiri()
+                if (sessionEngine?.invokeSiri() != true) {
+                    activeAirPlaySession?.invokeSiri()
+                }
             },
             onLog = TvDiagnosticsLogger::record,
         )
@@ -401,7 +420,9 @@ class TvStageActivity : Activity() {
             val viewH = videoContainer.height.coerceAtLeast(1)
             val layout = TvVideoSurfaceHost.computeContentRect(sessionDisplay, viewW, viewH)
             val contacts = ViewportTouchMapper.contacts(event, layout)
-            activeAirPlaySession?.sendTouch(contacts)
+            if (sessionEngine?.sendTouch(contacts) != true) {
+                activeAirPlaySession?.sendTouch(contacts)
+            }
             return true
         }
         return super.onTouchEvent(event)
@@ -415,9 +436,12 @@ class TvStageActivity : Activity() {
         val preferred = TvPreferencesStore.loadVideoSurfaceType(this)
         val hevc = TvPreferencesStore.loadHevcEnabled(this)
         val unsafeDecoder = TvVideoSurfaceHost.findTextureUnsafeVideoDecoder(hevc)
+        val isHwAccelerated = window?.decorView?.takeIf { it.isAttachedToWindow }?.isHardwareAccelerated
+            ?: (((window?.attributes?.flags ?: 0) and WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED) != 0 ||
+                (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_HARDWARE_ACCELERATED) != 0)
         val mode = carPlayVideoSurfaceMode(
-            hardwareAccelerated = window?.decorView?.isHardwareAccelerated != false,
-            smoothVideo = TvPreferencesStore.loadSmoothVideo(this),
+            hardwareAccelerated = isHwAccelerated,
+            smoothVideo = TvPreferencesStore.loadSmoothVideo(this) && preferred != VideoSurfaceType.TEXTURE_VIEW,
             directVideoOutput = preferred == VideoSurfaceType.SURFACE_VIEW,
             textureUnsafeDecoder = unsafeDecoder != null,
         )
@@ -442,7 +466,7 @@ class TvStageActivity : Activity() {
                         val surface = holder.surface
                         val live = avPipeline
                         val detaches = (listOfNotNull(live) + retiringPipelines).distinct()
-                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = false) }
+                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = !isFinishing) }
                         detaches.forEach { it.await() }
                         live?.clearSurface(110, surface)
                         activeSurface = null
@@ -467,6 +491,7 @@ class TvStageActivity : Activity() {
                     val surface = Surface(texture)
                     activeSurface = surface
                     avPipeline?.setMainSurface(surface, width, height)
+                    avPipeline?.refreshPicture()
                     updateVideoLayout(videoContainer.width, videoContainer.height)
                 }
 
@@ -479,7 +504,7 @@ class TvStageActivity : Activity() {
                     activeSurface?.let { surface ->
                         val live = avPipeline
                         val detaches = (listOfNotNull(live) + retiringPipelines).distinct()
-                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = false) }
+                            .map { owner -> owner.beginSurfaceDetach(surface, parkMain = !isFinishing) }
                         detaches.forEach { it.await() }
                         live?.clearSurface(110, surface)
                         surface.release()
@@ -587,11 +612,20 @@ class TvStageActivity : Activity() {
         }
 
         if (!permissionsPromptedThisSession) {
-            val missingPermissions = if (wirelessEnabled) {
+            val baseMissing = if (wirelessEnabled) {
                 WirelessPermissions.missing(this, wirelessMode)
             } else {
                 WiredPermissions.missing(this)
             }
+            val micMissing = if (
+                TvPreferencesStore.loadMicrophoneEnabled(this) &&
+                checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+            ) {
+                listOf(android.Manifest.permission.RECORD_AUDIO)
+            } else {
+                emptyList()
+            }
+            val missingPermissions = (baseMissing + micMissing).distinct()
             if (missingPermissions.isNotEmpty()) {
                 permissionsPromptedThisSession = true
                 runCatching {
@@ -803,7 +837,11 @@ class TvStageActivity : Activity() {
             done()
         }
         if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
-            TvMediaKeyRouter.attach(this, controller, pipeline::onMediaAudioFocusChanged)
+            TvMediaKeyRouter.attach(this, controller) { change ->
+                if (change == android.media.AudioManager.AUDIOFOCUS_GAIN) {
+                    pipeline.onMediaAudioFocusChanged(change)
+                }
+            }
         }
         runCatching {
             TvSessionForegroundService.startOrUpdate(
@@ -873,12 +911,32 @@ class TvStageActivity : Activity() {
                 }
             }
         }
+        snapshot.sink.setVideoStreamDimensionsListener { streamW, streamH ->
+            if (controllerGeneration == restartGeneration) {
+                mainHandler.post {
+                    if (controllerGeneration != restartGeneration) return@post
+                    sessionDisplay = CarPlaySessionDisplay(
+                        width = streamW,
+                        height = streamH,
+                        rotation = 0,
+                        windowWidth = videoContainer.width.coerceAtLeast(snapshot.width),
+                        windowHeight = videoContainer.height.coerceAtLeast(snapshot.height),
+                    )
+                    updateVideoLayout(videoContainer.width, videoContainer.height)
+                }
+            }
+        }
         activeSurface?.let { surface ->
             snapshot.sink.setMainSurface(surface, videoContainer.width, videoContainer.height)
+            snapshot.sink.refreshPicture()
         }
         updateVideoLayout(videoContainer.width, videoContainer.height)
         if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
-            TvMediaKeyRouter.attach(this, snapshot.controller, snapshot.sink::onMediaAudioFocusChanged)
+            TvMediaKeyRouter.attach(this, snapshot.controller) { change ->
+                if (change == android.media.AudioManager.AUDIOFOCUS_GAIN) {
+                    snapshot.sink.onMediaAudioFocusChanged(change)
+                }
+            }
         }
         refreshOverlayVisibility()
         return true
@@ -893,7 +951,9 @@ class TvStageActivity : Activity() {
             activeAirPlaySession = session
             CarPlayBackgroundSession.active = true
             val nightMode = resolveNightMode()
-            session.setNightMode(nightMode)
+            if (sessionEngine?.setNightMode(nightMode) != true) {
+                session.setNightMode(nightMode)
+            }
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
                 reconnectAttempts = 0
@@ -902,7 +962,9 @@ class TvStageActivity : Activity() {
                 if (!firstFrameRendered) {
                     waitingBindings.stageStatusView.text = "iPhone 已建立 AirPlay 会话，正在启动视频解码与画面渲染..."
                 }
-                TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
+                if (!isFinishing && !isDestroyed) {
+                    TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
+                }
                 refreshOverlayVisibility()
             }
         }
@@ -932,11 +994,13 @@ class TvStageActivity : Activity() {
             if (controllerGeneration != restartGeneration) return
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
-                TvSessionForegroundService.startOrUpdate(
-                    this@TvStageActivity,
-                    wirelessEnabled,
-                    info.name.ifBlank { "iPhone" },
-                )
+                if (!isFinishing && !isDestroyed) {
+                    TvSessionForegroundService.startOrUpdate(
+                        this@TvStageActivity,
+                        wirelessEnabled,
+                        info.name.ifBlank { "iPhone" },
+                    )
+                }
             }
         }
 
@@ -1236,7 +1300,11 @@ class TvStageActivity : Activity() {
     private fun refreshOverlayVisibility() {
         val showVideo = streamingActive && firstFrameRendered
         waitingBindings.stageOverlay.visibility = if (showVideo) View.GONE else View.VISIBLE
-        if (!showVideo) {
+        if (!showVideo &&
+            quickControlOverlay?.visibility != View.VISIBLE &&
+            pictureTuningOverlay?.visibility != View.VISIBLE &&
+            waitingBindings.stageOverlay.findFocus() == null
+        ) {
             waitingBindings.backFromProjectionButton.requestFocus()
         }
     }
@@ -1260,7 +1328,7 @@ class TvStageActivity : Activity() {
         }
     }
 
-    private fun showQuickControlOverlay() {
+    private fun showQuickControlOverlay(focusIndex: Int = 0) {
         hideQuickControlOverlay()
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
@@ -1294,24 +1362,24 @@ class TvStageActivity : Activity() {
                 val next = options[(options.indexOf(scalePercent) + 1) % options.size]
                 TvPreferencesStore.saveDisplayScalePercent(this, next)
                 PendingReconnect.mark()
-                showQuickControlOverlay()
+                showQuickControlOverlay(focusIndex = 3)
             },
             onToggleFps = {
                 val nextFps = if (fps >= 60) 30 else 60
                 TvPreferencesStore.saveFps(this, nextFps)
                 PendingReconnect.mark()
-                showQuickControlOverlay()
+                showQuickControlOverlay(focusIndex = 4)
             },
             onToggleHevc = {
                 TvPreferencesStore.saveHevcEnabled(this, !hevcEnabled)
                 PendingReconnect.mark()
-                showQuickControlOverlay()
+                showQuickControlOverlay(focusIndex = 5)
             },
             onToggleFpsCounter = {
                 val next = !fpsCounterShown
                 TvPreferencesStore.saveFpsCounter(this, next)
                 if (next && streamingActive) fpsHudOverlay.start() else fpsHudOverlay.stop()
-                showQuickControlOverlay()
+                showQuickControlOverlay(focusIndex = 6)
             },
             onCycleNightMode = {
                 val next = when (nightMode) {
@@ -1320,8 +1388,11 @@ class TvStageActivity : Activity() {
                     CarPlayNightMode.DAY -> CarPlayNightMode.SYSTEM
                 }
                 TvPreferencesStore.saveCarPlayNightMode(this, next)
-                activeAirPlaySession?.setNightMode(resolveNightMode())
-                showQuickControlOverlay()
+                val resolvedNight = resolveNightMode()
+                if (sessionEngine?.setNightMode(resolvedNight) != true) {
+                    activeAirPlaySession?.setNightMode(resolvedNight)
+                }
+                showQuickControlOverlay(focusIndex = 7)
             },
             onReconnectNow = {
                 hideQuickControlOverlay()
@@ -1331,6 +1402,7 @@ class TvStageActivity : Activity() {
                 hideQuickControlOverlay()
                 disconnectAndExit()
             },
+            initialFocusIndex = focusIndex,
         )
         quickControlOverlay = overlay
         rootFrame.addView(
@@ -1371,6 +1443,7 @@ class TvStageActivity : Activity() {
     }
 
     private fun closePictureTuningOverlay() {
+        app.tvplay.remote.CarPlayPicture.showOriginal(false)
         pictureTuningOverlay?.let { rootFrame.removeView(it) }
         pictureTuningOverlay = null
     }

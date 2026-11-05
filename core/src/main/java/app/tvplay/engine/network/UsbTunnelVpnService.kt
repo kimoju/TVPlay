@@ -66,6 +66,7 @@ class UsbTunnelVpnService : VpnService() {
     private var serverSocket: ServerSocket? = null
     private var additionalServers: List<ServerSocket> = emptyList()
     private var bridge: Ipv6NcmBridge? = null
+    private var attachedNcm: NcmUsbBridge? = null
     private var tun: ParcelFileDescriptor? = null
     private var attachGeneration = 0
 
@@ -92,6 +93,7 @@ class UsbTunnelVpnService : VpnService() {
             releaseLocked()
         }
         active.set(true)
+        attachedNcm = ncm
         val generation = ++attachGeneration
         return try {
             val address = InetAddress.getByName(linkLocal)
@@ -134,6 +136,10 @@ class UsbTunnelVpnService : VpnService() {
                     AirPlayAttachment(scopedToTunnel(address, listener), config, identity, pairings, mfi, listener, media),
                 )
             } else {
+                // When operating without a userspace TUN bridge, release the userspace NCM claim
+                // so the kernel USB NCM interface can carry packets and the USB connection is not leaked.
+                runCatching { ncm.close() }
+                attachedNcm = null
                 val directBind = directUsbBind ?: selectDirectUsbBindAddress(address, listener)
                 startAirPlayServer(
                     generation,
@@ -453,6 +459,8 @@ class UsbTunnelVpnService : VpnService() {
         closeSessionsLocked()
         runCatching { bridge?.close() }
         bridge = null
+        runCatching { attachedNcm?.close() }
+        attachedNcm = null
         runCatching { tun?.close() }
         tun = null
     }

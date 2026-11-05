@@ -69,6 +69,15 @@ fun isInternalAirPlayPeer(peer: InetAddress, local: InetAddress): Boolean {
     return runCatching { NetworkInterface.getByInetAddress(peer) != null }.getOrDefault(false)
 }
 
+private fun InetAddress.isPrivateOrLocalAirPlayPeer(): Boolean {
+    if (isLinkLocalAddress || isSiteLocalAddress) return true
+    if (this is java.net.Inet6Address) {
+        val raw = address
+        if (raw.isNotEmpty() && (raw[0].toInt() and 0xfe) == 0xfc) return true
+    }
+    return false
+}
+
 internal fun isSameOrAuthorizedAirPlayPeer(candidate: InetAddress?, expected: InetAddress): Boolean {
     if (candidate == null) return false
     if (candidate == expected) return true
@@ -80,9 +89,7 @@ internal fun isSameOrAuthorizedAirPlayPeer(candidate: InetAddress?, expected: In
     ) {
         return false
     }
-    val candidateLocalPeer = candidate.isLinkLocalAddress || candidate.isSiteLocalAddress
-    val expectedLocalPeer = expected.isLinkLocalAddress || expected.isSiteLocalAddress
-    return candidateLocalPeer && expectedLocalPeer
+    return candidate.isPrivateOrLocalAirPlayPeer() && expected.isPrivateOrLocalAirPlayPeer()
 }
 
 /**
@@ -192,6 +199,9 @@ class RtspControlSession(
     private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
     private val eventThreads = CopyOnWriteArrayList<Thread>()
+    private val eventWriteExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "airplay-event-tx").apply { isDaemon = true }
+    }
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     val localAddress: InetAddress? = socket.localAddress
@@ -252,10 +262,31 @@ class RtspControlSession(
         trace { "airplay event tx headers=$head bodyHex=${body.toHexString()}" }
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
-            val output = socket.getOutputStream()
-            output.write(bytes)
-            output.flush()
-            true
+            try {
+                val output = socket.getOutputStream()
+                output.write(bytes)
+                output.flush()
+                true
+            } catch (mainThreadError: Exception) {
+                if (mainThreadError.javaClass.name == "android.os.NetworkOnMainThreadException") {
+                    runCatching {
+                        eventWriteExecutor.execute {
+                            synchronized(eventWriteLock) {
+                                if (eventSocket === socket && !closed.get()) {
+                                    runCatching {
+                                        val out = socket.getOutputStream()
+                                        out.write(bytes)
+                                        out.flush()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    true
+                } else {
+                    throw mainThreadError
+                }
+            }
         } catch (error: Exception) {
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
             if (eventSocket === socket) {
@@ -775,6 +806,7 @@ class RtspControlSession(
         safeClose(eventSocket)
         eventSocket = null
         eventCipher = null
+        runCatching { eventWriteExecutor.shutdownNow() }
         eventThreads.forEach { it.interrupt() }
         eventThreads.clear()
     }
@@ -786,7 +818,7 @@ class RtspControlSession(
                 val socket = server.acceptFrom(expected) {
                     debugLog("airplay event rejected sender outside the control session")
                 }
-                configureTcpLiveness(socket) { debugLog(it) }
+                socket.keepAlive = true
                 socket.tcpNoDelay = true
                 debugLog("airplay event connection accepted from ${socket.remoteSocketAddress} noDelay=${socket.tcpNoDelay}")
                 val shared = pairVerify.shared
@@ -831,7 +863,7 @@ class RtspControlSession(
     private fun runEventRead(socket: Socket) {
         try {
             val input = BufferedInputStream(socket.getInputStream())
-            val output = BufferedOutputStream(socket.getOutputStream())
+            val output = socket.getOutputStream()
             var encrypted = ByteArray(0)
             var plaintext = ByteArray(0)
             val buffer = ByteArray(READ_CHUNK_BYTES)

@@ -84,7 +84,11 @@ class LanNetworkLink(
                             !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     } == true
                 }
-                wifiNetworks.firstOrNull() ?: ethNetworks.firstOrNull() ?: connectivity.activeNetwork
+                wifiNetworks.firstOrNull()
+                    ?: ethNetworks.firstOrNull()
+                    ?: connectivity.activeNetwork?.takeIf { active ->
+                        connectivity.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true
+                    }
             }
             val properties = network?.let { runCatching { connectivity.getLinkProperties(it) }.getOrNull() }
             val fallbackIface = if (properties?.interfaceName == null && configured == null) {

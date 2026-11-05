@@ -323,6 +323,23 @@ class TvUiTest {
         stage.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
         stage.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
 
+        // Long-press BACK opens quickControlOverlay and releasing BACK after long-press keeps it open
+        val longBackDown = KeyEvent(
+            0L,
+            0L,
+            KeyEvent.ACTION_DOWN,
+            KeyEvent.KEYCODE_BACK,
+            app.tvplay.remote.TvRemoteKeyMap.LONG_PRESS_BACK_REPEAT_COUNT,
+        )
+        stage.dispatchKeyEvent(longBackDown)
+        assertNotNull("Long-press BACK should open quickControlOverlay", quickOverlayField.get(stage))
+        stage.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+        assertNotNull("Releasing BACK after long-press must NOT immediately close quickControlOverlay", quickOverlayField.get(stage))
+        // Short BACK press closes quickControlOverlay
+        stage.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+        stage.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+        org.junit.Assert.assertNull("Short BACK press should close quickControlOverlay", quickOverlayField.get(stage))
+
         var knobEvents = 0
         var mediaEvents = 0
         val controllerHandled = app.tvplay.remote.TvRemoteInputController.dispatchKeyEvent(

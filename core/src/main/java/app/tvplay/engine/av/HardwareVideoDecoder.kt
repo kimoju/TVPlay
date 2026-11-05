@@ -1835,14 +1835,27 @@ class HardwareVideoDecoder internal constructor(
     private fun logOutputFormat(format: MediaFormat) {
         val codedWidth = format.intOrNull(MediaFormat.KEY_WIDTH)
         val codedHeight = format.intOrNull(MediaFormat.KEY_HEIGHT)
-        if (codedWidth != null && codedHeight != null && codedWidth > 0 && codedHeight > 0) {
-            onStreamDimensionsChanged(codedWidth, codedHeight)
+        val cropLeft = format.intOrNull("crop-left")
+        val cropTop = format.intOrNull("crop-top")
+        val cropRight = format.intOrNull("crop-right")
+        val cropBottom = format.intOrNull("crop-bottom")
+        val visibleWidth = if (cropLeft != null && cropRight != null && cropRight >= cropLeft) {
+            cropRight - cropLeft + 1
+        } else {
+            codedWidth
+        }
+        val visibleHeight = if (cropTop != null && cropBottom != null && cropBottom >= cropTop) {
+            cropBottom - cropTop + 1
+        } else {
+            codedHeight
+        }
+        if (visibleWidth != null && visibleHeight != null && visibleWidth > 0 && visibleHeight > 0) {
+            onStreamDimensionsChanged(visibleWidth, visibleHeight)
         }
         report(
             "output format requested=${width}x${height} " +
                 "coded=${codedWidth}x${codedHeight} " +
-                "crop=${format.intOrNull("crop-left")},${format.intOrNull("crop-top")}," +
-                "${format.intOrNull("crop-right")},${format.intOrNull("crop-bottom")} " +
+                "crop=${cropLeft},${cropTop},${cropRight},${cropBottom} " +
                 "stride=${format.intOrNull(MediaFormat.KEY_STRIDE)} slice=${format.intOrNull(MediaFormat.KEY_SLICE_HEIGHT)} " +
                 "color=${format.intOrNull(MediaFormat.KEY_COLOR_STANDARD)}/${format.intOrNull(MediaFormat.KEY_COLOR_RANGE)}/${format.intOrNull(MediaFormat.KEY_COLOR_TRANSFER)}",
         )

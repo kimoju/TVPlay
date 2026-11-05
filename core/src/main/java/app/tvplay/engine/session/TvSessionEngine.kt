@@ -2542,9 +2542,9 @@ class TvSessionEngine(
      */
     private fun startAccessoryIap2Server(adapter: BluetoothAdapter, generation: Int) {
         val server = synchronized(wirelessResourceLock) {
-            if (isStaleWirelessRun(generation)) return
-            bluetoothServerSocket?.let { runCatching { it.close() } }
-            bluetoothServerSocket = null
+            if (isStaleWirelessRun(generation) || bluetoothServerSocket != null || acceptedBluetoothSocket != null) {
+                return
+            }
             val accessoryUuid = UUID.fromString(IAP2_ACCESSORY_UUID)
             runCatching {
                 adapter.listenUsingRfcommWithServiceRecord("Wireless iAP", accessoryUuid)
@@ -2641,7 +2641,8 @@ class TvSessionEngine(
         generation: Int,
         hostBluetoothMac: String,
     ): ConnectedBluetoothLink {
-        val waitDeadlineNanos = System.nanoTime() + PAIRING_WAIT_TIMEOUT_MILLIS * 1_000_000L
+        val waitStartNanos = System.nanoTime()
+        val waitDeadlineNanos = waitStartNanos + PAIRING_WAIT_TIMEOUT_MILLIS * 1_000_000L
         var targetDevice: BluetoothDevice? = null
         var loggedWaitingForPairing = false
         startAccessoryIap2Server(adapter, generation)
@@ -2667,7 +2668,7 @@ class TvSessionEngine(
                     }
                     val effectiveDeadline = minOf(
                         waitDeadlineNanos,
-                        System.nanoTime() + waitWindowMillis * 1_000_000L,
+                        waitStartNanos + waitWindowMillis * 1_000_000L,
                     )
                     if (System.nanoTime() >= effectiveDeadline) {
                         throw failure
@@ -3242,7 +3243,6 @@ class TvSessionEngine(
     }
 
     private fun unbindVpn() {
-        vpnService?.detach()
         if (vpnBound) {
             vpnBound = false
             try {

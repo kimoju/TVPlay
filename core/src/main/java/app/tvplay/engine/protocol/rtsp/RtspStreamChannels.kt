@@ -623,7 +623,7 @@ class BufferedAudioStream(
                     runCatching { socket.close() }
                     return null
                 }
-                if (socket.inetAddress != expectedPeer) {
+                if (!isSameOrAuthorizedAirPlayPeer(socket.inetAddress, expectedPeer)) {
                     runCatching { socket.close() }
                     log("Buffered audio: rejected sender outside the control session")
                     false
@@ -1211,7 +1211,9 @@ class CarPlayMediaEngine(
                                 TAG,
                                 "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
                             )
-                            session.close()
+                            if (!session.hasActiveMediaStreams()) {
+                                session.close()
+                            }
                         }
                     },
                 )
@@ -1240,7 +1242,9 @@ class CarPlayMediaEngine(
         if (!attached) {
             Log.w(TAG, "iAP tunnel relay attachment was rejected after SETUP")
             pending.bridge.close()
-            session.close()
+            if (!session.hasActiveMediaStreams()) {
+                session.close()
+            }
         }
     }
 
@@ -1941,7 +1945,7 @@ class IapTunnel(
                 safeClose(accepted)
                 return
             }
-            if (accepted.inetAddress != expectedPeer) {
+            if (!isSameOrAuthorizedAirPlayPeer(accepted.inetAddress, expectedPeer)) {
                 safeClose(accepted)
                 listener.onDebug("AirPlay iAP tunnel rejected sender outside the control session")
                 continue
@@ -2079,7 +2083,9 @@ class AirPlayIapTunnelStream(
                         "${cause?.message ?: "no detail"}",
                 )
                 val shouldCloseSession = markFailed(cause)
-                if (shouldCloseSession) session.close()
+                if (shouldCloseSession && !session.hasActiveMediaStreams()) {
+                    session.close()
+                }
             }
         },
     )

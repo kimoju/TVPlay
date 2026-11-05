@@ -61,9 +61,29 @@ data class AirPlayTcpAccepted(
     val acceptedAtNanos: Long,
 )
 
-fun isInternalAirPlayPeer(peer: InetAddress, local: InetAddress): Boolean =
-    peer.isLoopbackAddress || peer == local ||
-        runCatching { NetworkInterface.getByInetAddress(peer) != null }.getOrDefault(true)
+fun isInternalAirPlayPeer(peer: InetAddress, local: InetAddress): Boolean {
+    if (peer.isLoopbackAddress || peer == local) return true
+    val peerHost = peer.hostAddress?.substringBefore('%')?.removePrefix("::ffff:")
+    val localHost = local.hostAddress?.substringBefore('%')?.removePrefix("::ffff:")
+    if (peerHost != null && peerHost.equals(localHost, ignoreCase = true)) return true
+    return runCatching { NetworkInterface.getByInetAddress(peer) != null }.getOrDefault(false)
+}
+
+internal fun isSameOrAuthorizedAirPlayPeer(candidate: InetAddress?, expected: InetAddress): Boolean {
+    if (candidate == null) return false
+    if (candidate == expected) return true
+    val candidateHost = candidate.hostAddress?.substringBefore('%')?.removePrefix("::ffff:")
+    val expectedHost = expected.hostAddress?.substringBefore('%')?.removePrefix("::ffff:")
+    if (candidateHost != null && candidateHost.equals(expectedHost, ignoreCase = true)) return true
+    if (candidate.isLoopbackAddress ||
+        runCatching { NetworkInterface.getByInetAddress(candidate) != null }.getOrDefault(false)
+    ) {
+        return false
+    }
+    val candidateLocalPeer = candidate.isLinkLocalAddress || candidate.isSiteLocalAddress
+    val expectedLocalPeer = expected.isLinkLocalAddress || expected.isSiteLocalAddress
+    return candidateLocalPeer && expectedLocalPeer
+}
 
 /**
  * Accepts until a connection comes from [expected], the control-session peer; others are closed unread.
@@ -71,7 +91,7 @@ fun isInternalAirPlayPeer(peer: InetAddress, local: InetAddress): Boolean =
 internal fun ServerSocket.acceptFrom(expected: InetAddress, onRejected: (InetAddress?) -> Unit = {}): Socket {
     while (true) {
         val socket = accept()
-        if (socket.inetAddress == expected) return socket
+        if (isSameOrAuthorizedAirPlayPeer(socket.inetAddress, expected)) return socket
         onRejected(socket.inetAddress)
         runCatching { socket.close() }
     }
@@ -698,6 +718,9 @@ class RtspControlSession(
         return RtspMessageCodec.Response(status = 200)
     }
 
+    fun hasActiveMediaStreams(): Boolean =
+        activeStreams.any { it != STREAM_TYPE_DATA }
+
     private fun openTiming(peerPort: Int): Int {
         val port = ntp.listen()
         if (peerPort > 0) peerAddress?.let { ntp.start(it, peerPort) }
@@ -909,7 +932,7 @@ private fun configureTcpLiveness(socket: Socket, diagnostic: (String) -> Unit) {
         } else {
             tuneTcpKeepAlive(socket.javaClass.getMethod("getFileDescriptor\$").invoke(socket) as FileDescriptor)
         }
-        diagnostic("TCP peer health enabled idle=10s interval=3s count=3 deadline=20000ms; no video-idle timeout")
+        diagnostic("TCP peer health enabled idle=30s interval=5s count=6 deadline=60000ms; no video-idle timeout")
     } catch (failure: Exception) {
         diagnostic("TCP peer health tuning unavailable: ${failure.javaClass.simpleName}")
     }
@@ -918,10 +941,10 @@ private fun configureTcpLiveness(socket: Socket, diagnostic: (String) -> Unit) {
 @RequiresApi(26)
 private fun tuneTcpKeepAlive(fd: FileDescriptor) {
     // Linux UAPI <linux/tcp.h>
-    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 4, 10)
-    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 5, 3)
-    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 6, 3)
-    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, OsConstants.TCP_USER_TIMEOUT, 20_000)
+    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 4, 30)
+    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 5, 5)
+    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, 6, 6)
+    Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, OsConstants.TCP_USER_TIMEOUT, 60_000)
 }
 
 private fun asMap(value: Any?): Map<String, Any?>? {

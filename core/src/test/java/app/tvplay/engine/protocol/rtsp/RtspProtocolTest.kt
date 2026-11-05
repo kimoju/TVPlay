@@ -126,4 +126,16 @@ class RtspProtocolTest {
         assertEquals(false, decodedNoIcons["rightHandDrive"])
         assertFalse(decodedNoIcons.containsKey("oemIcons"))
     }
+
+    @Test
+    fun isSameOrAuthorizedAirPlayPeerAllowsDualStackPeerAndRejectsLoopback() {
+        val ipv4Peer = java.net.InetAddress.getByName("192.168.49.42")
+        val ipv6LinkLocalPeer = java.net.InetAddress.getByName("fe80::1c2b:3d4e:5f6a:7b8c")
+        val loopback = java.net.InetAddress.getByName("127.0.0.1")
+
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4Peer, ipv4Peer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6LinkLocalPeer, ipv4Peer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4Peer, ipv6LinkLocalPeer))
+        assertFalse(isSameOrAuthorizedAirPlayPeer(loopback, ipv4Peer))
+    }
 }

@@ -152,7 +152,7 @@ class TvStageActivity : Activity() {
     private var bluetoothReceiverRegistered = false
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (isFinishing || isDestroyed || isProjectionVisible) return
+            if (isFinishing || isDestroyed || isProjectionVisible || streamingActive || activeAirPlaySession != null) return
             if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return
             when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
@@ -712,6 +712,8 @@ class TvStageActivity : Activity() {
                 if (controllerGeneration == restartGeneration) {
                     mainHandler.post {
                         if (controllerGeneration != restartGeneration) return@post
+                        reconnectAttempts = 0
+                        cancelScheduledReconnect()
                         firstFrameRendered = true
                         streamingActive = true
                         activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
@@ -874,6 +876,8 @@ class TvStageActivity : Activity() {
             if (controllerGeneration == restartGeneration) {
                 mainHandler.post {
                     if (controllerGeneration != restartGeneration) return@post
+                    reconnectAttempts = 0
+                    cancelScheduledReconnect()
                     firstFrameRendered = true
                     streamingActive = true
                     activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
@@ -908,6 +912,8 @@ class TvStageActivity : Activity() {
             session.setNightMode(nightMode)
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
+                reconnectAttempts = 0
+                cancelScheduledReconnect()
                 streamingActive = true
                 if (!firstFrameRendered) {
                     waitingBindings.stageStatusView.text = "iPhone 已建立 AirPlay 会话，正在启动视频解码与画面渲染..."
@@ -921,6 +927,8 @@ class TvStageActivity : Activity() {
             if (controllerGeneration != restartGeneration) return
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
+                reconnectAttempts = 0
+                cancelScheduledReconnect()
                 firstFrameRendered = true
                 streamingActive = true
                 retryBudget.firstFrame(session, System.currentTimeMillis())

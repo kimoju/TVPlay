@@ -79,4 +79,37 @@ class EngineSessionTest {
             ),
         )
     }
+
+    @Test
+    fun firstTcpWatchdogResetsTimerOnRepeatedStartSessionAndDisarmsOnExternalAccept() {
+        val listener = app.tvplay.engine.protocol.rtsp.AirPlayListenerIdentity(1)
+        var cancelledCount = 0
+        var firedCount = 0
+        var latestAction: (() -> Unit)? = null
+        val watchdog = FirstTcpWatchdog(
+            listener = listener,
+            schedule = { _, action ->
+                latestAction = action
+                ({ cancelledCount++ })
+            },
+            onTimeout = { firedCount++ },
+        )
+
+        watchdog.startSessionSent(100L)
+        watchdog.startSessionSent(200L)
+        assertEquals(1, cancelledCount)
+
+        assertTrue(
+            watchdog.accepted(
+                app.tvplay.engine.protocol.rtsp.AirPlayTcpAccepted(
+                    listener = listener,
+                    internal = false,
+                    acceptedAtNanos = 150L,
+                ),
+            ),
+        )
+        assertEquals(2, cancelledCount)
+        latestAction?.invoke()
+        assertEquals(0, firedCount)
+    }
 }

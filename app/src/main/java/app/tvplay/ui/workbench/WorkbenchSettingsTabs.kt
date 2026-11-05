@@ -18,10 +18,12 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import androidx.core.graphics.ColorUtils
 import app.tvplay.config.TvSettingsRepository
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
@@ -32,10 +34,14 @@ import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.WifiP2pChannels
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
+import app.tvplay.runtime.TvLanOtaManager
 import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.TvColorScheme
+import app.tvplay.ui.theme.TvIconGlyph
 import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
+import app.tvplay.ui.theme.TvVectorIconDrawable
+import app.tvplay.ui.theme.TvVectorIcons
 import app.tvplay.ui.theme.appDialogBuilder
 
 enum class SettingsCategory(val title: String) {
@@ -48,10 +54,12 @@ enum class SettingsCategory(val title: String) {
 typealias WorkbenchSettingsPane = WorkbenchSettingsTabs
 
 /**
- * Right-pane tabbed settings panel for the 10-foot Android TV workbench.
+ * Right-pane Bento settings console for the 10-foot Android TV workbench (`ui-ux-pro-max`).
  *
- * Designed specifically for D-pad navigation with clear focus rings, high-contrast cards,
- * and structured categories ([SettingsCategory]).
+ * Features:
+ * - Segmented glassmorphic category bar with custom geometric vector icons ([TvVectorIcons]).
+ * - Squircle vector icon wells on every setting row for rapid 10-foot visual scanning.
+ * - Custom tvOS/iOS-style capsule switches ([TvVectorIcons.styleIosSwitch]) and non-jittering focus rings.
  */
 class WorkbenchSettingsTabs(
     private val context: Context,
@@ -62,22 +70,39 @@ class WorkbenchSettingsTabs(
 
     val root: LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        background = GradientDrawable().apply {
+        clipChildren = false
+        clipToPadding = false
+        background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                ColorUtils.blendARGB(palette.surfaceContainer, palette.card, 0.35f),
+                palette.surfaceContainer,
+            ),
+        ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 24f * density
-            setColor(palette.surfaceContainer)
+            cornerRadius = 26f * density
             setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
         }
-        setPadding(dp(22), dp(20), dp(22), dp(20))
+        setPadding(dp(22), dp(18), dp(22), dp(18))
     }
 
     private val tabStripRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(5), dp(5), dp(5), dp(5))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 999f * density
+            setColor(palette.subtleSurface)
+            setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
+        }
     }
 
     private val tabButtons = LinkedHashMap<SettingsCategory, TextView>()
-    private val contentContainer = FrameLayout(context)
+    private val contentContainer = FrameLayout(context).apply {
+        clipChildren = false
+        clipToPadding = false
+    }
     private var selectedCategory: SettingsCategory = SettingsCategory.CONNECTION
     private var isRebuilding: Boolean = false
 
@@ -85,6 +110,8 @@ class WorkbenchSettingsTabs(
     var onPairBluetoothClicked: (() -> Unit)? = null
     var onResetWirelessHotspotClicked: (() -> Unit)? = null
     var onSaveDiagnosticLogClicked: (() -> Unit)? = null
+    var onCheckOtaUpdateClicked: (() -> Unit)? = null
+    var onDiscoverOtaServerClicked: (() -> Unit)? = null
     var onOpenPictureAdjustmentClicked: (() -> Unit)? = null
     var onSettingChanged: (() -> Unit)? = null
     var onAppearanceChanged: (() -> Unit)? = null
@@ -94,18 +121,38 @@ class WorkbenchSettingsTabs(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        val headerBadge = TvVectorIcons.badgeWell(
+            context = context,
+            glyph = TvIconGlyph.SLIDERS,
+            palette = palette,
+            active = true,
+            sizeDp = 34,
+            iconDp = 17,
+        )
         val headerTitle = TextView(context).apply {
-            text = "TVPlay 接收端参数设置"
+            text = "接收端参数控制台"
             setTextColor(palette.textPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }
         val headerHint = TextView(context).apply {
-            text = "使用遥控器方向键 ▲▼◀▶ 与确认键调节"
+            text = "方向键导航  ·  OK 切换"
             setTextColor(palette.textSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor(palette.badgeSurface)
+                setStroke((1f * density).toInt().coerceAtLeast(1), palette.badgeOutline)
+            }
             gravity = Gravity.END
         }
+        headerRow.addView(
+            headerBadge,
+            LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
+        )
         headerRow.addView(headerTitle, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         headerRow.addView(headerHint, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         root.addView(headerRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -113,6 +160,8 @@ class WorkbenchSettingsTabs(
         val tabScroll = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
+            clipChildren = false
+            clipToPadding = false
         }
         SettingsCategory.entries.forEachIndexed { index, category ->
             val tab = createTabChip(category)
@@ -120,7 +169,7 @@ class WorkbenchSettingsTabs(
             tabStripRow.addView(
                 tab,
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    if (index > 0) marginStart = dp(8)
+                    if (index > 0) marginStart = dp(6)
                 },
             )
         }
@@ -129,7 +178,7 @@ class WorkbenchSettingsTabs(
             tabScroll,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
                 topMargin = dp(14)
-                bottomMargin = dp(14)
+                bottomMargin = dp(12)
             },
         )
 
@@ -154,13 +203,14 @@ class WorkbenchSettingsTabs(
             }
             selectedCategory = category
             tabButtons.forEach { (cat, chip) ->
-                styleTabChip(chip, selected = cat == category, focused = chip.isFocused)
+                styleTabChip(chip, category = cat, selected = cat == category, focused = chip.isFocused)
             }
             contentContainer.removeAllViews()
             val scroll = ScrollView(context).apply {
                 isVerticalScrollBarEnabled = true
                 isFillViewport = true
                 clipToPadding = false
+                clipChildren = false
             }
             val page = when (category) {
                 SettingsCategory.CONNECTION -> buildConnectionPage()
@@ -185,51 +235,75 @@ class WorkbenchSettingsTabs(
         selectCategory(selectedCategory)
     }
 
+    private fun categoryGlyph(category: SettingsCategory): TvIconGlyph = when (category) {
+        SettingsCategory.CONNECTION -> TvIconGlyph.WIFI
+        SettingsCategory.DISPLAY -> TvIconGlyph.DISPLAY
+        SettingsCategory.AUDIO -> TvIconGlyph.AUDIO
+        SettingsCategory.ABOUT -> TvIconGlyph.SETTINGS
+    }
+
     private fun createTabChip(category: SettingsCategory): TextView =
         TextView(context).apply {
             text = category.title
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(16), dp(9), dp(16), dp(9))
+            gravity = Gravity.CENTER_VERTICAL
+            compoundDrawablePadding = dp(8)
+            setPadding(dp(16), dp(9), dp(18), dp(9))
             isFocusable = true
             isFocusableInTouchMode = false
             isClickable = true
             setOnClickListener { selectCategory(category) }
             setOnFocusChangeListener { _, hasFocus ->
-                styleTabChip(this, selected = selectedCategory == category, focused = hasFocus)
+                styleTabChip(this, category = category, selected = selectedCategory == category, focused = hasFocus)
                 if (hasFocus && selectedCategory != category) {
                     selectCategory(category)
                 }
             }
-            styleTabChip(this, selected = selectedCategory == category, focused = false)
+            styleTabChip(this, category = category, selected = selectedCategory == category, focused = false)
         }
 
-    private fun styleTabChip(view: TextView, selected: Boolean, focused: Boolean) {
+    private fun styleTabChip(view: TextView, category: SettingsCategory, selected: Boolean, focused: Boolean) {
         val fillColor = when {
             selected -> palette.accent
             focused -> palette.surfaceCardElevated
-            else -> palette.surfaceCard
+            else -> 0x00000000
         }
-        val textColor = if (selected) 0xFFFFFFFF.toInt() else palette.textPrimary
-        val strokeColor = if (focused) 0xFFFFFFFF.toInt() else if (selected) palette.accent else palette.outline
-        val strokeWidth = if (focused) dp(2) else dp(1)
+        val textColor = when {
+            selected -> 0xFFFFFFFF.toInt()
+            focused -> palette.textPrimary
+            else -> palette.textSecondary
+        }
+        val iconTint = when {
+            selected -> 0xFFFFFFFF.toInt()
+            focused -> palette.focusRing
+            else -> palette.textSecondary
+        }
+        val strokeColor = when {
+            focused -> palette.focusRing
+            selected -> ColorUtils.blendARGB(palette.accent, 0xFFFFFFFF.toInt(), 0.28f)
+            else -> 0x00000000
+        }
+        val strokeWidth = if (focused) dp(2) else if (selected) dp(1) else 0
         view.setTextColor(textColor)
-        view.background = GradientDrawable().apply {
+        val icon = TvVectorIcons.drawable(context, categoryGlyph(category), iconTint, sizeDp = 15, strokeDp = 2f)
+        view.setCompoundDrawablesRelative(icon, null, null, null)
+        view.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                if (fillColor != 0) ColorUtils.blendARGB(fillColor, 0xFFFFFFFF.toInt(), 0.12f) else 0,
+                fillColor,
+            ),
+        ).apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = 999f * density
-            setColor(fillColor)
-            setStroke(strokeWidth, strokeColor)
+            if (strokeWidth > 0) setStroke(strokeWidth, strokeColor)
         }
-        view.animate()
-            .scaleX(if (focused) 1.04f else 1.0f)
-            .scaleY(if (focused) 1.04f else 1.0f)
-            .setDuration(110L)
-            .start()
     }
 
     private fun buildConnectionPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(2), dp(4), dp(4), dp(16))
+        setPadding(dp(2), dp(2), dp(4), dp(16))
 
         addView(sectionHeader("主连接方式（无线 / USB 有线）"))
         val currentTransportKey = when {
@@ -262,9 +336,10 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "CarPlay 连接模式",
-                subtitle = "按确认键弹出模式选择，或按左右方向键 ◀▶ 切换无线 Wi-Fi Direct、家庭局域网与 USB 有线模式",
+                subtitle = "按 OK 弹出模式列表，或按左右键切换 Wi-Fi Direct、家庭局域网与 USB",
                 options = transportOptions,
                 current = currentTransportKey,
+                icon = TvIconGlyph.RADAR,
                 onClickOverride = {
                     val dialogItems = arrayOf(
                         "无线 · Wi-Fi Direct 5GHz 直连（推荐：免路由器密码，点对点直连）",
@@ -291,15 +366,16 @@ class WorkbenchSettingsTabs(
         addView(sectionHeader("蓝牙配对与目标 iPhone"))
         val phoneAddress = settings.connection.pairedPhoneAddress
         val phoneSubtitle = if (phoneAddress != null) {
-            "已指定：${settings.connection.pairedPhoneName} ($phoneAddress)"
+            "已绑定：${settings.connection.pairedPhoneName} ($phoneAddress)"
         } else {
-            "自动识别已配对的 iPhone（可点击手动指定）"
+            "自动识别已配对的 iPhone（可点击手动指定设备）"
         }
         addView(
             actionCard(
                 title = "目标 iPhone 设备",
                 subtitle = phoneSubtitle,
                 buttonLabel = "选择 iPhone",
+                icon = TvIconGlyph.PHONE,
                 onClick = { onChooseIphoneClicked?.invoke() },
             ),
             cardLayoutParams(),
@@ -308,8 +384,9 @@ class WorkbenchSettingsTabs(
         addView(
             actionCard(
                 title = "电视系统蓝牙配对",
-                subtitle = "打开 Android TV 系统蓝牙设置，与新的 iPhone 或遥控器配对",
+                subtitle = "开启本机蓝牙可见或进入系统设置与新 iPhone 配对",
                 buttonLabel = "打开蓝牙设置",
+                icon = TvIconGlyph.BLUETOOTH,
                 onClick = { onPairBluetoothClicked?.invoke() },
             ),
             cardLayoutParams(),
@@ -317,15 +394,16 @@ class WorkbenchSettingsTabs(
 
         addView(sectionHeader("无线传输通道（电视端专属优化）"))
         val wirelessModes = listOf(
-            TvWirelessMode.WIFI_DIRECT to "Wi-Fi Direct 5GHz 直连（推荐 · 免配置）",
-            TvWirelessMode.LAN_WIFI to "家庭局域网 Wi-Fi / 网线直连",
+            TvWirelessMode.WIFI_DIRECT to "Wi-Fi Direct 5GHz 直连",
+            TvWirelessMode.LAN_WIFI to "家庭局域网 Wi-Fi / 网线",
         )
         addView(
             cycleCard(
                 title = "无线网络传输方式",
-                subtitle = "Wi-Fi Direct 自动建立点对点连接；家庭局域网通过同一路由器或网线互联",
+                subtitle = "Wi-Fi Direct 免密建立 5GHz 点对点连接；家庭局域网通过同一路由器互联",
                 options = wirelessModes,
                 current = settings.connection.wirelessHotspotMode,
+                icon = TvIconGlyph.WIFI,
             ) { mode ->
                 settings.connection.wirelessEnabled = true
                 settings.connection.wirelessHotspotMode = mode
@@ -345,10 +423,11 @@ class WorkbenchSettingsTabs(
                 addView(
                     textFieldCard(
                         title = "家庭路由器 Wi-Fi 名称 (SSID)",
-                        subtitle = "填写 iPhone 与电视共同连接的路由器 Wi-Fi 名称（无线握手时需告知 iPhone）",
+                        subtitle = "填写 iPhone 与电视共同连接的路由器 Wi-Fi 名称（无线握手时下发给 iPhone）",
                         initialValue = settings.connection.existingWifiSsid,
                         hint = "填写家庭路由器 Wi-Fi 名称",
                         secret = false,
+                        icon = TvIconGlyph.LAN,
                     ) { value ->
                         settings.connection.existingWifiSsid = value.trim()
                         onSettingChanged?.invoke()
@@ -358,10 +437,11 @@ class WorkbenchSettingsTabs(
                 addView(
                     textFieldCard(
                         title = "家庭路由器 Wi-Fi 密码",
-                        subtitle = "填写该家庭路由器的 WPA2 密码（若为开放无密码网络可留空）",
+                        subtitle = "填写该家庭路由器的 WPA2 密码（开放网络可留空）",
                         initialValue = settings.connection.existingWifiPassphrase,
                         hint = "填写家庭路由器 Wi-Fi 密码",
                         secret = true,
+                        icon = TvIconGlyph.SHIELD_MFI,
                     ) { value ->
                         settings.connection.existingWifiPassphrase = value
                         onSettingChanged?.invoke()
@@ -375,6 +455,7 @@ class WorkbenchSettingsTabs(
                         initialValue = settings.connection.existingWifiInterface,
                         hint = "自动识别（wlan0 / eth0）",
                         secret = false,
+                        icon = TvIconGlyph.SETTINGS,
                     ) { value ->
                         settings.connection.existingWifiInterface = value.trim()
                         onSettingChanged?.invoke()
@@ -398,9 +479,10 @@ class WorkbenchSettingsTabs(
                 addView(
                     cycleCard(
                         title = "Wi-Fi Direct 首选无线信道",
-                        subtitle = "建议保持「自动优选」，或选择干扰较少的 5 GHz 高速信道",
+                        subtitle = "建议保持「自动优选」，或固定为干扰较少的 5 GHz 高速信道",
                         options = channelOptions,
                         current = settings.connection.wifiP2pPreferredChannel,
+                        icon = TvIconGlyph.RADAR,
                     ) { channel ->
                         settings.connection.wifiP2pPreferredChannel = channel
                         onSettingChanged?.invoke()
@@ -410,8 +492,9 @@ class WorkbenchSettingsTabs(
                 addView(
                     actionCard(
                         title = "重置 Wi-Fi Direct 投屏通道",
-                        subtitle = "当无线握手后画面未弹出或热点状态异常时，清理电视端残留的 P2P 组网状态",
+                        subtitle = "当无线握手后画面未弹出或热点异常时，清理残留 P2P 组网状态",
                         buttonLabel = "重置通道",
+                        icon = TvIconGlyph.REFRESH,
                         onClick = { onResetWirelessHotspotClicked?.invoke() },
                     ),
                     cardLayoutParams(),
@@ -423,8 +506,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "电视开机时自动启动 TVPlay",
-                subtitle = "Android TV 开机完成后自动拉起 TVPlay 服务",
+                subtitle = "Android TV 开机完成后自动拉起后台监听服务",
                 checked = settings.connection.autoConnectOnBoot,
+                icon = TvIconGlyph.POWER,
             ) { enabled ->
                 settings.connection.autoConnectOnBoot = enabled
                 onSettingChanged?.invoke()
@@ -434,8 +518,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "iPhone 蓝牙连上时自动进入投屏",
-                subtitle = "检测到已配对的 iPhone 蓝牙连接时自动开启 CarPlay 投屏舞台",
+                subtitle = "检测到已配对 iPhone 蓝牙连接时自动开启 CarPlay 舞台",
                 checked = settings.connection.connectOnPhoneBluetooth,
+                icon = TvIconGlyph.BLUETOOTH,
             ) { enabled ->
                 settings.connection.connectOnPhoneBluetooth = enabled
                 onSettingChanged?.invoke()
@@ -446,7 +531,7 @@ class WorkbenchSettingsTabs(
 
     private fun buildDisplayPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(2), dp(4), dp(4), dp(16))
+        setPadding(dp(2), dp(2), dp(4), dp(16))
 
         addView(sectionHeader("视频硬件解码与渲染"))
         addView(
@@ -454,6 +539,7 @@ class WorkbenchSettingsTabs(
                 title = "HEVC (H.265) 高清视频编码",
                 subtitle = "在 4K 电视硬件解码器上提供更高清晰度与更低无线码率开销",
                 checked = settings.display.hevcEnabled,
+                icon = TvIconGlyph.SPARKLES,
             ) { enabled ->
                 settings.display.hevcEnabled = enabled
                 onSettingChanged?.invoke()
@@ -465,6 +551,7 @@ class WorkbenchSettingsTabs(
                 title = "允许软件解码 HEVC（兼容备用）",
                 subtitle = "当电视芯片无硬件 HEVC 解码器时允许回退至 CPU 解码",
                 checked = settings.display.hevcSoftwareDecoderEnabled,
+                icon = TvIconGlyph.SETTINGS,
             ) { enabled ->
                 settings.display.hevcSoftwareDecoderEnabled = enabled
                 onSettingChanged?.invoke()
@@ -474,13 +561,14 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "视频渲染视图类型",
-                subtitle = "SurfaceView 延迟最低；TextureView 支持实时色彩与对比度滤镜调节",
+                subtitle = "SurfaceView 延迟最低；TextureView 支持实时色彩与对比度调节",
                 options = listOf(
                     VideoSurfaceType.AUTO to "自动选择（推荐）",
-                    VideoSurfaceType.SURFACE_VIEW to "SurfaceView（最低延迟直通）",
-                    VideoSurfaceType.TEXTURE_VIEW to "TextureView（支持画面色彩调节）",
+                    VideoSurfaceType.SURFACE_VIEW to "SurfaceView（最低延迟）",
+                    VideoSurfaceType.TEXTURE_VIEW to "TextureView（色彩调节）",
                 ),
                 current = settings.display.videoSurfaceType,
+                icon = TvIconGlyph.DISPLAY,
             ) { mode ->
                 settings.display.videoSurfaceType = mode
                 onSettingChanged?.invoke()
@@ -490,8 +578,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "平滑帧率同步（防抖缓冲）",
-                subtitle = "增加 1 帧平滑队列，提升 60Hz 电视大屏的动画顺滑度",
+                subtitle = "增加 1 帧平滑队列，提升 60Hz 电视大屏动画顺滑度",
                 checked = settings.display.smoothVideoPlayback,
+                icon = TvIconGlyph.FPS_GAUGE,
             ) { enabled ->
                 settings.display.smoothVideoPlayback = enabled
                 onSettingChanged?.invoke()
@@ -503,6 +592,7 @@ class WorkbenchSettingsTabs(
                 title = "60 FPS 高帧率投屏",
                 subtitle = "向 iPhone 请求 60 帧/秒流畅画面（关闭则为 30 FPS）",
                 checked = settings.display.frameRate60Enabled,
+                icon = TvIconGlyph.FPS_GAUGE,
             ) { enabled ->
                 settings.display.frameRate60Enabled = enabled
                 onSettingChanged?.invoke()
@@ -517,6 +607,7 @@ class WorkbenchSettingsTabs(
                 subtitle = "调整 CarPlay 相对于电视物理屏幕的渲染分辨率比例",
                 options = listOf(75, 85, 100, 115, 130).map { it to "$it%" },
                 current = settings.display.displayScalePercent,
+                icon = TvIconGlyph.DISPLAY,
             ) { percent ->
                 settings.display.displayScalePercent = percent
                 onSettingChanged?.invoke()
@@ -529,6 +620,7 @@ class WorkbenchSettingsTabs(
                 subtitle = "针对客厅 3 米观看距离放大或缩小 CarPlay 侧边栏与图标",
                 options = UiDensityScale.presets.map { it to "$it%" },
                 current = settings.display.uiDensityPercent,
+                icon = TvIconGlyph.SLIDERS,
             ) { percent ->
                 settings.display.uiDensityPercent = percent
                 onSettingChanged?.invoke()
@@ -547,6 +639,7 @@ class WorkbenchSettingsTabs(
                     }
                 },
                 current = settings.display.physicalSizePreset,
+                icon = TvIconGlyph.DISPLAY,
             ) { preset ->
                 settings.display.physicalSizePreset = preset
                 onSettingChanged?.invoke()
@@ -560,6 +653,7 @@ class WorkbenchSettingsTabs(
                 title = "禁用电视安全边距（100% 满屏像素）",
                 subtitle = "使用 HDMI 点对点满屏输出，不预留四周安全内边距",
                 checked = settings.display.mainDisplayDisableSafeArea,
+                icon = TvIconGlyph.DISPLAY,
             ) { disabled ->
                 settings.display.mainDisplayDisableSafeArea = disabled
                 onSettingChanged?.invoke()
@@ -571,6 +665,7 @@ class WorkbenchSettingsTabs(
                 title = "允许壁纸延伸至安全区外",
                 subtitle = "保留控件安全边距的同时，让 CarPlay 背景壁纸铺满整块屏幕",
                 checked = settings.display.safeAreaDrawOutside,
+                icon = TvIconGlyph.SPARKLES,
             ) { drawOutside ->
                 settings.display.safeAreaDrawOutside = drawOutside
                 onSettingChanged?.invoke()
@@ -584,11 +679,12 @@ class WorkbenchSettingsTabs(
                 title = "CarPlay 日间 / 夜间外观",
                 subtitle = "控制 CarPlay 地图与界面采用深色或浅色主题",
                 options = listOf(
-                    CarPlayNightMode.NIGHT to "始终深色（电视端推荐）",
+                    CarPlayNightMode.NIGHT to "始终深色（推荐）",
                     CarPlayNightMode.SYSTEM to "跟随系统时间",
                     CarPlayNightMode.DAY to "始终浅色",
                 ),
                 current = settings.display.carPlayNightMode,
+                icon = TvIconGlyph.MOON,
             ) { mode ->
                 settings.display.carPlayNightMode = mode
                 onSettingChanged?.invoke()
@@ -598,13 +694,14 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "TVPlay 工作台界面主题",
-                subtitle = "设置主界面与弹窗的配色风格",
+                subtitle = "设置主界面与控制面板的视觉配色风格",
                 options = listOf(
-                    AppAppearance.DARK to "深邃暗色（推荐）",
+                    AppAppearance.DARK to "OLED 空间暗色（推荐）",
                     AppAppearance.AUTO to "跟随 Android TV 系统",
-                    AppAppearance.LIGHT to "明亮浅色",
+                    AppAppearance.LIGHT to "日间高对比浅色",
                 ),
                 current = settings.display.appAppearance,
+                icon = TvIconGlyph.MOON,
             ) { mode ->
                 settings.display.appAppearance = mode
                 onAppearanceChanged?.invoke()
@@ -614,14 +711,15 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "等待连接画面背景色",
-                subtitle = "等待 iPhone 投屏期间的全屏背景配色",
+                subtitle = "等待 iPhone 投屏期间的全屏空间背景配色",
                 options = listOf(
-                    WaitingScreenColorPreset.DARK to "深灰石板（默认）",
+                    WaitingScreenColorPreset.DARK to "深空微光（默认）",
                     WaitingScreenColorPreset.OLED_BLACK to "OLED 纯黑（防烧屏）",
-                    WaitingScreenColorPreset.MIDNIGHT_BLUE to "午夜深蓝",
+                    WaitingScreenColorPreset.MIDNIGHT_BLUE to "午夜星蓝",
                     WaitingScreenColorPreset.LIGHT to "柔和浅灰",
                 ),
                 current = settings.display.waitingScreenColorPreset,
+                icon = TvIconGlyph.SLIDERS,
             ) { preset ->
                 settings.display.waitingScreenColorPreset = preset
                 onSettingChanged?.invoke()
@@ -633,6 +731,7 @@ class WorkbenchSettingsTabs(
                 title = "右上角实时帧率浮窗 (FPS HUD)",
                 subtitle = "投屏时在画面右上角实时显示解码帧率与耗时",
                 checked = settings.display.fpsCounterEnabled,
+                icon = TvIconGlyph.FPS_GAUGE,
             ) { enabled ->
                 settings.display.fpsCounterEnabled = enabled
                 onSettingChanged?.invoke()
@@ -643,7 +742,7 @@ class WorkbenchSettingsTabs(
 
     private fun buildAudioPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(2), dp(4), dp(4), dp(16))
+        setPadding(dp(2), dp(2), dp(4), dp(16))
 
         addView(sectionHeader("电视音频输出与缓冲"))
         val bufferOptions = MediaAudioBuffer.presets.map { ms ->
@@ -656,9 +755,10 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "无线音乐音频缓冲大小",
-                subtitle = "若无线信号拥挤导致音乐断续可适当调大；追求更低延迟可调小",
+                subtitle = "无线信号拥挤导致音乐断续可适当调大；追求更低延迟可调小",
                 options = bufferOptions,
                 current = settings.audio.mediaBufferMillis,
+                icon = TvIconGlyph.AUDIO,
             ) { ms ->
                 settings.audio.mediaBufferMillis = ms
                 onSettingChanged?.invoke()
@@ -668,8 +768,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "自动管理 Android 音频焦点",
-                subtitle = "CarPlay 播放音乐、Siri 或导航播报时自动向电视系统申请音频焦点",
+                subtitle = "CarPlay 播放音乐、Siri 或导航播报时自动向电视系统申请焦点",
                 checked = settings.audio.audioFocusEnabled,
+                icon = TvIconGlyph.AUDIO,
             ) { enabled ->
                 settings.audio.audioFocusEnabled = enabled
                 onSettingChanged?.invoke()
@@ -679,8 +780,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "静音空闲时自动释放音频焦点",
-                subtitle = "CarPlay 暂停播放后释放音频焦点，方便电视后台其他应用恢复发声",
+                subtitle = "CarPlay 暂停播放后释放焦点，方便电视后台其他应用恢复发声",
                 checked = settings.audio.audioFocusAutoYield,
+                icon = TvIconGlyph.AUDIO,
             ) { enabled ->
                 settings.audio.audioFocusAutoYield = enabled
                 onSettingChanged?.invoke()
@@ -692,6 +794,7 @@ class WorkbenchSettingsTabs(
                 title = "转发遥控器媒体键时不抢占焦点",
                 subtitle = "适合一边看 CarPlay 画面、一边用电视本地应用听歌的场景",
                 checked = settings.audio.disableMediaKeyAudioFocus,
+                icon = TvIconGlyph.SLIDERS,
             ) { enabled ->
                 settings.audio.disableMediaKeyAudioFocus = enabled
                 onSettingChanged?.invoke()
@@ -705,6 +808,7 @@ class WorkbenchSettingsTabs(
                 title = "启用电视 / 遥控器语音麦克风",
                 subtitle = "将蓝牙语音遥控器或 USB 麦克风音频路由至 CarPlay Siri 与通话",
                 checked = settings.audio.microphoneEnabled,
+                icon = TvIconGlyph.MIC,
             ) { enabled ->
                 settings.audio.microphoneEnabled = enabled
                 onSettingChanged?.invoke()
@@ -716,6 +820,7 @@ class WorkbenchSettingsTabs(
                 title = "启用高容量主音频缓冲通道",
                 subtitle = "开启 AirPlay 主媒体流缓冲模式以提升抗抖动能力",
                 checked = settings.audio.mainBufferedAudio,
+                icon = TvIconGlyph.AUDIO,
             ) { enabled ->
                 settings.audio.mainBufferedAudio = enabled
                 onSettingChanged?.invoke()
@@ -725,8 +830,9 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "保持声音在 iPhone / 外部蓝牙音箱播放",
-                subtitle = "禁用电视端音频解码输出，让声音直接从 iPhone 或独立蓝牙音响发出",
+                subtitle = "禁用电视端音频解码输出，让声音直接从 iPhone 或蓝牙音响发出",
                 checked = settings.audio.disableAudioOutput,
+                icon = TvIconGlyph.PHONE,
             ) { disabled ->
                 settings.audio.disableAudioOutput = disabled
                 onSettingChanged?.invoke()
@@ -737,7 +843,73 @@ class WorkbenchSettingsTabs(
 
     private fun buildAboutPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(2), dp(4), dp(4), dp(16))
+        setPadding(dp(2), dp(2), dp(4), dp(16))
+
+        val installed = TvLanOtaManager.currentAppVersion(context)
+        addView(sectionHeader("内网 OTA 在线升级 (fnos-lan-ota)"))
+        addView(
+            actionCard(
+                title = "检查并安装内网 OTA 更新",
+                subtitle = "当前版本：v${installed.versionName} (Build ${installed.versionCode}) · 服务端：${settings.identity.otaServerUrl}",
+                buttonLabel = "检查更新",
+                icon = TvIconGlyph.CLOUD_OTA,
+                onClick = { onCheckOtaUpdateClicked?.invoke() },
+            ),
+            cardLayoutParams(),
+        )
+        addView(
+            actionCard(
+                title = "局域网自动发现 OTA 服务 (UDP 9988)",
+                subtitle = "通过 UDP 9988 广播 DISCOVER_OTA 自动探测飞牛 OS 局域网 OTA 升级中心",
+                buttonLabel = "自动发现",
+                icon = TvIconGlyph.RADAR,
+                onClick = { onDiscoverOtaServerClicked?.invoke() },
+            ),
+            cardLayoutParams(),
+        )
+        addView(
+            toggleCard(
+                title = "启动时自动检查内网 OTA 更新",
+                subtitle = "进入 TVPlay 工作台时在后台自动探测内网新版本并提示一键升级",
+                checked = settings.identity.otaAutoCheck,
+                icon = TvIconGlyph.CLOUD_OTA,
+            ) { enabled ->
+                settings.identity.otaAutoCheck = enabled
+                onSettingChanged?.invoke()
+            },
+            cardLayoutParams(),
+        )
+        val otaChannelOptions = listOf(
+            "stable" to "正式版 (stable)",
+            "beta" to "测试版 (beta)",
+        )
+        addView(
+            cycleCard(
+                title = "OTA 更新通道 (Channel)",
+                subtitle = "选择接收稳定版 (stable) 或测试版 (beta) 渠道更新包",
+                options = otaChannelOptions,
+                current = settings.identity.otaChannel,
+                icon = TvIconGlyph.SLIDERS,
+            ) { channel ->
+                settings.identity.otaChannel = channel
+                onSettingChanged?.invoke()
+            },
+            cardLayoutParams(),
+        )
+        addView(
+            textFieldCard(
+                title = "内网 OTA 服务器地址",
+                subtitle = "默认 http://10.0.0.30:8080，支持 UDP 9988 自动发现覆盖或手动指定",
+                initialValue = settings.identity.otaServerUrl,
+                hint = "http://10.0.0.30:8080",
+                secret = false,
+                icon = TvIconGlyph.LAN,
+            ) { value ->
+                settings.identity.otaServerUrl = value.ifBlank { "http://10.0.0.30:8080" }
+                onSettingChanged?.invoke()
+            },
+            cardLayoutParams(),
+        )
 
         addView(sectionHeader("接收端设备标识与离线 MFi"))
         addView(
@@ -747,6 +919,7 @@ class WorkbenchSettingsTabs(
                 initialValue = settings.identity.manufacturer,
                 hint = "TVPlay",
                 secret = false,
+                icon = TvIconGlyph.SHIELD_MFI,
             ) { value ->
                 settings.identity.manufacturer = value.ifBlank { "TVPlay" }
                 onSettingChanged?.invoke()
@@ -760,6 +933,7 @@ class WorkbenchSettingsTabs(
                 initialValue = settings.identity.model,
                 hint = "TVPlay",
                 secret = false,
+                icon = TvIconGlyph.DISPLAY,
             ) { value ->
                 settings.identity.model = value.ifBlank { "TVPlay" }
                 onSettingChanged?.invoke()
@@ -773,6 +947,7 @@ class WorkbenchSettingsTabs(
                 title = "记录详细会话诊断日志",
                 subtitle = "记录脱敏后的 RTSP / iAP2 / 解码器状态事件以便排查连接问题",
                 checked = settings.identity.debugLogsEnabled,
+                icon = TvIconGlyph.LOG_FILE,
             ) { enabled ->
                 settings.identity.debugLogsEnabled = enabled
                 onSettingChanged?.invoke()
@@ -784,52 +959,148 @@ class WorkbenchSettingsTabs(
                 title = "导出诊断日志报告",
                 subtitle = "将脱敏后的连接诊断日志保存至电视存储空间",
                 buttonLabel = "导出日志",
+                icon = TvIconGlyph.LOG_FILE,
                 onClick = { onSaveDiagnosticLogClicked?.invoke() },
             ),
             cardLayoutParams(),
         )
     }
 
-    private fun sectionHeader(title: String): TextView =
-        TextView(context).apply {
-            text = title
-            setTextColor(palette.accent)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            letterSpacing = 0.04f
-            setPadding(dp(4), dp(12), dp(4), dp(6))
+    private fun sectionHeader(title: String): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = false
+            isFocusable = false
+            setPadding(dp(4), dp(14), dp(4), dp(7))
+            addView(
+                View(context).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(3).toFloat()
+                        setColor(palette.accent)
+                    }
+                },
+                LinearLayout.LayoutParams(dp(4), dp(14)).apply { marginEnd = dp(9) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = title
+                    setTextColor(palette.accent)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    letterSpacing = 0.04f
+                },
+            )
         }
 
     private fun cardLayoutParams(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            bottomMargin = dp(10)
+            bottomMargin = dp(9)
         }
+
+    private fun createRowIconBadge(glyph: TvIconGlyph): Pair<FrameLayout, (Boolean) -> Unit> {
+        val well = FrameLayout(context).apply {
+            isClickable = false
+            isFocusable = false
+        }
+        val image = ImageView(context).apply {
+            isClickable = false
+            isFocusable = false
+        }
+        well.addView(image, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+        fun updateState(focusedOrActive: Boolean) {
+            val tint = if (focusedOrActive) palette.focusRing else palette.accent
+            well.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 11f * density
+                setColor(
+                    if (focusedOrActive) {
+                        ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x38 else 0x22)
+                    } else {
+                        palette.iconWellSurface
+                    },
+                )
+                setStroke(
+                    (1f * density).toInt().coerceAtLeast(1),
+                    if (focusedOrActive) ColorUtils.setAlphaComponent(palette.focusRing, 0x88) else palette.iconWellOutline,
+                )
+            }
+            image.setImageDrawable(TvVectorIconDrawable(glyph, tint, dp(18), 2f * density))
+        }
+        updateState(false)
+        return well to ::updateState
+    }
 
     private fun toggleCard(
         title: String,
         subtitle: String,
         checked: Boolean,
+        icon: TvIconGlyph = TvIconGlyph.SETTINGS,
         onToggle: (Boolean) -> Unit,
     ): LinearLayout {
         var current = checked
+        val (iconWell, updateIconState) = createRowIconBadge(icon)
+        val stateBadge = TextView(context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(9), dp(3), dp(9), dp(3))
+        }
+        fun updateStateBadge(on: Boolean) {
+            stateBadge.text = if (on) "已开启" else "已关闭"
+            stateBadge.setTextColor(if (on) palette.success else palette.textSecondary)
+            stateBadge.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                if (on) {
+                    setColor(palette.successSurface)
+                    setStroke((1f * density).toInt().coerceAtLeast(1), ColorUtils.setAlphaComponent(palette.success, 0x66))
+                } else {
+                    setColor(palette.badgeSurface)
+                    setStroke((1f * density).toInt().coerceAtLeast(1), palette.badgeOutline)
+                }
+            }
+        }
+        updateStateBadge(current)
+
         val switchView = Switch(context).apply {
             isFocusable = false
             isClickable = false
             isChecked = current
+            TvVectorIcons.styleIosSwitch(this, palette)
+        }
+        val rightCluster = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = false
+            isFocusable = false
+            addView(
+                stateBadge,
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(10) },
+            )
+            addView(switchView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
         return focusableCard(
             onClick = {
                 current = !current
                 switchView.isChecked = current
+                updateStateBadge(current)
                 onToggle(current)
+            },
+            onFocusChanged = { hasFocus ->
+                updateIconState(hasFocus)
             },
         ).apply {
             tag = "card:$title"
             addView(
+                iconWell,
+                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+            )
+            addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
             )
-            addView(switchView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            addView(rightCluster, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
     }
 
@@ -838,29 +1109,42 @@ class WorkbenchSettingsTabs(
         subtitle: String,
         options: List<Pair<T, String>>,
         current: T,
+        icon: TvIconGlyph = TvIconGlyph.SLIDERS,
         onClickOverride: (() -> Unit)? = null,
         onSelected: (T) -> Unit,
     ): LinearLayout {
         var index = options.indexOfFirst { it.first == current }.coerceAtLeast(0)
+        val (iconWell, updateIconState) = createRowIconBadge(icon)
         val valueBadge = TextView(context).apply {
-            text = "◀  ${options.getOrNull(index)?.second.orEmpty()}  ▶"
-            setTextColor(palette.textPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            text = options.getOrNull(index)?.second.orEmpty()
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = GradientDrawable().apply {
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+        }
+        fun styleValueBadge(focused: Boolean) {
+            valueBadge.setTextColor(if (focused) palette.onAccent else palette.textPrimary)
+            valueBadge.background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    if (focused) ColorUtils.blendARGB(palette.accent, 0xFFFFFFFF.toInt(), 0.14f) else palette.surfaceCardElevated,
+                    if (focused) palette.accent else palette.subtleSurface,
+                ),
+            ).apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = 999f * density
-                setColor(palette.surfaceCardElevated)
-                setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
+                setStroke(
+                    (1f * density).toInt().coerceAtLeast(1),
+                    if (focused) palette.focusRing else palette.outline,
+                )
             }
         }
+        styleValueBadge(false)
 
         fun step(delta: Int) {
             if (options.isEmpty()) return
             index = (index + delta + options.size) % options.size
             val chosen = options[index]
-            valueBadge.text = "◀  ${chosen.second}  ▶"
+            valueBadge.text = chosen.second
             onSelected(chosen.first)
         }
 
@@ -871,6 +1155,10 @@ class WorkbenchSettingsTabs(
                 } else {
                     step(1)
                 }
+            },
+            onFocusChanged = { hasFocus ->
+                styleValueBadge(hasFocus)
+                updateIconState(hasFocus)
             },
             onHorizontalKey = { keyCode ->
                 when (keyCode) {
@@ -888,6 +1176,10 @@ class WorkbenchSettingsTabs(
         ).apply {
             tag = "card:$title"
             addView(
+                iconWell,
+                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+            )
+            addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
             )
@@ -899,16 +1191,34 @@ class WorkbenchSettingsTabs(
         title: String,
         subtitle: String,
         buttonLabel: String,
+        icon: TvIconGlyph = TvIconGlyph.SETTINGS,
         onClick: () -> Unit,
     ): LinearLayout {
+        val (iconWell, updateIconState) = createRowIconBadge(icon)
         val pill = TvPlayButton(context, TvPlayButtonKind.SECONDARY).apply {
             text = buttonLabel
             isFocusable = false
             isClickable = false
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            minHeight = dp(36)
+            minimumHeight = dp(36)
+            setPadding(dp(16), dp(7), dp(16), dp(7))
         }
-        return focusableCard(onClick = onClick).apply {
+        return focusableCard(
+            onClick = onClick,
+            onFocusChanged = { hasFocus ->
+                updateIconState(hasFocus)
+                pill.style(
+                    if (hasFocus) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                    palette,
+                    overlay = false,
+                )
+            },
+        ).apply {
             tag = "card:$title"
+            addView(
+                iconWell,
+                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+            )
             addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
@@ -923,15 +1233,33 @@ class WorkbenchSettingsTabs(
         initialValue: String,
         hint: String,
         secret: Boolean,
+        icon: TvIconGlyph = TvIconGlyph.SETTINGS,
         onChanged: (String) -> Unit,
     ): LinearLayout {
+        val (iconWell, updateIconState) = createRowIconBadge(icon)
         val card = LinearLayout(context).apply {
             tag = "card:$title"
             orientation = LinearLayout.VERTICAL
+            isClickable = false
+            isFocusable = false
             setPadding(dp(16), dp(14), dp(16), dp(14))
             background = cardBackground(focused = false)
         }
-        card.addView(cardTitleColumn(title, subtitle), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val topHeader = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = false
+            isFocusable = false
+            addView(
+                iconWell,
+                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+            )
+            addView(
+                cardTitleColumn(title, subtitle),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+        card.addView(topHeader, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         var lastCommittedValue = initialValue
         fun commitIfChanged(raw: String) {
@@ -942,6 +1270,16 @@ class WorkbenchSettingsTabs(
             }
         }
 
+        fun inputBoxBackground(focused: Boolean) = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 12f * density
+            setColor(if (focused) palette.surfaceCardElevated else palette.subtleSurface)
+            setStroke(
+                if (focused) dp(2) else dp(1),
+                if (focused) palette.focusRing else palette.outline,
+            )
+        }
+
         val editText = EditText(context).apply {
             tag = "input:$title"
             isFocusable = true
@@ -950,7 +1288,8 @@ class WorkbenchSettingsTabs(
             this.hint = hint
             setTextColor(palette.textPrimary)
             setHintTextColor(palette.textSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             inputType = if (secret) {
@@ -958,13 +1297,8 @@ class WorkbenchSettingsTabs(
             } else {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             }
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 12f * density
-                setColor(palette.surfaceCardElevated)
-                setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
-            }
-            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = inputBoxBackground(focused = false)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener {
                 isFocusableInTouchMode = true
                 requestFocus()
@@ -993,6 +1327,8 @@ class WorkbenchSettingsTabs(
                 if (!hasFocus) {
                     isFocusableInTouchMode = false
                 }
+                updateIconState(hasFocus)
+                background = inputBoxBackground(focused = hasFocus)
                 card.background = cardBackground(focused = hasFocus)
                 if (!hasFocus) {
                     commitIfChanged(text?.toString().orEmpty())
@@ -1009,11 +1345,13 @@ class WorkbenchSettingsTabs(
     private fun cardTitleColumn(title: String, subtitle: String): LinearLayout =
         LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
+            isClickable = false
+            isFocusable = false
             addView(
                 TextView(context).apply {
                     text = title
                     setTextColor(palette.textPrimary)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
                     typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
@@ -1023,8 +1361,8 @@ class WorkbenchSettingsTabs(
                 TextView(context).apply {
                     text = subtitle
                     setTextColor(palette.textSecondary)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    setLineSpacing(0f, 1.15f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setLineSpacing(0f, 1.18f)
                 },
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(3) },
             )
@@ -1032,12 +1370,13 @@ class WorkbenchSettingsTabs(
 
     private fun focusableCard(
         onClick: () -> Unit,
+        onFocusChanged: ((Boolean) -> Unit)? = null,
         onHorizontalKey: ((Int) -> Boolean)? = null,
     ): LinearLayout =
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setPadding(dp(16), dp(13), dp(16), dp(13))
             isFocusable = true
             isFocusableInTouchMode = false
             isClickable = true
@@ -1045,11 +1384,7 @@ class WorkbenchSettingsTabs(
             setOnClickListener { onClick() }
             setOnFocusChangeListener { _, hasFocus ->
                 background = cardBackground(focused = hasFocus)
-                animate()
-                    .scaleX(if (hasFocus) 1.015f else 1.0f)
-                    .scaleY(if (hasFocus) 1.015f else 1.0f)
-                    .setDuration(110L)
-                    .start()
+                onFocusChanged?.invoke(hasFocus)
             }
             if (onHorizontalKey != null) {
                 setOnKeyListener { _, keyCode, event ->
@@ -1063,13 +1398,25 @@ class WorkbenchSettingsTabs(
         }
 
     private fun cardBackground(focused: Boolean): GradientDrawable =
-        GradientDrawable().apply {
+        GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            if (focused) {
+                intArrayOf(
+                    ColorUtils.blendARGB(palette.surfaceCardElevated, palette.accent, 0.16f),
+                    palette.surfaceCardElevated,
+                )
+            } else {
+                intArrayOf(
+                    ColorUtils.blendARGB(palette.surfaceCard, palette.surfaceContainer, 0.25f),
+                    palette.surfaceCard,
+                )
+            },
+        ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 16f * density
-            setColor(if (focused) palette.surfaceCardElevated else palette.surfaceCard)
+            cornerRadius = 18f * density
             setStroke(
                 if (focused) dp(2) else dp(1),
-                if (focused) palette.accent else palette.outline,
+                if (focused) palette.focusRing else palette.outline,
             )
         }
 

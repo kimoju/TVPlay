@@ -8,7 +8,10 @@ import app.tvplay.engine.av.TvDisplaySpec
 import app.tvplay.engine.session.TvTransportMode
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
+import app.tvplay.runtime.LanOtaProtocol
+import app.tvplay.runtime.LanOtaReportStatus
 import app.tvplay.ui.theme.AppAppearance
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -197,5 +200,164 @@ class TvConfigTest {
         TvPreferencesStore.savePairedPhone(context, "99:88:77:66:55:44", "Old iPhone")
         TvPlayBluetooth.sanitizeSavedPhone(context, pairedIphoneAndRemote)
         assertNull(TvPreferencesStore.loadPairedPhoneAddress(context))
+    }
+
+    @Test
+    fun lanOtaProtocolParsesDiscoveryCheckLatestVerifyAndReportPayloads() {
+        val udpAck = """
+            {
+              "cmd": "DISCOVER_OTA_ACK",
+              "enabled": true,
+              "service": "fnos-lan-ota",
+              "version": "1.1.0",
+              "host": "10.0.0.30",
+              "port": 8080,
+              "base_url": "http://10.0.0.30:8080",
+              "check_api": "http://10.0.0.30:8080/api/v1/ota/check",
+              "publish_api": "http://10.0.0.30:8080/api/v1/ota/publish",
+              "report_api": "http://10.0.0.30:8080/api/v1/ota/report"
+            }
+        """.trimIndent()
+        val parsedUdp = LanOtaProtocol.parseDiscoveryJson(udpAck)
+        assertNotNull(parsedUdp)
+        assertEquals("http://10.0.0.30:8080", parsedUdp!!.baseUrl)
+        assertEquals("http://10.0.0.30:8080/api/v1/ota/check", parsedUdp.checkApi)
+        assertEquals("http://10.0.0.30:8080/api/v1/ota/report", parsedUdp.reportApi)
+
+        val httpDiscover = """
+            {
+              "code": 0,
+              "success": true,
+              "data": $udpAck
+            }
+        """.trimIndent()
+        val parsedHttp = LanOtaProtocol.parseDiscoveryJson(httpDiscover)
+        assertNotNull(parsedHttp)
+        assertEquals("http://10.0.0.30:8080", parsedHttp!!.baseUrl)
+
+        val checkUpdateJson = """
+            {
+              "code": 0,
+              "success": true,
+              "has_update": true,
+              "force_update": false,
+              "release": {
+                "release_id": 7,
+                "version_name": "1.2.0",
+                "version_code": 10200,
+                "channel": "stable",
+                "min_sdk": 24,
+                "target_sdk": 34,
+                "abis": ["arm64-v8a", "armeabi-v7a"],
+                "is_mandatory": false,
+                "force_update": false,
+                "file_name": "TVPlay-release.apk",
+                "file_size": 11,
+                "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+                "md5": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+                "crc32": "0D4A1185",
+                "changelog": "优化无线局域网与OTA",
+                "download_url": "http://10.0.0.30:8080/api/v1/ota/download/7?device_id=TV_01",
+                "shortcut_url": "http://10.0.0.30:8080/d/app.tvplay",
+                "page_url": "http://10.0.0.30:8080/download.html?app=app.tvplay",
+                "published_at": "2026-11-05 22:00:00"
+              }
+            }
+        """.trimIndent()
+        val checkResult = LanOtaProtocol.parseCheckJson(
+            raw = checkUpdateJson,
+            serverBaseUrl = "http://10.0.0.30:8080",
+            currentVersionCode = 1L,
+        )
+        assertTrue(checkResult.hasUpdate)
+        assertNotNull(checkResult.release)
+        assertEquals(7L, checkResult.release!!.releaseId)
+        assertEquals(10200L, checkResult.release!!.versionCode)
+        assertEquals("1.2.0", checkResult.release!!.versionName)
+        assertEquals(listOf("arm64-v8a", "armeabi-v7a"), checkResult.release!!.abis)
+
+        val notFoundJson = """{"code":404,"success":false,"message":"未找到对应的应用或固件项目"}"""
+        val noAppResult = LanOtaProtocol.parseCheckJson(
+            raw = notFoundJson,
+            serverBaseUrl = "http://10.0.0.30:8080",
+            currentVersionCode = 1L,
+        )
+        assertFalse(noAppResult.hasUpdate)
+        assertNull(noAppResult.release)
+
+        val tempFile = File.createTempFile("ota-test", ".apk")
+        try {
+            tempFile.writeBytes("hello world".toByteArray(Charsets.UTF_8))
+            assertTrue(
+                LanOtaProtocol.verifyChecksums(
+                    file = tempFile,
+                    expectedSha256 = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+                    expectedMd5 = "5eb63bbbe01eeed093cb22bb8f5acdc3",
+                    expectedCrc32 = "0D4A1185",
+                ).verified,
+            )
+            assertFalse(
+                LanOtaProtocol.verifyChecksums(
+                    file = tempFile,
+                    expectedSha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+                    expectedMd5 = "",
+                    expectedCrc32 = "",
+                ).verified,
+            )
+        } finally {
+            tempFile.delete()
+        }
+
+        val reportPayload = LanOtaProtocol.buildReportJson(
+            deviceId = "DEV_TV_01",
+            appKey = "app.tvplay",
+            releaseId = 7L,
+            fromVersion = "1.0.0",
+            toVersion = "1.2.0",
+            status = LanOtaReportStatus.SUCCESS,
+            progress = 100,
+            message = "升级成功",
+        )
+        assertTrue(reportPayload.contains("\"status\":\"success\""))
+        assertTrue(reportPayload.contains("\"progress\":100"))
+        assertTrue(reportPayload.contains("\"release_id\":7"))
+    }
+
+    @Test
+    fun tvPreferencesStorePersistsOtaSettingsAndPendingUpgradeState() {
+        val context = RuntimeEnvironment.getApplication()
+        val repository = TvSettingsRepository(context)
+
+        assertEquals(TvPreferencesStore.DEFAULT_OTA_SERVER_URL, repository.identity.otaServerUrl)
+        assertEquals(TvPreferencesStore.DEFAULT_OTA_CHANNEL, repository.identity.otaChannel)
+        assertTrue(repository.identity.otaAutoCheck)
+        assertTrue(TvPreferencesStore.loadOtaDeviceId(context).startsWith("TV_"))
+
+        repository.identity.otaServerUrl = "http://10.0.0.30:8080/"
+        repository.identity.otaChannel = "beta"
+        repository.identity.otaAutoCheck = false
+
+        assertEquals("http://10.0.0.30:8080", repository.identity.otaServerUrl)
+        assertEquals("beta", repository.identity.otaChannel)
+        assertFalse(repository.identity.otaAutoCheck)
+
+        TvPreferencesStore.savePendingOtaUpgrade(
+            context = context,
+            record = TvPreferencesStore.PendingOtaUpgradeRecord(
+                releaseId = 12L,
+                fromVersion = "1.0",
+                toVersion = "1.1",
+                toVersionCode = 2L,
+                appKey = "app.tvplay",
+                serverBaseUrl = "http://10.0.0.30:8080",
+            ),
+        )
+        val pending = TvPreferencesStore.loadPendingOtaUpgrade(context)
+        assertNotNull(pending)
+        assertEquals(12L, pending!!.releaseId)
+        assertEquals(2L, pending.toVersionCode)
+
+        TvPreferencesStore.clearPendingOtaUpgrade(context)
+        assertNull(TvPreferencesStore.loadPendingOtaUpgrade(context))
     }
 }

@@ -47,6 +47,7 @@ typealias CarPlayMediaKeys = TvMediaKeyRouter
  */
 object TvMediaKeyRouter {
     private var session: MediaSession? = null
+    private var attachedController: java.lang.ref.WeakReference<CarPlayController>? = null
     private var audioFocus: AudioFocusRequest? = null
     private val silentTrack = AtomicReference<AudioTrack?>()
     private val silentTrackRunning = AtomicBoolean(false)
@@ -130,6 +131,7 @@ object TvMediaKeyRouter {
             )
             isActive = true
         }
+        attachedController = java.lang.ref.WeakReference(controller)
         updateMetadata(controller.nowPlayingSnapshot().toAvNowPlaying())
         controller.nowPlayingListener = { metadata ->
             main.post { updateMetadata(metadata.toAvNowPlaying()) }
@@ -146,8 +148,13 @@ object TvMediaKeyRouter {
             main.post { release(context) }
             return
         }
+        attachedController?.get()?.let { controller ->
+            controller.nowPlayingListener = null
+            controller.artworkListener = null
+        }
+        attachedController = null
         stopSilentAudio()
-        artworkQueue.clear().forEach { it.recycle() }
+        artworkQueue.clear()
         lastMetadata = CarPlayNowPlaying()
         session?.run {
             isActive = false
@@ -204,7 +211,6 @@ object TvMediaKeyRouter {
         val metadataDirty = metadataChanged(lastMetadata, metadata)
         lastMetadata = metadata
         val artwork = artworkQueue.onMetadata(metadata.artworkTransferId)
-        artwork.discard.forEach { it.recycle() }
         if (metadataDirty) {
             active.setMetadata(buildMediaMetadata(metadata, artwork.currentArtwork))
         }
@@ -221,7 +227,6 @@ object TvMediaKeyRouter {
     }
 
     private fun applyArtworkResult(result: NowPlayingArtworkQueue.Result<Bitmap>) {
-        result.discard.forEach { it.recycle() }
         val active = session ?: return
         if (result.currentArtwork != null) {
             active.setMetadata(buildMediaMetadata(lastMetadata, result.currentArtwork))

@@ -5,16 +5,17 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.graphics.ColorUtils
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.WaitingScreenColors
@@ -25,6 +26,11 @@ import app.tvplay.engine.session.CarPlayStatus
 import app.tvplay.engine.session.TvFailureReason
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.ConnectionFailureGuidance
+import app.tvplay.ui.theme.AmbientMeshBackgroundDrawable
+import app.tvplay.ui.theme.HeroBentoCardDrawable
+import app.tvplay.ui.theme.TvColorScheme
+import app.tvplay.ui.theme.TvIconGlyph
+import app.tvplay.ui.theme.TvVectorIcons
 import java.util.Locale
 
 typealias ProjectionWaitingView = StageWaitingOverlay
@@ -43,7 +49,7 @@ class ProjectionWaitingStageBindings(
 )
 
 /**
- * Builds the 10-foot TV waiting / connection status overlay and formats user-facing stage text.
+ * Builds the 10-foot TV waiting / connection status overlay (`ui-ux-pro-max` Spatial Bento Console).
  */
 object StageWaitingOverlay {
     fun build(
@@ -59,16 +65,91 @@ object StageWaitingOverlay {
         onSwitchModeClicked: (() -> Unit)? = null,
     ): ProjectionWaitingStageBindings {
         val density = context.resources.displayMetrics.density
-        val pad = (24 * density).toInt()
-        val smallPad = (12 * density).toInt()
+        fun dp(value: Int): Int = (value * density).toInt().coerceAtLeast(1)
+        val smallPad = dp(10)
+        val darkScheme = TvColorScheme.DARK
+
+        val modeGlyph = when {
+            !wirelessEnabled -> TvIconGlyph.USB
+            wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> TvIconGlyph.LAN
+            else -> TvIconGlyph.WIFI
+        }
+        val modeBadgeText = when {
+            !wirelessEnabled -> "USB 有线 CarPlay 高速直连"
+            wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
+                val ssidSuffix = existingWifiSsid.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+                "无线 CarPlay · 家庭局域网$ssidSuffix"
+            }
+            else -> "无线 CarPlay · Wi-Fi Direct 5GHz 直连"
+        }
+
+        val topBadgeRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(7), dp(16), dp(7))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor(ColorUtils.setAlphaComponent(0xFF3B82F6.toInt(), 0x26))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(0xFF60A5FA.toInt(), 0x70))
+            }
+            addView(
+                ProgressBar(context).apply { isIndeterminate = true },
+                LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+                    marginEnd = dp(10)
+                },
+            )
+            addView(
+                TextView(context).apply {
+                    text = modeBadgeText
+                    setTextColor(waitingColors.primaryText)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    compoundDrawablePadding = dp(7)
+                    val icon = TvVectorIcons.drawable(
+                        context = context,
+                        glyph = modeGlyph,
+                        color = 0xFF60A5FA.toInt(),
+                        sizeDp = 15,
+                        strokeDp = 2f,
+                    )
+                    setCompoundDrawablesRelative(icon, null, null, null)
+                },
+            )
+        }
+
+        val emblemContainer = FrameLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(68), dp(68)).apply {
+                topMargin = dp(16)
+                bottomMargin = dp(14)
+            }
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    ColorUtils.setAlphaComponent(0xFF3B82F6.toInt(), 0x42),
+                    ColorUtils.setAlphaComponent(0xFF0E1523.toInt(), 0xCC),
+                ),
+            ).apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), ColorUtils.setAlphaComponent(0xFF38BDF8.toInt(), 0x80))
+            }
+            addView(
+                ImageView(context).apply {
+                    setImageResource(R.drawable.ic_carplay)
+                },
+                FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER),
+            )
+        }
 
         val statusView = TextView(context).apply {
             text = context.getString(R.string.starting_carplay)
             setTextColor(waitingColors.primaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             gravity = Gravity.CENTER
         }
+
         val instructionsView = TextView(context).apply {
             text = connectionInstructions(
                 context = context,
@@ -78,51 +159,58 @@ object StageWaitingOverlay {
                 existingWifiSsid = existingWifiSsid,
             )
             setTextColor(waitingColors.secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            gravity = Gravity.CENTER
-            setPadding(0, smallPad, 0, 0)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setLineSpacing(0f, 1.35f)
+            gravity = Gravity.START
+            setPadding(dp(20), dp(14), dp(20), dp(14))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(18).toFloat()
+                setColor(ColorUtils.setAlphaComponent(waitingColors.buttonFill, 0x78))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(waitingColors.buttonBorder, 0x80))
+            }
         }
+
         val helpView = TextView(context).apply {
             visibility = View.GONE
             setTextColor(waitingColors.helpText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setLineSpacing(0f, 1.28f)
             gravity = Gravity.CENTER
-            val hPad = (16 * density).toInt()
-            val vPad = (12 * density).toInt()
-            setPadding(hPad, vPad, hPad, vPad)
+            setPadding(dp(18), dp(12), dp(18), dp(12))
             background = GradientDrawable().apply {
-                cornerRadius = 10f * density
+                cornerRadius = dp(16).toFloat()
                 setColor(waitingColors.helpBackground)
-                setStroke((1 * density).toInt().coerceAtLeast(1), waitingColors.helpBorder)
+                setStroke(dp(1), waitingColors.helpBorder)
             }
         }
+
         val reconnectAction = createTvButton(
             context = context,
             text = context.getString(R.string.reconnect),
             fillColor = waitingColors.buttonFill,
             textColor = Color.WHITE,
             strokeColor = waitingColors.buttonBorder,
+            glyph = TvIconGlyph.REFRESH,
             onClick = onReconnectClicked,
         )
         val reconnectBanner = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             visibility = View.GONE
-            val hPad = (16 * density).toInt()
-            val vPad = (12 * density).toInt()
-            setPadding(hPad, vPad, hPad, vPad)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
             background = GradientDrawable().apply {
-                cornerRadius = 10f * density
+                cornerRadius = dp(16).toFloat()
                 setColor(waitingColors.bannerBackground)
-                setStroke((1 * density).toInt().coerceAtLeast(1), waitingColors.bannerBorder)
+                setStroke(dp(1), waitingColors.bannerBorder)
             }
             addView(
                 TextView(context).apply {
                     text = context.getString(R.string.reconnect_for_new_settings)
                     setTextColor(waitingColors.primaryText)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                     gravity = Gravity.CENTER
-                    setPadding(0, 0, 0, (10 * density).toInt())
+                    setPadding(0, 0, 0, dp(10))
                 },
             )
             addView(
@@ -133,12 +221,14 @@ object StageWaitingOverlay {
                 ),
             )
         }
+
         val quickReconnectButton = createTvButton(
             context = context,
             text = context.getString(R.string.reconnect),
-            fillColor = 0xFF2563EB.toInt(),
+            fillColor = 0xFF3B82F6.toInt(),
             textColor = Color.WHITE,
             strokeColor = 0xFF93C5FD.toInt(),
+            glyph = TvIconGlyph.REFRESH,
             onClick = onReconnectClicked,
         )
         val bluetoothButton = if (onBluetoothSettingsClicked != null) {
@@ -148,6 +238,7 @@ object StageWaitingOverlay {
                 fillColor = waitingColors.buttonFill,
                 textColor = Color.WHITE,
                 strokeColor = waitingColors.buttonBorder,
+                glyph = TvIconGlyph.BLUETOOTH,
                 onClick = onBluetoothSettingsClicked,
             )
         } else {
@@ -160,6 +251,7 @@ object StageWaitingOverlay {
                 fillColor = waitingColors.buttonFill,
                 textColor = Color.WHITE,
                 strokeColor = waitingColors.buttonBorder,
+                glyph = TvIconGlyph.RADAR,
                 onClick = onSwitchModeClicked,
             )
         } else {
@@ -171,6 +263,7 @@ object StageWaitingOverlay {
             fillColor = waitingColors.buttonFill,
             textColor = Color.WHITE,
             strokeColor = waitingColors.buttonBorder,
+            glyph = TvIconGlyph.HOME,
             onClick = onSettingsClicked,
         )
         val disconnectButton = createTvButton(
@@ -179,12 +272,22 @@ object StageWaitingOverlay {
             fillColor = 0xCC7F1D1D.toInt(),
             textColor = Color.WHITE,
             strokeColor = 0xFFFCA5A5.toInt(),
+            glyph = TvIconGlyph.POWER,
             onClick = onDisconnectClicked,
         )
 
         val actionButtonsRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor(ColorUtils.setAlphaComponent(0xFF0A0F1A.toInt(), 0xAA))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(waitingColors.buttonBorder, 0x66))
+            }
             addView(
                 quickReconnectButton,
                 LinearLayout.LayoutParams(
@@ -237,28 +340,33 @@ object StageWaitingOverlay {
         val stageCard = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(pad, pad, pad, pad)
-            addView(
-                ProgressBar(context).apply { isIndeterminate = true },
-                LinearLayout.LayoutParams((36 * density).toInt(), (36 * density).toInt()).apply {
-                    bottomMargin = (18 * density).toInt()
-                },
-            )
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(36), dp(28), dp(36), dp(28))
+            background = if (waitingColors.background == Color.BLACK) {
+                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(28).toFloat(), activeGlow = false)
+            } else {
+                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(28).toFloat(), activeGlow = true)
+            }
+            addView(topBadgeRow)
+            addView(emblemContainer)
             addView(statusView)
             addView(
                 instructionsView,
-                LinearLayout.LayoutParams((520 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT),
+                LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(16)
+                },
             )
             addView(
                 helpView,
-                LinearLayout.LayoutParams((520 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = (14 * density).toInt()
+                LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(14)
                 },
             )
             addView(
                 reconnectBanner,
-                LinearLayout.LayoutParams((520 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = (14 * density).toInt()
+                LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(14)
                 },
             )
             addView(
@@ -267,13 +375,18 @@ object StageWaitingOverlay {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply {
-                    topMargin = (22 * density).toInt()
+                    topMargin = dp(22)
                 },
             )
         }
 
         val overlay = FrameLayout(context).apply {
-            background = ColorDrawable(waitingColors.background)
+            clipChildren = false
+            clipToPadding = false
+            background = AmbientMeshBackgroundDrawable(
+                palette = darkScheme,
+                pureBlack = waitingColors.background == Color.BLACK,
+            )
             addView(
                 stageCard,
                 FrameLayout.LayoutParams(
@@ -306,14 +419,14 @@ object StageWaitingOverlay {
         text = label,
         fillColor = when {
             danger -> 0xCC7F1D1D.toInt()
-            primary -> 0xFF2563EB.toInt()
-            else -> 0xFF1E293B.toInt()
+            primary -> 0xFF3B82F6.toInt()
+            else -> 0xFF141E30.toInt()
         },
         textColor = Color.WHITE,
         strokeColor = when {
             danger -> 0xFFFCA5A5.toInt()
             primary -> 0xFF93C5FD.toInt()
-            else -> 0xFF475569.toInt()
+            else -> 0xFF334155.toInt()
         },
         onClick = onClick,
     )
@@ -324,39 +437,44 @@ object StageWaitingOverlay {
         fillColor: Int,
         textColor: Int,
         strokeColor: Int,
+        glyph: TvIconGlyph? = null,
         onClick: () -> Unit,
     ): TextView {
         val density = context.resources.displayMetrics.density
         return TextView(context).apply {
             this.text = text
             setTextColor(textColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             gravity = Gravity.CENTER
             isFocusable = true
             isFocusableInTouchMode = false
             isClickable = true
-            val hPad = (20 * density).toInt()
+            val hPad = (18 * density).toInt()
             val vPad = (10 * density).toInt()
             setPadding(hPad, vPad, hPad, vPad)
+            if (glyph != null) {
+                compoundDrawablePadding = (7 * density).toInt()
+                val icon = TvVectorIcons.drawable(context, glyph, textColor, sizeDp = 15, strokeDp = 2f)
+                setCompoundDrawablesRelative(icon, null, null, null)
+            }
             fun applyBg(focused: Boolean) {
-                background = GradientDrawable().apply {
+                val topColor = ColorUtils.blendARGB(fillColor, Color.WHITE, if (focused) 0.20f else 0.08f)
+                val bottomColor = if (focused) ColorUtils.blendARGB(fillColor, Color.WHITE, 0.10f) else fillColor
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(topColor, bottomColor),
+                ).apply {
                     cornerRadius = 999f * density
-                    setColor(fillColor)
                     setStroke(
                         ((if (focused) 2.5f else 1f) * density).toInt().coerceAtLeast(1),
-                        if (focused) Color.WHITE else strokeColor,
+                        if (focused) 0xFF38BDF8.toInt() else strokeColor,
                     )
                 }
             }
             applyBg(false)
             setOnFocusChangeListener { _, hasFocus ->
                 applyBg(hasFocus)
-                animate()
-                    .scaleX(if (hasFocus) 1.06f else 1.0f)
-                    .scaleY(if (hasFocus) 1.06f else 1.0f)
-                    .setDuration(110L)
-                    .start()
             }
             setOnClickListener { onClick() }
         }
@@ -380,14 +498,14 @@ object StageWaitingOverlay {
                 context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an)
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidHint = existingWifiSsid.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
-                "1. 确保电视与 iPhone 连接至同一局域网 Wi-Fi$ssidHint\n" +
-                    "2. 若尚未配对，可点击下方「电视蓝牙配对」开启电视蓝牙可见，再在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
-                    "3. 在 iPhone 弹窗中确认「使用 CarPlay 车载」，即可全屏投屏"
+                "01  确保电视与 iPhone 连接至同一局域网 Wi-Fi$ssidHint\n" +
+                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在 iPhone 蓝牙中配对「$btName」\n" +
+                    "03  在 iPhone 弹窗中确认「使用 CarPlay 车载」，自动进入全屏画面"
             }
             else ->
-                "1. 当前处于 Wi-Fi Direct 5GHz 直连模式\n" +
-                    "2. 若尚未配对，可点击下方「电视蓝牙配对」开启电视蓝牙可见，再在 iPhone「设置 → 蓝牙」中搜索并配对「$btName」\n" +
-                    "3. 蓝牙握手后将自动建立点对点无线 CarPlay 通道"
+                "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
+                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在 iPhone 蓝牙中配对「$btName」\n" +
+                    "03  蓝牙握手完成后自动建立 5GHz 无线 CarPlay 通道"
         }
     }
 

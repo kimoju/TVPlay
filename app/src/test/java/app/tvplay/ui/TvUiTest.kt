@@ -606,4 +606,53 @@ class TvUiTest {
         stageController.pause().stop().destroy()
         workbenchController.pause().stop().destroy()
     }
+
+    @Test
+    fun uiUxProMaxVectorAndBentoDesignSystemRendersCleanlyWithoutEmojis() {
+        val context = RuntimeEnvironment.getApplication()
+        val forbiddenEmojiIcons = listOf("📡", "🖥", "🔊", "⚙️", "🏠", "🎨", "⚡", "🎞", "📊", "🌙", "🔄", "⏹", "🔌", "🌐")
+
+        val workbenchController = Robolectric.buildActivity(TvWorkbenchActivity::class.java).setup()
+        val workbench = workbenchController.get()
+        val settingsPaneField = TvWorkbenchActivity::class.java.getDeclaredField("settingsPane").apply {
+            isAccessible = true
+        }
+        val settingsPane = settingsPaneField.get(workbench) as WorkbenchSettingsTabs
+
+        for (category in SettingsCategory.entries) {
+            settingsPane.selectCategory(category)
+            val allText = collectAllText(workbench.window.decorView).joinToString("\n")
+            for (emoji in forbiddenEmojiIcons) {
+                assertFalse("UI must use TvVectorIcons instead of emoji '$emoji' in $category", emoji in allText)
+            }
+        }
+        workbenchController.pause().stop().destroy()
+    }
+
+    @Test
+    fun backgroundSessionUsesWeakReferenceForOwnerAndAwaitsAsyncStopCallback() {
+        CarPlayBackgroundSession.clear()
+        val ownerRefField = CarPlayBackgroundSession::class.java.getDeclaredField("ownerRef").apply {
+            isAccessible = true
+        }
+        assertEquals(java.lang.ref.WeakReference::class.java, ownerRefField.type)
+
+        var deferredDone: (() -> Unit)? = null
+        val stopActionField = CarPlayBackgroundSession::class.java.getDeclaredField("stopAction").apply {
+            isAccessible = true
+        }
+        stopActionField.set(
+            CarPlayBackgroundSession,
+            { done: () -> Unit -> deferredDone = done },
+        )
+        var completionCalled = false
+        CarPlayBackgroundSession.stop {
+            completionCalled = true
+        }
+        assertFalse("Completion must wait until async teardown invokes done()", completionCalled)
+        assertNotNull(deferredDone)
+        deferredDone!!.invoke()
+        assertTrue("Completion must fire once async teardown finishes", completionCalled)
+        CarPlayBackgroundSession.clear()
+    }
 }

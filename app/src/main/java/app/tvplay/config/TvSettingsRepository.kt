@@ -400,5 +400,17 @@ class TvSettingsRepository(private val context: Context) {
             TvPreferencesStore.saveCustomAirPlayIcon(context, encodedImage)
 
         fun clearCustomAirPlayIcon() = TvPreferencesStore.clearCustomAirPlayIcon(context)
+
+        var otaServerUrl: String
+            get() = TvPreferencesStore.loadOtaServerUrl(context)
+            set(value) = TvPreferencesStore.saveOtaServerUrl(context, value)
+
+        var otaChannel: String
+            get() = TvPreferencesStore.loadOtaChannel(context)
+            set(value) = TvPreferencesStore.saveOtaChannel(context, value)
+
+        var otaAutoCheck: Boolean
+            get() = TvPreferencesStore.loadOtaAutoCheck(context)
+            set(value) = TvPreferencesStore.saveOtaAutoCheck(context, value)
     }
 }

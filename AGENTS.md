@@ -26,7 +26,7 @@ TVPlay is a pure Kotlin/Java Apple CarPlay receiver purpose-built for Android TV
 - **`:app` (`app.tvplay.*`)**:
   - **`config`**: `MfiAssetInstaller`, `TvDeviceCapabilities`, `TvPreferencesStore`, `TvSettingsRepository`
   - **`remote`**: `TvRemoteKeyMap`, `TvRemoteInputController`, `TvVideoColorFilter`
-  - **`runtime`**: `TvDiagnosticsLogger`, `TvLaunchReceivers`, `TvMediaKeyRouter`, `TvProjectionSessionHost`, `TvSessionForegroundService`
+  - **`runtime`**: `TvDiagnosticsLogger`, `TvLanOtaManager`, `TvLaunchReceivers`, `TvMediaKeyRouter`, `TvProjectionSessionHost`, `TvSessionForegroundService`
   - **`ui.theme`**: `TvColorScheme`, `TvUiComponents`
   - **`ui.workbench`**: `TvWorkbenchActivity`, `WorkbenchHeroStage`, `WorkbenchSettingsTabs`
   - **`ui.stage`**: `TvStageActivity`, `TvVideoSurfaceHost`, `StageWaitingOverlay`, `StageQuickControlOverlay`, `StagePictureTuningOverlay`, `StageFpsHudOverlay`

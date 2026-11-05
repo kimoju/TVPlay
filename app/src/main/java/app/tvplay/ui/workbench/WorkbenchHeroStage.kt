@@ -1,8 +1,10 @@
 package app.tvplay.ui.workbench
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -12,25 +14,30 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.graphics.ColorUtils
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvSettingsRepository
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.LastConnectionProblem
+import app.tvplay.runtime.TvLanOtaManager
+import app.tvplay.ui.theme.HeroBentoCardDrawable
 import app.tvplay.ui.theme.TvColorScheme
+import app.tvplay.ui.theme.TvIconGlyph
 import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
+import app.tvplay.ui.theme.TvVectorIcons
 
 typealias WorkbenchStagePane = WorkbenchHeroStage
 
 /**
- * Left pane of the 10-foot Apple TV-style workbench (`TvWorkbenchActivity`).
+ * Left Bento cockpit of the 10-foot Apple TV-style workbench (`TvWorkbenchActivity`).
  *
- * Displays:
- * 1. Live wireless / USB CarPlay receiver stage card (active session badge, primary launch CTA).
- * 2. Quick transport mode switcher (`无线 CarPlay` vs `USB 有线 CarPlay`, plus `Wi-Fi Direct` vs `家庭局域网`).
- * 3. 3-step visual iPhone connection guide.
+ * Built following `ui-ux-pro-max` Glassmorphism + Dark Mode (OLED) guidelines:
+ * - Zero emojis; all icons rendered via [TvVectorIcons] geometric vector paths.
+ * - Multi-layered Bento cards with radial spotlights and radar signal rings ([HeroBentoCardDrawable]).
+ * - Non-jittering focus states and scannable 10-foot telemetry tiles.
  */
 class WorkbenchHeroStage(
     private val context: Context,
@@ -52,26 +59,26 @@ class WorkbenchHeroStage(
         val wirelessEnabled = settings.connection.wirelessEnabled
         val wirelessMode = settings.connection.wirelessHotspotMode
         val modeLabel = when {
-            !wirelessEnabled -> "USB 有线数据线直连"
-            wirelessMode == TvWirelessMode.LAN_WIFI -> "无线 · 家庭局域网 Wi-Fi / 网线直连"
-            else -> "无线 · Wi-Fi Direct 5GHz 免配置直连"
+            !wirelessEnabled -> "USB 有线低延迟直连"
+            wirelessMode == TvWirelessMode.LAN_WIFI -> "无线 · 家庭局域网互联"
+            else -> "无线 · Wi-Fi Direct 5GHz 直连"
         }
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
         val pairedAddress = settings.connection.pairedPhoneAddress
         val pairedSummary = if (pairedAddress != null) {
-            "${settings.connection.pairedPhoneName} ($pairedAddress)"
+            settings.connection.pairedPhoneName
         } else {
-            "自动识别已配对的 iPhone"
+            "自动识别已配对 iPhone"
         }
         val hotspotSummary = when {
-            !wirelessEnabled -> "USB 有线模式 · 支持即插即用低延迟投屏（无需蓝牙配对）"
+            !wirelessEnabled -> "即插即用 · 免蓝牙配对 · 硬件解码直通"
             wirelessMode == TvWirelessMode.LAN_WIFI -> {
                 val ssid = settings.connection.existingWifiSsid
-                if (ssid.isNotBlank()) "局域网 Wi-Fi：$ssid" else "局域网模式（自动接入电视当前 Wi-Fi 或网线）"
+                if (ssid.isNotBlank()) "当前路由器：$ssid" else "自动桥接电视当前 Wi-Fi 或千兆有线网卡"
             }
             else -> {
                 val ch = settings.connection.wifiP2pPreferredChannel
-                "Wi-Fi Direct 5GHz 点对点通道 · 信道：${if (ch == 0) "自动优选" else ch.toString()}"
+                "5GHz 专用点对点通道 · 信道：${if (ch == 0) "自动优选" else ch.toString()}"
             }
         }
         val lastProblem = if (pendingReconnect) {
@@ -79,6 +86,8 @@ class WorkbenchHeroStage(
         } else {
             LastConnectionProblem.homeLine(context)
         }
+        val installedVersion = runCatching { TvLanOtaManager.currentAppVersion(context).versionName }.getOrDefault("1.1.1")
+        val videoSpecSummary = "${settings.display.fps} FPS · ${if (settings.display.hevcEnabled) "HEVC" else "H.264"}"
 
         val view = build(
             model = StageModel(
@@ -91,6 +100,8 @@ class WorkbenchHeroStage(
                 sessionActive = CarPlayBackgroundSession.active,
                 hotspotSummary = hotspotSummary,
                 lastProblemSummary = lastProblem,
+                versionName = installedVersion,
+                videoSpecSummary = videoSpecSummary,
             ),
             palette = TvColorScheme.resolve(context),
             callbacks = object : Callbacks {
@@ -150,6 +161,8 @@ class WorkbenchHeroStage(
         val sessionActive: Boolean,
         val hotspotSummary: String?,
         val lastProblemSummary: String?,
+        val versionName: String = "1.1.1",
+        val videoSpecSummary: String = "60 FPS · H.264",
     )
 
     interface Callbacks {
@@ -170,95 +183,208 @@ class WorkbenchHeroStage(
             isVerticalScrollBarEnabled = false
         }
         val column = column().apply {
-            setPadding(dp(4), dp(4), dp(8), dp(16))
+            setPadding(dp(2), dp(2), dp(6), dp(12))
         }
 
-        // 1. Hero Connection Stage Card
-        val heroCard = card(palette, highlighted = model.sessionActive)
-        val badgeRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        // =========================================================================
+        // 1. HERO STAGE COCKPIT CARD
+        // =========================================================================
+        val heroCard = column().apply {
+            setPadding(dp(22), dp(20), dp(22), dp(20))
+            background = HeroBentoCardDrawable(
+                palette = palette,
+                highlighted = model.sessionActive,
+                cornerRadiusPx = dp(24).toFloat(),
+                strokeWidthPx = dp(if (model.sessionActive) 2 else 1).toFloat(),
+            )
+        }
+
+        // Top Telemetry Status Bar (Status Capsule + MFi/Version Capsule)
+        val topStatusRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        val statusDotColor = when {
+            model.sessionActive -> palette.success
+            model.sessionRunning -> palette.cyanAccent
+            else -> palette.accent
+        }
+        val statusText = when {
+            model.sessionActive -> "已连接 iPhone · 正在投屏"
+            model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待蓝牙握手" else "后台待命 · 等待 USB 接入"
+            else -> "就绪 · 离线 MFi 硬件级认证"
+        }
+        val statusPill = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), dp(5), dp(12), dp(5))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(ColorUtils.setAlphaComponent(statusDotColor, if (palette.night) 0x24 else 0x18))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(statusDotColor, 0x58))
+            }
+        }
         val statusDot = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
                 marginEnd = dp(8)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(
-                    when {
-                        model.sessionActive -> 0xFF34D399.toInt()
-                        model.sessionRunning -> 0xFF60A5FA.toInt()
-                        else -> palette.secondaryText
-                    },
-                )
+                setColor(statusDotColor)
             }
         }
-        val statusText = when {
-            model.sessionActive -> "已连接 iPhone · 正在投屏"
-            model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待 iPhone 蓝牙连接" else "后台待命 · 等待 iPhone USB 连接"
-            else -> "就绪 · 内置离线 MFi 认证 · 点击下方开启投屏"
-        }
-        badgeRow.addView(statusDot)
-        badgeRow.addView(label(statusText, 13, palette.secondaryText, bold = true))
-        heroCard.addView(badgeRow)
-        heroCard.addView(space(dp(14)))
+        statusPill.addView(statusDot)
+        statusPill.addView(
+            label(
+                statusText,
+                12f,
+                if (model.sessionActive) palette.success else palette.primaryText,
+                bold = true,
+            ),
+        )
+        topStatusRow.addView(statusPill)
+        topStatusRow.addView(View(context), LinearLayout.LayoutParams(0, dp(1), 1f))
 
+        val versionPill = TextView(context).apply {
+            text = "v${model.versionName}"
+            setTextColor(palette.secondaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            compoundDrawablePadding = dp(5)
+            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                TvVectorIcons.drawable(context, TvIconGlyph.SHIELD_MFI, palette.accent, sizeDp = 13),
+                null,
+                null,
+                null,
+            )
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(palette.badgeSurface)
+                setStroke(dp(1), palette.badgeOutline)
+            }
+        }
+        topStatusRow.addView(versionPill)
+        heroCard.addView(topStatusRow)
+        heroCard.addView(space(dp(16)))
+
+        // Emblem + Headline Title
         val titleRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
-        val iconView = ImageView(context).apply {
-            setImageResource(R.drawable.ic_carplay)
-            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+        val iconBadge = FrameLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply {
                 marginEnd = dp(16)
             }
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x42 else 0x24),
+                    ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x16 else 0x0C),
+                ),
+            ).apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x77))
+            }
+            addView(
+                ImageView(context).apply {
+                    setImageResource(R.drawable.ic_carplay)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER),
+            )
         }
         val titleCol = column().apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         titleCol.addView(
             label(
-                "Apple CarPlay 电视接收端",
-                23,
+                "Apple CarPlay 接收端",
+                22f,
                 palette.primaryText,
                 bold = true,
             ),
         )
-        titleCol.addView(space(dp(4)))
+        titleCol.addView(space(dp(3)))
         val subtitleLine = if (model.wirelessEnabled) {
-            "${model.wirelessModeLabel} · 电视蓝牙：${model.bluetoothDeviceName}"
+            "${model.wirelessModeLabel} · 蓝牙：${model.bluetoothDeviceName}"
         } else {
-            "${model.wirelessModeLabel} · 支持插入数据线自动启动"
+            "${model.wirelessModeLabel} · 插入数据线自动唤醒"
         }
         titleCol.addView(
-            label(
-                subtitleLine,
-                14,
-                palette.secondaryText,
-            ),
+            label(subtitleLine, 13f, palette.secondaryText).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
         )
-        titleRow.addView(iconView)
+        titleRow.addView(iconBadge)
         titleRow.addView(titleCol)
         heroCard.addView(titleRow)
 
-        model.hotspotSummary?.takeIf { it.isNotBlank() }?.let { hotspot ->
-            heroCard.addView(space(dp(12)))
-            heroCard.addView(label(hotspot, 13, palette.accent, bold = true))
+        // 3-Column Bento Telemetry Grid
+        heroCard.addView(space(dp(14)))
+        val telemetryGrid = row()
+        val transportTileGlyph = when {
+            !model.wirelessEnabled -> TvIconGlyph.USB
+            model.wirelessMode == TvWirelessMode.LAN_WIFI -> TvIconGlyph.LAN
+            else -> TvIconGlyph.WIFI
         }
+        val transportTileValue = when {
+            !model.wirelessEnabled -> "USB 直连"
+            model.wirelessMode == TvWirelessMode.LAN_WIFI -> "家庭局域网"
+            else -> "5GHz 直连"
+        }
+        telemetryGrid.addView(
+            bentoMetricTile(
+                glyph = transportTileGlyph,
+                caption = "传输通道",
+                value = transportTileValue,
+                palette = palette,
+                accented = true,
+            ),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            },
+        )
+        telemetryGrid.addView(
+            bentoMetricTile(
+                glyph = TvIconGlyph.FPS_GAUGE,
+                caption = "画质规格",
+                value = model.videoSpecSummary,
+                palette = palette,
+                accented = false,
+            ),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            },
+        )
+        telemetryGrid.addView(
+            bentoMetricTile(
+                glyph = TvIconGlyph.PHONE,
+                caption = "目标设备",
+                value = model.pairedPhoneSummary,
+                palette = palette,
+                accented = false,
+            ),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        heroCard.addView(telemetryGrid)
 
         model.lastProblemSummary?.takeIf { it.isNotBlank() }?.let { problem ->
             heroCard.addView(space(dp(12)))
             val warnBox = column().apply {
-                setPadding(dp(14), dp(10), dp(14), dp(10))
+                setPadding(dp(14), dp(9), dp(14), dp(9))
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(14).toFloat()
+                    cornerRadius = dp(12).toFloat()
                     setColor(palette.warningSurface)
                     setStroke(dp(1), palette.warningOutline)
                 }
             }
-            warnBox.addView(label("状态提示：$problem", 13, palette.warningText))
+            warnBox.addView(label("状态提示：$problem", 12.5f, palette.warningText, bold = true))
             heroCard.addView(warnBox)
         }
 
-        heroCard.addView(space(dp(18)))
+        heroCard.addView(space(dp(16)))
 
-        val primaryButton = TvPlayButton(context).apply {
+        val primaryButton = TvPlayButton(context, TvPlayButtonKind.PRIMARY, TvIconGlyph.PLAY).apply {
             tag = "primary_launch"
             text = when {
                 model.sessionActive -> "进入全屏 CarPlay 画面"
@@ -266,10 +392,10 @@ class WorkbenchHeroStage(
                 model.wirelessEnabled -> "立即启动无线 CarPlay 投屏"
                 else -> "立即启动 USB 有线 CarPlay 投屏"
             }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-            minHeight = dp(56)
-            minimumHeight = dp(56)
-            style(TvPlayButtonKind.PRIMARY, palette, overlay = false)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            minHeight = dp(52)
+            minimumHeight = dp(52)
+            style(TvPlayButtonKind.PRIMARY, palette, overlay = false, glyph = TvIconGlyph.PLAY)
             setOnClickListener { callbacks.onStartOrEnterProjection() }
         }
         primaryLaunchButton = primaryButton
@@ -279,12 +405,14 @@ class WorkbenchHeroStage(
         )
 
         if (model.sessionRunning || model.sessionActive) {
-            heroCard.addView(space(dp(10)))
-            val stopButton = TvPlayButton(context).apply {
+            heroCard.addView(space(dp(8)))
+            val stopButton = TvPlayButton(context, TvPlayButtonKind.TONAL_DANGER, TvIconGlyph.POWER).apply {
                 tag = "stop_session"
                 text = "断开当前连接并停止后台服务"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                style(TvPlayButtonKind.TONAL_DANGER, palette, overlay = false)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                minHeight = dp(44)
+                minimumHeight = dp(44)
+                style(TvPlayButtonKind.TONAL_DANGER, palette, overlay = false, glyph = TvIconGlyph.POWER)
                 setOnClickListener { callbacks.onStopSession() }
             }
             heroCard.addView(
@@ -294,39 +422,54 @@ class WorkbenchHeroStage(
         }
 
         column.addView(heroCard)
-        column.addView(space(dp(16)))
+        column.addView(space(dp(12)))
 
-        // 2. Quick Transport & Wireless Mode Switcher
-        val modeCard = card(palette, highlighted = false)
-        modeCard.addView(label("连接模式切换（无线 / USB 有线）", 16, palette.primaryText, bold = true))
+        // =========================================================================
+        // 2. BENTO TRANSPORT MATRIX CARD
+        // =========================================================================
+        val modeCard = bentoCard(palette)
+        modeCard.addView(
+            bentoSectionHeader(
+                glyph = TvIconGlyph.WIFI,
+                title = "连接模式切换",
+                badgeText = model.hotspotSummary ?: "即时生效",
+                palette = palette,
+            ),
+        )
         modeCard.addView(space(dp(10)))
 
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
             tag = "mode_wireless"
-            text = if (model.wirelessEnabled) "✓ 无线 CarPlay" else "无线 CarPlay"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            text = "无线 CarPlay"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            minHeight = dp(44)
+            minimumHeight = dp(44)
             style(
                 if (model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
+                glyph = TvIconGlyph.WIFI,
             )
             setOnClickListener { callbacks.onChooseTransportMode(true) }
         }
         val usbBtn = TvPlayButton(context).apply {
             tag = "mode_usb"
-            text = if (!model.wirelessEnabled) "✓ USB 有线直连" else "USB 有线直连"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            text = "USB 有线直连"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            minHeight = dp(44)
+            minimumHeight = dp(44)
             style(
                 if (!model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
+                glyph = TvIconGlyph.USB,
             )
             setOnClickListener { callbacks.onChooseTransportMode(false) }
         }
         transportRow.addView(
             wirelessBtn,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) },
         )
         transportRow.addView(
             usbBtn,
@@ -335,34 +478,40 @@ class WorkbenchHeroStage(
         modeCard.addView(transportRow)
 
         if (model.wirelessEnabled) {
-            modeCard.addView(space(dp(10)))
+            modeCard.addView(space(dp(8)))
             val switchRow = row()
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
             val directBtn = TvPlayButton(context).apply {
                 tag = "mode_direct"
-                text = if (isDirect) "✓ Wi-Fi Direct 直连" else "Wi-Fi Direct 直连"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                text = "Wi-Fi Direct 直连"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                minHeight = dp(42)
+                minimumHeight = dp(42)
                 style(
                     if (isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
+                    glyph = TvIconGlyph.RADAR,
                 )
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
             }
             val lanBtn = TvPlayButton(context).apply {
                 tag = "mode_lan"
-                text = if (!isDirect) "✓ 家庭局域网 / 网线" else "家庭局域网 / 网线"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                text = "家庭局域网 / 网线"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                minHeight = dp(42)
+                minimumHeight = dp(42)
                 style(
                     if (!isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
+                    glyph = TvIconGlyph.LAN,
                 )
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.LAN_WIFI) }
             }
             switchRow.addView(
                 directBtn,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) },
             )
             switchRow.addView(
                 lanBtn,
@@ -371,77 +520,83 @@ class WorkbenchHeroStage(
             modeCard.addView(switchRow)
         }
         column.addView(modeCard)
-        column.addView(space(dp(16)))
+        column.addView(space(dp(12)))
 
-        // 3. 3-Step Visual Connection Guide
-        val guideCard = card(palette, highlighted = false)
+        // =========================================================================
+        // 3. COMPACT 3-STEP BENTO CONNECTION TIMELINE
+        // =========================================================================
+        val guideCard = bentoCard(palette)
         if (!model.wirelessEnabled) {
-            guideCard.addView(label("3 步 USB 有线连接 iPhone 指南", 17, palette.primaryText, bold = true))
-            guideCard.addView(space(dp(12)))
             guideCard.addView(
-                stepItem(
-                    "1",
-                    "使用支持数据传输的 USB 线连接电视与 iPhone",
-                    "请插在电视或机顶盒的 USB 接口上（仅充电线无法传输 CarPlay 数据）。",
-                    palette,
+                bentoSectionHeader(
+                    glyph = TvIconGlyph.USB,
+                    title = "USB 有线连接流程",
+                    badgeText = "零配置直连",
+                    palette = palette,
                 ),
             )
             guideCard.addView(space(dp(10)))
             guideCard.addView(
-                stepItem(
-                    "2",
-                    "解锁 iPhone 并点击「信任此电脑」",
-                    "在 iPhone 弹窗点击「信任」并输入锁屏密码，同时在电视弹窗允许 USB 设备访问。",
+                stepTimelineRow(
+                    "01",
+                    "连接数据线",
+                    "使用支持数据传输的 Lightning / USB-C 线连接电视与 iPhone",
                     palette,
                 ),
             )
-            guideCard.addView(space(dp(10)))
+            guideCard.addView(space(dp(6)))
             guideCard.addView(
-                stepItem(
-                    "3",
-                    "点击上方「立即启动 USB 有线 CarPlay 投屏」",
-                    "无需开启 VPN，直接通过 USB 数据线建立高速投屏通道。",
+                stepTimelineRow(
+                    "02",
+                    "授权信任设备",
+                    "解锁 iPhone 点击「信任此电脑」，并在电视弹窗允许 USB 访问",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(6)))
+            guideCard.addView(
+                stepTimelineRow(
+                    "03",
+                    "开启全屏投屏",
+                    "点击上方启动按钮，无需开启 VPN 即可直接进入 60FPS 画面",
                     palette,
                 ),
             )
         } else {
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
-            guideCard.addView(label("3 步无线连接 iPhone 指南", 17, palette.primaryText, bold = true))
-            guideCard.addView(space(dp(12)))
-            if (isDirect) {
-                guideCard.addView(
-                    stepItem(
-                        "1",
-                        "开启 iPhone 与电视的蓝牙和 Wi-Fi",
-                        "Wi-Fi Direct 免配置直连模式无需填写路由器密码，自动建立 5GHz 高速无线通道。",
-                        palette,
-                    ),
-                )
-            } else {
-                guideCard.addView(
-                    stepItem(
-                        "1",
-                        "将电视与 iPhone 连接至同一家庭路由器",
-                        "电视可通过 Wi-Fi 或千兆网线接入路由器，确保与 iPhone 处于同一局域网。",
-                        palette,
-                    ),
-                )
-            }
-            guideCard.addView(space(dp(10)))
             guideCard.addView(
-                stepItem(
-                    "2",
-                    "蓝牙配对「${model.bluetoothDeviceName}」",
-                    "在 iPhone「设置 → 蓝牙」中搜索并配对本电视（当前目标：${model.pairedPhoneSummary}）。",
-                    palette,
+                bentoSectionHeader(
+                    glyph = TvIconGlyph.BLUETOOTH,
+                    title = "无线 CarPlay 连接流程",
+                    badgeText = if (isDirect) "5GHz 点对点" else "同路由器局域网",
+                    palette = palette,
                 ),
             )
             guideCard.addView(space(dp(10)))
             guideCard.addView(
-                stepItem(
-                    "3",
-                    "点击上方「立即启动无线 CarPlay 投屏」",
-                    "首次连接时在 iPhone 弹窗确认「使用 CarPlay 车载」，即可进入 60fps 全屏画面。",
+                stepTimelineRow(
+                    "01",
+                    if (isDirect) "开启蓝牙与 Wi-Fi" else "接入同一家庭路由器",
+                    if (isDirect) "保持电视与 iPhone 蓝牙、Wi-Fi 开启，免填路由器密码"
+                    else "电视通过 Wi-Fi 或千兆网线与 iPhone 处于同一局域网",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(6)))
+            guideCard.addView(
+                stepTimelineRow(
+                    "02",
+                    "蓝牙配对「${model.bluetoothDeviceName}」",
+                    "在 iPhone「设置 → 蓝牙」中连接本电视（目标：${model.pairedPhoneSummary}）",
+                    palette,
+                ),
+            )
+            guideCard.addView(space(dp(6)))
+            guideCard.addView(
+                stepTimelineRow(
+                    "03",
+                    "确认使用 CarPlay 车载",
+                    "点击上方启动按钮，首次连接在 iPhone 弹窗确认启用 CarPlay",
                     palette,
                 ),
             )
@@ -452,34 +607,140 @@ class WorkbenchHeroStage(
         return scroll
     }
 
-    private fun stepItem(
+    private fun bentoMetricTile(
+        glyph: TvIconGlyph,
+        caption: String,
+        value: String,
+        palette: TvColorScheme,
+        accented: Boolean,
+    ): View = column().apply {
+        setPadding(dp(11), dp(9), dp(11), dp(9))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(14).toFloat()
+            if (accented) {
+                setColor(ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x20 else 0x14))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x50))
+            } else {
+                setColor(palette.subtleSurface)
+                setStroke(dp(1), palette.outline)
+            }
+        }
+        val topRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        topRow.addView(
+            ImageView(context).apply {
+                setImageDrawable(
+                    TvVectorIcons.drawable(
+                        context,
+                        glyph,
+                        if (accented) palette.accent else palette.secondaryText,
+                        sizeDp = 13,
+                    ),
+                )
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(dp(13), dp(13)).apply { marginEnd = dp(5) },
+        )
+        topRow.addView(
+            label(caption, 11f, palette.secondaryText, bold = false).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+        )
+        addView(topRow)
+        addView(space(dp(3)))
+        addView(
+            label(value, 12.5f, if (accented) palette.primaryText else palette.primaryText, bold = true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+        )
+    }
+
+    private fun bentoSectionHeader(
+        glyph: TvIconGlyph,
+        title: String,
+        badgeText: String,
+        palette: TvColorScheme,
+    ): View {
+        val headerRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        headerRow.addView(
+            TvVectorIcons.badgeWell(context, glyph, palette, accented = false, sizeDp = 30),
+            LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(10) },
+        )
+        headerRow.addView(
+            label(title, 15.5f, palette.primaryText, bold = true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        if (badgeText.isNotBlank()) {
+            headerRow.addView(
+                TextView(context).apply {
+                    text = badgeText
+                    setTextColor(palette.secondaryText)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(dp(9), dp(3), dp(9), dp(3))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(999).toFloat()
+                        setColor(palette.subtleSurface)
+                        setStroke(dp(1), palette.outline)
+                    }
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+        }
+        return headerRow
+    }
+
+    private fun stepTimelineRow(
         number: String,
         title: String,
         subtitle: String,
         palette: TvColorScheme,
     ): View {
-        val row = row().apply { gravity = Gravity.TOP }
+        val row = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(13).toFloat()
+                setColor(palette.subtleSurface)
+                setStroke(dp(1), palette.outline)
+            }
+        }
         val badge = TextView(context).apply {
             text = number
             gravity = Gravity.CENTER
-            setTextColor(palette.onAccent)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(palette.accent)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
-                topMargin = dp(2)
-                marginEnd = dp(12)
+                marginEnd = dp(11)
             }
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(palette.accent)
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(8).toFloat()
+                setColor(ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x22 else 0x16))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x55))
             }
         }
         val textCol = column().apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        textCol.addView(label(title, 15, palette.primaryText, bold = true))
-        textCol.addView(space(dp(2)))
-        textCol.addView(label(subtitle, 13, palette.secondaryText))
+        textCol.addView(
+            label(title, 13.5f, palette.primaryText, bold = true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+        )
+        textCol.addView(
+            label(subtitle, 11.8f, palette.secondaryText).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+        )
         row.addView(badge)
         row.addView(textCol)
         return row
@@ -493,21 +754,26 @@ class WorkbenchHeroStage(
         orientation = LinearLayout.HORIZONTAL
     }
 
-    private fun card(palette: TvColorScheme, highlighted: Boolean): LinearLayout = column().apply {
-        setPadding(dp(22), dp(20), dp(22), dp(20))
-        background = GradientDrawable().apply {
+    private fun bentoCard(palette: TvColorScheme): LinearLayout = column().apply {
+        setPadding(dp(18), dp(16), dp(18), dp(16))
+        background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                ColorUtils.blendARGB(palette.surface, palette.card, 0.45f),
+                palette.surface,
+            ),
+        ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(24).toFloat()
-            setColor(if (highlighted) palette.card else palette.surface)
-            setStroke(dp(if (highlighted) 2 else 1), if (highlighted) palette.accent else palette.outline)
+            cornerRadius = dp(20).toFloat()
+            setStroke(dp(1), palette.outline)
         }
     }
 
-    private fun label(text: String, sizeSp: Int, color: Int, bold: Boolean = false): TextView =
+    private fun label(text: String, sizeSp: Float, color: Int, bold: Boolean = false): TextView =
         TextView(context).apply {
             this.text = text
             setTextColor(color)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp.toFloat())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
             if (bold) {
                 typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             }

@@ -45,10 +45,10 @@ object CarPlayBackgroundSession {
 
     private var stopAction: (((() -> Unit)) -> Unit)? = null
     private var stopping = false
-    private var owner: Any? = null
+    private var ownerRef: java.lang.ref.WeakReference<Any>? = null
 
     @Synchronized
-    fun isOwner(candidate: Any): Boolean = owner === candidate
+    fun isOwner(candidate: Any): Boolean = ownerRef?.get() === candidate
 
     @Synchronized
     fun hasSession(): Boolean = stopAction != null || stopping
@@ -117,7 +117,7 @@ object CarPlayBackgroundSession {
         stop: (() -> Unit) -> Unit,
     ) {
         this.stopAction = stop
-        this.owner = owner
+        this.ownerRef = java.lang.ref.WeakReference(owner)
         this.controller = controller
         this.sink = sink
         this.width = width
@@ -132,7 +132,7 @@ object CarPlayBackgroundSession {
         sink = null
         if (!keepOwner) {
             stopAction = null
-            owner = null
+            ownerRef = null
         }
         active = false
         width = 0

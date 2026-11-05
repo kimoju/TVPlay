@@ -11,11 +11,12 @@ typealias TvPlayPalette = TvColorScheme
 typealias AppAppearanceMode = AppAppearance
 
 /**
- * Colours for TVPlay's screens, dialogs and CarPlay overlays.
+ * Semantic design tokens for TVPlay's 10-foot cinema screens, Bento cards, and CarPlay overlays.
  *
- * Dark values match the existing palette byte-for-byte. Light values use warm neutral paper surfaces so
- * daytime screens do not look like a dimmed terminal, while keeping the blue primary action and red
- * destructive action recognizable.
+ * Engineered with `ui-ux-pro-max` Dark Mode (OLED) + Glassmorphism guidelines:
+ * - >= 7:1 primary text contrast and >= 4.5:1 secondary text contrast in both Dark and Light modes.
+ * - Distinct layered Z-depth tokens (background -> surface -> card -> elevated button -> focus halo).
+ * - Specular 1dp glass borders and ambient radial glow tokens.
  */
 data class TvColorScheme(
     val night: Boolean,
@@ -62,6 +63,37 @@ data class TvColorScheme(
     val textPrimary: Int get() = primaryText
     val textSecondary: Int get() = secondaryText
 
+    val backgroundGradientTop: Int
+        get() = if (night) 0xFF0C1426.toInt() else 0xFFF8FAFC.toInt()
+    val backgroundGradientBottom: Int
+        get() = if (night) 0xFF04070D.toInt() else 0xFFE8EFF8.toInt()
+    val ambientGlowPrimary: Int
+        get() = if (night) 0x382563EB else 0x182563EB
+    val ambientGlowSecondary: Int
+        get() = if (night) 0x2406B6D4 else 0x1206B6D4
+    val heroGradientStart: Int
+        get() = if (night) 0xFF162647.toInt() else 0xFFEBF3FF.toInt()
+    val heroGradientEnd: Int
+        get() = if (night) 0xFF0D1424.toInt() else 0xFFFFFFFF.toInt()
+    val heroBorder: Int
+        get() = if (night) 0xFF2E4775.toInt() else 0xFFBFDBFE.toInt()
+    val glassHighlightBorder: Int
+        get() = if (night) 0x26FFFFFF else 0x80FFFFFF.toInt()
+    val badgeSurface: Int
+        get() = if (night) 0xFF172236.toInt() else 0xFFE2E8F0.toInt()
+    val badgeOutline: Int
+        get() = if (night) 0xFF293852.toInt() else 0xFFCBD5E1.toInt()
+    val iconWellSurface: Int
+        get() = if (night) 0xFF1A2740.toInt() else 0xFFDBEAFE.toInt()
+    val iconWellOutline: Int
+        get() = if (night) 0xFF2D426B.toInt() else 0xFF93C5FD.toInt()
+    val success: Int
+        get() = if (night) 0xFF10B981.toInt() else 0xFF059669.toInt()
+    val successSurface: Int
+        get() = if (night) 0x2910B981 else 0x1F059669
+    val cyanAccent: Int
+        get() = if (night) 0xFF38BDF8.toInt() else 0xFF0284C7.toInt()
+
     companion object {
         fun of(night: Boolean): TvColorScheme = if (night) DARK else LIGHT
 
@@ -70,80 +102,80 @@ data class TvColorScheme(
 
         val DARK = TvColorScheme(
             night = true,
-            background = 0xFF0A0D12.toInt(),
-            surface = 0xFF141922.toInt(),
-            card = 0xFF1A2030.toInt(),
-            subtleSurface = 0xFF0E131B.toInt(),
-            primaryText = 0xFFF3F5F8.toInt(),
-            secondaryText = 0xFF9AA4B2.toInt(),
-            accent = 0xFF2B6EF2.toInt(),
+            background = 0xFF060911.toInt(),
+            surface = 0xFF0E1523.toInt(),
+            card = 0xFF141E30.toInt(),
+            subtleSurface = 0xFF090E18.toInt(),
+            primaryText = 0xFFF8FAFC.toInt(),
+            secondaryText = 0xFF94A3B8.toInt(),
+            accent = 0xFF3B82F6.toInt(),
             onAccent = 0xFFFFFFFF.toInt(),
-            accentTrack = 0x662B6EF2,
-            trackOff = 0xFF39424E.toInt(),
-            button = 0xFF232B3A.toInt(),
-            buttonText = 0xFFF3F5F8.toInt(),
-            danger = 0xFF9B2C2C.toInt(),
+            accentTrack = 0x773B82F6,
+            trackOff = 0xFF2A364B.toInt(),
+            button = 0xFF1D2940.toInt(),
+            buttonText = 0xFFF8FAFC.toInt(),
+            danger = 0xFFDC2626.toInt(),
             onDanger = 0xFFFFFFFF.toInt(),
-            tonalDanger = 0xFF28191D.toInt(),
-            onTonalDanger = 0xFFF2B8B5.toInt(),
-            tonalDangerOutline = 0xFF5B2C31.toInt(),
-            outline = 0xFF2A3346.toInt(),
+            tonalDanger = 0xFF2A1419.toInt(),
+            onTonalDanger = 0xFFFCA5A5.toInt(),
+            tonalDangerOutline = 0xFF6B212A.toInt(),
+            outline = 0xFF212E45.toInt(),
             ripple = 0x33FFFFFF,
-            focusRing = 0xFF60A5FA.toInt(),
-            warningSurface = 0xFF2B2112.toInt(),
-            warningOutline = 0xFF7A5618.toInt(),
-            warningText = 0xFFF5D48F.toInt(),
-            overlayScrim = 0xCC07090D.toInt(),
-            overlayBackground = 0xEE0D0F14.toInt(),
-            overlaySurface = 0xFF141820.toInt(),
-            overlayPrimaryText = 0xFFF2F4F8.toInt(),
-            overlaySecondaryText = 0xFFB9C0CC.toInt(),
-            overlayAccent = 0xFF4C8DFF.toInt(),
-            overlayAccentTrack = 0x664C8DFF,
-            overlayTrackOff = 0xFF39424E.toInt(),
-            overlayButton = 0xFF232A36.toInt(),
-            overlayButtonText = 0xFFF2F4F8.toInt(),
-            overlayDanger = 0xFF8B2635.toInt(),
-            overlayOutline = 0xFF2B3342.toInt(),
+            focusRing = 0xFF38BDF8.toInt(),
+            warningSurface = 0xFF291F11.toInt(),
+            warningOutline = 0xFF855B1A.toInt(),
+            warningText = 0xFFFDE68A.toInt(),
+            overlayScrim = 0xD904070D.toInt(),
+            overlayBackground = 0xF20C121E.toInt(),
+            overlaySurface = 0xFF141E30.toInt(),
+            overlayPrimaryText = 0xFFF8FAFC.toInt(),
+            overlaySecondaryText = 0xFF94A3B8.toInt(),
+            overlayAccent = 0xFF3B82F6.toInt(),
+            overlayAccentTrack = 0x773B82F6,
+            overlayTrackOff = 0xFF2A364B.toInt(),
+            overlayButton = 0xFF1E2B42.toInt(),
+            overlayButtonText = 0xFFF8FAFC.toInt(),
+            overlayDanger = 0xFFB91C1C.toInt(),
+            overlayOutline = 0xFF293852.toInt(),
         )
 
         val LIGHT = TvColorScheme(
             night = false,
-            background = 0xFFF3F5F8.toInt(),
+            background = 0xFFF1F5F9.toInt(),
             surface = 0xFFFFFFFF.toInt(),
-            card = 0xFFE9EEF5.toInt(),
-            subtleSurface = 0xFFEDF1F7.toInt(),
-            primaryText = 0xFF121821.toInt(),
-            secondaryText = 0xFF566173.toInt(),
-            accent = 0xFF1E5EFF.toInt(),
+            card = 0xFFF8FAFC.toInt(),
+            subtleSurface = 0xFFE2E8F0.toInt(),
+            primaryText = 0xFF0F172A.toInt(),
+            secondaryText = 0xFF475569.toInt(),
+            accent = 0xFF2563EB.toInt(),
             onAccent = 0xFFFFFFFF.toInt(),
-            accentTrack = 0x551E5EFF,
-            trackOff = 0xFFC5CEDB.toInt(),
-            button = 0xFFDCE3EE.toInt(),
-            buttonText = 0xFF121821.toInt(),
-            danger = 0xFFC62828.toInt(),
+            accentTrack = 0x662563EB,
+            trackOff = 0xFFCBD5E1.toInt(),
+            button = 0xFFE2E8F0.toInt(),
+            buttonText = 0xFF0F172A.toInt(),
+            danger = 0xFFDC2626.toInt(),
             onDanger = 0xFFFFFFFF.toInt(),
-            tonalDanger = 0xFFFBE9E7.toInt(),
-            onTonalDanger = 0xFF8C1D18.toInt(),
-            tonalDangerOutline = 0xFFE6B8B5.toInt(),
-            outline = 0xFFD0D8E4.toInt(),
-            ripple = 0x22121821,
-            focusRing = 0xFF1D4ED8.toInt(),
-            warningSurface = 0xFFFFF4DC.toInt(),
-            warningOutline = 0xFFD8A33A.toInt(),
-            warningText = 0xFF5B3F00.toInt(),
-            overlayScrim = 0xB3121821.toInt(),
-            overlayBackground = 0xF5F6F8FB.toInt(),
-            overlaySurface = 0xFFFFFFFF.toInt(),
-            overlayPrimaryText = 0xFF121821.toInt(),
-            overlaySecondaryText = 0xFF566173.toInt(),
-            overlayAccent = 0xFF1E5EFF.toInt(),
-            overlayAccentTrack = 0x551E5EFF,
-            overlayTrackOff = 0xFFC5CEDB.toInt(),
-            overlayButton = 0xFFE2E8F2.toInt(),
-            overlayButtonText = 0xFF121821.toInt(),
-            overlayDanger = 0xFFC62828.toInt(),
-            overlayOutline = 0xFFD0D8E4.toInt(),
+            tonalDanger = 0xFFFEF2F2.toInt(),
+            onTonalDanger = 0xFF991B1B.toInt(),
+            tonalDangerOutline = 0xFFFECACA.toInt(),
+            outline = 0xFFCBD5E1.toInt(),
+            ripple = 0x220F172A,
+            focusRing = 0xFF2563EB.toInt(),
+            warningSurface = 0xFFFFFBEB.toInt(),
+            warningOutline = 0xFFF59E0B.toInt(),
+            warningText = 0xFF92400E.toInt(),
+            overlayScrim = 0xB30F172A.toInt(),
+            overlayBackground = 0xF7FFFFFF.toInt(),
+            overlaySurface = 0xFFF1F5F9.toInt(),
+            overlayPrimaryText = 0xFF0F172A.toInt(),
+            overlaySecondaryText = 0xFF475569.toInt(),
+            overlayAccent = 0xFF2563EB.toInt(),
+            overlayAccentTrack = 0x662563EB,
+            overlayTrackOff = 0xFFCBD5E1.toInt(),
+            overlayButton = 0xFFE2E8F0.toInt(),
+            overlayButtonText = 0xFF0F172A.toInt(),
+            overlayDanger = 0xFFDC2626.toInt(),
+            overlayOutline = 0xFFCBD5E1.toInt(),
         )
     }
 }
@@ -163,9 +195,6 @@ enum class AppAppearance(val key: String) {
 
 /**
  * Resolves whether TVPlay's own screens should use their dark palette.
- *
- * [AppAppearance.AUTO] follows the live CarPlay host night state when one is running, then the
- * configured CarPlay night mode, with Android's UI mode used when that mode is [CarPlayNightMode.SYSTEM].
  */
 fun resolveAppNight(
     appearance: AppAppearance,
@@ -192,9 +221,6 @@ fun Context.resolveAppNightNow(hostNight: Boolean? = AppAppearanceRuntime.hostNi
 
 /**
  * Publishes the CarPlay host activity's resolved night state to other TVPlay windows in the same process.
- *
- * Only the current owner may update or clear the state, so an older host instance being torn down cannot
- * erase a newer host's state.
  */
 object AppAppearanceRuntime {
     private var ownerRef: WeakReference<Any>? = null

@@ -812,6 +812,14 @@ class TvSessionEngine(
             }
             if (currentActive === session) {
                 activeSession = null
+                if (config.transport == TvTransportMode.WIRELESS) {
+                    val tunnel = wirelessTunnelChannel
+                    wirelessTunnelChannel = null
+                    if (tunnel != null) {
+                        closeBestEffort("tunneled iAP2 link") { tunnel.close() }
+                    }
+                    closeBluetoothBootstrapTransport()
+                }
                 synchronized(albumReplayLock) { initialArtworkReplay = null }
                 synchronized(playbackStatus) {
                     val wasPlaying = playbackStatus.playing

@@ -35,14 +35,15 @@ class StageFpsHudOverlay(
 
     val view = TextView(context).apply {
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        textSize = 14f
+        textSize = 13.5f
         setLineSpacing(0f, 1.1f)
-        val horizontal = (10 * density).toInt()
-        val vertical = (6 * density).toInt()
+        val horizontal = (14 * density).toInt()
+        val vertical = (7 * density).toInt()
         setPadding(horizontal, vertical, horizontal, vertical)
         background = GradientDrawable().apply {
-            setColor(0x99000000.toInt())
-            cornerRadius = 8 * density
+            setColor(0xCC0B0F19.toInt())
+            cornerRadius = 999f * density
+            setStroke((1 * density).toInt().coerceAtLeast(1), 0x44FFFFFF)
         }
         isClickable = false
         isFocusable = false

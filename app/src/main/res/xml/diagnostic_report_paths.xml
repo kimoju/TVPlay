@@ -2,6 +2,8 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path name="reports" path="diagnostic-reports/" />
     <external-files-path name="external_reports" path="diagnostic-reports/" />
+    <cache-path name="ota_cache" path="ota/" />
+    <files-path name="ota_files" path="ota/" />
     <!-- Only TVPlay's own folder in the public Downloads, never the rest of shared storage. -->
     <external-path name="public_reports" path="Download/TVPlay/" />
 </paths>

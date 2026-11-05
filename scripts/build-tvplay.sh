@@ -16,8 +16,18 @@ if [[ ! -f "${PK8_FILE}" || ! -f "${P7B_FILE}" ]]; then
   exit 1
 fi
 
+PUBLISH_AFTER_BUILD="${OTA_AUTO_PUBLISH:-0}"
+GRADLE_ARGS=()
+for arg in "$@"; do
+  if [[ "${arg}" == "--publish" ]]; then
+    PUBLISH_AFTER_BUILD="1"
+  else
+    GRADLE_ARGS+=("${arg}")
+  fi
+done
+
 cd "${ROOT_DIR}"
-./gradlew :app:assembleStandaloneRelease :app:assembleStandaloneDebug "$@"
+./gradlew :app:assembleStandaloneRelease :app:assembleStandaloneDebug "${GRADLE_ARGS[@]}"
 
 DIST_DIR="${ROOT_DIR}/dist"
 mkdir -p "${DIST_DIR}"
@@ -32,3 +42,7 @@ cp -f "${DEBUG_APK_SOURCE}" "${DIST_DIR}/TVPlay-standalone-debug.apk"
 echo "Built TVPlay APKs:"
 echo "  Release: ${DIST_DIR}/TVPlay-release.apk"
 echo "  Debug:   ${DIST_DIR}/TVPlay-debug.apk"
+
+if [[ "${PUBLISH_AFTER_BUILD}" == "1" ]]; then
+  "${ROOT_DIR}/scripts/publish-ota.sh" "${DIST_DIR}/TVPlay-release.apk"
+fi

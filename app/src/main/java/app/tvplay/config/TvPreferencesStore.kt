@@ -237,9 +237,22 @@ object TvPreferencesStore {
     private const val KEY_OEM_LABEL = "oem_label"
     private const val CUSTOM_ICON_FILE = "airplay-icon.png"
 
+    private const val KEY_OTA_SERVER_URL = "ota_server_url"
+    private const val KEY_OTA_CHANNEL = "ota_channel"
+    private const val KEY_OTA_AUTO_CHECK = "ota_auto_check"
+    private const val KEY_OTA_PENDING_RELEASE_ID = "ota_pending_release_id"
+    private const val KEY_OTA_PENDING_FROM_VERSION = "ota_pending_from_version"
+    private const val KEY_OTA_PENDING_TO_VERSION = "ota_pending_to_version"
+    private const val KEY_OTA_PENDING_TO_CODE = "ota_pending_to_code"
+    private const val KEY_OTA_PENDING_APP_KEY = "ota_pending_app_key"
+    private const val KEY_OTA_PENDING_BASE_URL = "ota_pending_base_url"
+
     const val DEFAULT_MANUFACTURER = "TVPlay"
     const val DEFAULT_MODEL = "TVPlay"
     const val DEFAULT_OEM_LABEL = "TVPlay"
+    const val DEFAULT_OTA_SERVER_URL = "http://10.0.0.30:8080"
+    const val DEFAULT_OTA_APP_KEY = "app.tvplay"
+    const val DEFAULT_OTA_CHANNEL = "stable"
 
     /** Applied by the CarPlay host so overlay position/size updates without reconnecting. */
     @Volatile
@@ -968,4 +981,104 @@ object TvPreferencesStore {
 
     private fun safeAreaKey(widthPixels: Int, heightPixels: Int): String =
         "$SAFE_AREA_KEY_PREFIX${widthPixels}x$heightPixels"
+
+    // --- LAN OTA Settings & Pending Upgrade State ---
+
+    data class PendingOtaUpgradeRecord(
+        val releaseId: Long,
+        val fromVersion: String,
+        val toVersion: String,
+        val toVersionCode: Long,
+        val appKey: String,
+        val serverBaseUrl: String,
+    )
+
+    fun normalizeOtaServerUrl(raw: String): String {
+        val trimmed = raw.trim().trimEnd('/')
+        if (trimmed.isEmpty()) return DEFAULT_OTA_SERVER_URL
+        return if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            trimmed
+        } else {
+            "http://$trimmed"
+        }
+    }
+
+    fun loadOtaServerUrl(context: Context): String =
+        normalizeOtaServerUrl(
+            prefs(context).getString(KEY_OTA_SERVER_URL, DEFAULT_OTA_SERVER_URL).orEmpty(),
+        )
+
+    fun saveOtaServerUrl(context: Context, url: String) {
+        prefs(context).edit()
+            .putString(KEY_OTA_SERVER_URL, normalizeOtaServerUrl(url))
+            .apply()
+    }
+
+    fun loadOtaChannel(context: Context): String =
+        prefs(context).getString(KEY_OTA_CHANNEL, DEFAULT_OTA_CHANNEL)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_OTA_CHANNEL
+
+    fun saveOtaChannel(context: Context, channel: String) {
+        val normalized = channel.trim().ifEmpty { DEFAULT_OTA_CHANNEL }
+        prefs(context).edit().putString(KEY_OTA_CHANNEL, normalized).apply()
+    }
+
+    fun loadOtaAutoCheck(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_OTA_AUTO_CHECK, true)
+
+    fun saveOtaAutoCheck(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_OTA_AUTO_CHECK, enabled).apply()
+    }
+
+    fun loadOtaDeviceId(context: Context): String {
+        val identity = loadIdentity(context)
+        val hex = identity.pairingId.replace(":", "").uppercase()
+        return "TV_${hex.ifEmpty { "000000000000" }}"
+    }
+
+    fun savePendingOtaUpgrade(context: Context, record: PendingOtaUpgradeRecord) {
+        prefs(context).edit()
+            .putLong(KEY_OTA_PENDING_RELEASE_ID, record.releaseId)
+            .putString(KEY_OTA_PENDING_FROM_VERSION, record.fromVersion)
+            .putString(KEY_OTA_PENDING_TO_VERSION, record.toVersion)
+            .putLong(KEY_OTA_PENDING_TO_CODE, record.toVersionCode)
+            .putString(KEY_OTA_PENDING_APP_KEY, record.appKey)
+            .putString(KEY_OTA_PENDING_BASE_URL, record.serverBaseUrl)
+            .apply()
+    }
+
+    fun loadPendingOtaUpgrade(context: Context): PendingOtaUpgradeRecord? {
+        val p = prefs(context)
+        val releaseId = p.getLong(KEY_OTA_PENDING_RELEASE_ID, -1L)
+        if (releaseId <= 0L) return null
+        val fromVersion = p.getString(KEY_OTA_PENDING_FROM_VERSION, null) ?: return null
+        val toVersion = p.getString(KEY_OTA_PENDING_TO_VERSION, null) ?: return null
+        val toCode = p.getLong(KEY_OTA_PENDING_TO_CODE, -1L)
+        if (toCode <= 0L) return null
+        val appKey = p.getString(KEY_OTA_PENDING_APP_KEY, DEFAULT_OTA_APP_KEY) ?: DEFAULT_OTA_APP_KEY
+        val baseUrl = p.getString(KEY_OTA_PENDING_BASE_URL, loadOtaServerUrl(context)) ?: loadOtaServerUrl(context)
+        return PendingOtaUpgradeRecord(
+            releaseId = releaseId,
+            fromVersion = fromVersion,
+            toVersion = toVersion,
+            toVersionCode = toCode,
+            appKey = appKey,
+            serverBaseUrl = baseUrl,
+        )
+    }
+
+    fun clearPendingOtaUpgrade(context: Context) {
+        prefs(context).edit()
+            .remove(KEY_OTA_PENDING_RELEASE_ID)
+            .remove(KEY_OTA_PENDING_FROM_VERSION)
+            .remove(KEY_OTA_PENDING_TO_VERSION)
+            .remove(KEY_OTA_PENDING_TO_CODE)
+            .remove(KEY_OTA_PENDING_APP_KEY)
+            .remove(KEY_OTA_PENDING_BASE_URL)
+            .apply()
+    }
 }

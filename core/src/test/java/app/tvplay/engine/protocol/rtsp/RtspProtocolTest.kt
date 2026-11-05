@@ -356,4 +356,130 @@ class RtspProtocolTest {
         assertTrue(isSameOrAuthorizedAirPlayPeer(cgnatLanPeer, ipv4ControlPeer))
         assertFalse(isSameOrAuthorizedAirPlayPeer(loopbackPeer, ipv4ControlPeer))
     }
+
+    @Test
+    fun carPlayMediaEngineStopsAudioAndMicrophoneOnAbruptSessionCloseAndIsolatesStaleSessions() {
+        val screenActiveState = mutableMapOf<Int, Boolean>()
+        val stoppedAudioIds = mutableListOf<AudioStreamId>()
+        val stoppedMicIds = mutableListOf<AudioStreamId>()
+
+        val sink = object : MediaSink {
+            override fun onScreenStreamActive(type: Int, active: Boolean) {
+                screenActiveState[type] = active
+            }
+            override fun onAudioStopped(id: AudioStreamId) {
+                stoppedAudioIds += id
+            }
+            override fun onMicrophoneStopped(id: AudioStreamId) {
+                stoppedMicIds += id
+            }
+        }
+
+        val engine = CarPlayMediaEngine(sink = sink, microphoneEnabled = true)
+        val config = TvStreamServerConfig(
+            deviceName = "TVPlay",
+            deviceId = "02:11:22:33:44:55",
+            btMac = "02:11:22:33:44:55",
+            sourceVersion = "950.7.1",
+            main = TvDisplaySpec(widthPixels = 1920, heightPixels = 1080),
+        )
+
+        java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
+            val client1 = java.net.Socket("127.0.0.1", server.localPort)
+            val peer1 = server.accept()
+            val client2 = java.net.Socket("127.0.0.1", server.localPort)
+            val peer2 = server.accept()
+            try {
+                val session1 = AirPlaySession(
+                    socket = peer1,
+                    config = config,
+                    identity = AccessoryIdentity.generate(),
+                    pairings = app.tvplay.engine.auth.PairingRegistry(),
+                    mfi = null,
+                    listener = object : AirPlaySessionListener {},
+                    media = engine,
+                )
+                val session2 = AirPlaySession(
+                    socket = peer2,
+                    config = config,
+                    identity = AccessoryIdentity.generate(),
+                    pairings = app.tvplay.engine.auth.PairingRegistry(),
+                    mfi = null,
+                    listener = object : AirPlaySessionListener {},
+                    media = engine,
+                )
+                val sharedField = session1.pairVerify.javaClass.getDeclaredField("sharedSecret").apply {
+                    isAccessible = true
+                }
+                sharedField.set(session1.pairVerify, ByteArray(32) { (it + 1).toByte() })
+                sharedField.set(session2.pairVerify, ByteArray(32) { (it + 33).toByte() })
+
+                // 1. Abrupt disconnect without TEARDOWN must stop both audio and microphone on sink
+                val telephonyStream = mapOf<String, Any?>(
+                    "audioType" to "telephony",
+                    "audioFormat" to 0x1000000L,
+                    "shk" to ByteArray(32) { 0x11 },
+                    "input" to true,
+                    "dataPort" to 50100,
+                    "controlPort" to 50101,
+                    "streamConnectionID" to 101L,
+                )
+                val screenDesc = mapOf<String, Any?>(
+                    "shk" to ByteArray(32) { 0x22 },
+                    "streamConnectionID" to 102L,
+                )
+                assertNotNull(engine.onAudio(session1, 100, telephonyStream))
+                assertNotNull(engine.onScreen(session1, 110, screenDesc))
+                assertEquals(true, screenActiveState[110])
+
+                stoppedAudioIds.clear()
+                stoppedMicIds.clear()
+                engine.onSessionClosed(session1)
+
+                assertEquals(false, screenActiveState[110])
+                assertTrue(
+                    "onSessionClosed must stop active audio streams on sink",
+                    AudioStreamId(100, "telephony") in stoppedAudioIds,
+                )
+                assertTrue(
+                    "onSessionClosed must stop active microphone streams on sink",
+                    AudioStreamId(100, "telephony") in stoppedMicIds,
+                )
+
+                // 2. Overlapping session2 setup before stale session1 closes must NOT tear down session2
+                val mediaStream = mapOf<String, Any?>(
+                    "audioType" to "media",
+                    "audioFormat" to 0x40000L,
+                    "shk" to ByteArray(32) { 0x33 },
+                    "streamConnectionID" to 201L,
+                )
+                assertNotNull(engine.onScreen(session1, 110, screenDesc))
+                assertNotNull(engine.onAudio(session1, 100, mediaStream))
+                assertNotNull(engine.onScreen(session2, 110, screenDesc))
+                assertNotNull(engine.onAudio(session2, 100, mediaStream))
+                assertEquals(true, screenActiveState[110])
+
+                stoppedAudioIds.clear()
+                engine.onSessionClosed(session1)
+                assertEquals(
+                    "Closing stale session1 must not mark session2's active screen stream inactive",
+                    true,
+                    screenActiveState[110],
+                )
+                assertTrue(
+                    "Closing stale session1 must not stop session2's active media audio stream",
+                    stoppedAudioIds.isEmpty(),
+                )
+
+                engine.onSessionClosed(session2)
+                assertEquals(false, screenActiveState[110])
+                assertTrue(AudioStreamId(100, "media") in stoppedAudioIds)
+            } finally {
+                runCatching { client1.close() }
+                runCatching { peer1.close() }
+                runCatching { client2.close() }
+                runCatching { peer2.close() }
+            }
+        }
+    }
 }

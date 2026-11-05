@@ -26,6 +26,7 @@ class BootAutoStartReceiver : BroadcastReceiver() {
         ) {
             return
         }
+        TvLanOtaManager.reportPendingUpgradeSuccessAsync(context)
         val enabled = TvPreferencesStore.loadAutoStartOnBoot(context)
         StartupDiagnosticSnapshot.received(context, enabled)
         if (!enabled) return

@@ -968,13 +968,16 @@ class CarPlayMediaEngine(
                         TAG,
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
-                    if (streams.remove(streamKey, screen)) {
+                    if (streams.remove(streamKey, screen) && streams.keys.none { it.type == type }) {
                         sink.onScreenStreamActive(type, false)
                     }
                     session.close()
                 }
             },
         )
+        streams.keys.filter { it.type == type && it != streamKey }.forEach { staleKey ->
+            streams.remove(staleKey)?.close()
+        }
         streams.put(streamKey, screen)?.close()
         sink.onScreenStreamActive(type, true)
         return port
@@ -984,9 +987,14 @@ class CarPlayMediaEngine(
         val audioType = stream["audioType"]?.toString()?.lowercase() ?: "default"
         val streamKey = StreamKey(session, type, audioType)
         val streamId = AudioStreamId(type, audioType)
-        streams.remove(streamKey)?.close()
-        audioMeta.remove(streamKey)
-        if (pendingMicrophone.remove(streamKey) != null) sink.onMicrophoneStopped(streamId)
+        streams.keys.filter { it.type == type && it.audioType == audioType }.forEach { existingKey ->
+            streams.remove(existingKey)?.close()
+            audioMeta.remove(existingKey)
+        }
+        val removedMic = pendingMicrophone.keys
+            .filter { it.type == type && it.audioType == audioType }
+            .count { pendingMicrophone.remove(it) != null }
+        if (removedMic > 0) sink.onMicrophoneStopped(streamId)
         sink.onAudioStopped(streamId)
 
         val key = outputKey(session, stream) ?: return null
@@ -1296,12 +1304,24 @@ class CarPlayMediaEngine(
         val tornDown = streams.keys.filter { it.session === session && it.type == type }
         tornDown.forEach { key ->
             val streamId = AudioStreamId(key.type, key.audioType)
-            if (pendingMicrophone.remove(key) != null) sink.onMicrophoneStopped(streamId)
-            audioMeta.remove(key)
-            if (key.type != BufferedAudioStream.STREAM_TYPE) sink.onAudioStopped(streamId)
             streams.remove(key)?.close()
+            audioMeta.remove(key)
+            val removedMic = pendingMicrophone.remove(key) != null
+            if (removedMic && pendingMicrophone.keys.none { it.type == key.type && it.audioType == key.audioType }) {
+                sink.onMicrophoneStopped(streamId)
+            }
+            if (
+                key.type != STREAM_TYPE_MAIN_SCREEN &&
+                key.type != STREAM_TYPE_DATA &&
+                key.type != BufferedAudioStream.STREAM_TYPE &&
+                streams.keys.none { it.type == key.type && it.audioType == key.audioType }
+            ) {
+                sink.onAudioStopped(streamId)
+            }
         }
-        if (type == STREAM_TYPE_MAIN_SCREEN) sink.onScreenStreamActive(type, false)
+        if (type == STREAM_TYPE_MAIN_SCREEN && tornDown.isNotEmpty() && streams.keys.none { it.type == type }) {
+            sink.onScreenStreamActive(type, false)
+        }
     }
 
     override fun onAudioDuck(session: RtspControlSession, ducked: Boolean) {
@@ -1316,12 +1336,31 @@ class CarPlayMediaEngine(
         val sessionStreams = streams.keys.filter {
             it.session === session && it.type != BufferedAudioStream.STREAM_TYPE
         }
-        sessionStreams
-            .filter { it.type == STREAM_TYPE_MAIN_SCREEN }
-            .forEach { sink.onScreenStreamActive(it.type, false) }
         sessionStreams.forEach { streams.remove(it)?.close() }
         audioMeta.keys.filter { it.session === session }.forEach { audioMeta.remove(it) }
-        pendingMicrophone.keys.filter { it.session === session }.forEach { pendingMicrophone.remove(it) }
+        val removedMics = pendingMicrophone.keys.filter { it.session === session }.also { keys ->
+            keys.forEach { pendingMicrophone.remove(it) }
+        }
+        removedMics.forEach { key ->
+            if (pendingMicrophone.keys.none { it.type == key.type && it.audioType == key.audioType }) {
+                sink.onMicrophoneStopped(AudioStreamId(key.type, key.audioType))
+            }
+        }
+        sessionStreams.forEach { key ->
+            when (key.type) {
+                STREAM_TYPE_MAIN_SCREEN -> {
+                    if (streams.keys.none { it.type == key.type }) {
+                        sink.onScreenStreamActive(key.type, false)
+                    }
+                }
+                STREAM_TYPE_DATA, BufferedAudioStream.STREAM_TYPE -> Unit
+                else -> {
+                    if (streams.keys.none { it.type == key.type && it.audioType == key.audioType }) {
+                        sink.onAudioStopped(AudioStreamId(key.type, key.audioType))
+                    }
+                }
+            }
+        }
     }
 
     private fun detachBufferedLocked(session: RtspControlSession): BufferedStream? {

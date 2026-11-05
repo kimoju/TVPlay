@@ -19,6 +19,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.setPadding
@@ -33,9 +34,12 @@ import app.tvplay.engine.network.UsbTunnelVpnService
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.DiagnosticExportStore
+import app.tvplay.runtime.LanOtaCheckResult
+import app.tvplay.runtime.LanOtaProtocol
 import app.tvplay.runtime.PendingReconnect
 import app.tvplay.runtime.ThemeModeDiagnostics
 import app.tvplay.runtime.TvDiagnosticsLogger
+import app.tvplay.runtime.TvLanOtaManager
 import app.tvplay.ui.stage.CarPlayScreen
 import app.tvplay.ui.theme.AppAppearanceOwner
 import app.tvplay.ui.theme.AppAppearanceRuntime
@@ -68,6 +72,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private var pendingWirelessLaunch: Boolean = true
     private var pendingChoosePhoneLaunchAfterSelect: Boolean = false
     private val themeModeDiagnostics = ThemeModeDiagnostics()
+    private var activeDialog: android.app.AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = TvSettingsRepository(this)
@@ -78,6 +83,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
         observeAppearance(ThemeModeDiagnostics.Source.CREATE)
         buildWorkbenchLayout()
+        TvLanOtaManager.reportPendingUpgradeSuccessAsync(this)
 
         if (savedInstanceState == null && isLauncherIntent(intent) && CarPlayBackgroundSession.hasSession()) {
             startActivity(CarPlayScreen.intent(this))
@@ -90,6 +96,11 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             intent.removeExtra("wireless")
             intent.removeExtra("auto_connect_token")
             launchProjectionStage(wireless)
+            return
+        }
+
+        if (savedInstanceState == null && settings.identity.otaAutoCheck) {
+            checkOtaUpdate(manual = false)
         }
     }
 
@@ -117,6 +128,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
         observeAppearance(ThemeModeDiagnostics.Source.RESUME)
         TvPlayBluetooth.sanitizeSavedPhone(this)
+        TvLanOtaManager.resumePendingInstallIfReady(this)
         refreshWorkbenchStatus()
         settingsPane.refresh()
     }
@@ -128,6 +140,23 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         if (resolvedNight != appNight) {
             recreate()
         }
+    }
+
+    override fun onDestroy() {
+        runCatching { activeDialog?.dismiss() }
+        activeDialog = null
+        super.onDestroy()
+    }
+
+    private fun showTrackedDialog(dialog: android.app.AlertDialog) {
+        runCatching { activeDialog?.dismiss() }
+        activeDialog = dialog
+        dialog.setOnDismissListener {
+            if (activeDialog === dialog) {
+                activeDialog = null
+            }
+        }
+        dialog.show()
     }
 
     @SuppressLint("GestureBackNavigation")
@@ -198,8 +227,10 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val rootRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.FILL
-            setBackgroundColor(palette.background)
-            setPadding((28 * density).toInt())
+            clipChildren = false
+            clipToPadding = false
+            background = app.tvplay.ui.theme.AmbientMeshBackgroundDrawable(palette)
+            setPadding((24 * density).toInt())
         }
 
         stagePane = WorkbenchHeroStage(this, settings).apply {
@@ -233,6 +264,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             onPairBluetoothClicked = { openSystemBluetoothSettings() }
             onResetWirelessHotspotClicked = { resetWirelessHotspotGroup() }
             onSaveDiagnosticLogClicked = { exportDiagnosticReport() }
+            onCheckOtaUpdateClicked = { checkOtaUpdate(manual = true) }
+            onDiscoverOtaServerClicked = { discoverOtaServerManually() }
             onSettingChanged = {
                 if (CarPlayBackgroundSession.hasSession()) {
                     PendingReconnect.mark()
@@ -312,6 +345,17 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                     true
                 }.getOrDefault(false)
                 if (requestStarted) return
+            }
+            if (!wireless) {
+                val vpnIntent = runCatching { android.net.VpnService.prepare(this) }.getOrNull()
+                if (vpnIntent != null) {
+                    val requested = runCatching {
+                        @Suppress("DEPRECATION")
+                        startActivityForResult(vpnIntent, REQUEST_VPN_PERMISSION)
+                        true
+                    }.getOrDefault(false)
+                    if (requested) return
+                }
             }
         }
 
@@ -404,6 +448,9 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         when (requestCode) {
             REQUEST_VPN_PERMISSION -> {
                 openStageActivity(pendingWirelessLaunch)
+            }
+            REQUEST_OTA_UNKNOWN_SOURCES -> {
+                TvLanOtaManager.resumePendingInstallIfReady(this)
             }
             REQUEST_SAVE_DIAGNOSTIC_LOG -> {
                 val uri = data?.data ?: return
@@ -533,7 +580,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 openSystemBluetoothSettings()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+            .also(::showTrackedDialog)
     }
 
     private fun showLanWifiConfigDialog(launchAfterSave: Boolean) {
@@ -599,7 +647,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 }
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+            .also(::showTrackedDialog)
     }
 
     @SuppressLint("MissingPermission")
@@ -748,12 +797,217 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         )
     }
 
+    private fun discoverOtaServerManually() {
+        Toast.makeText(this, "正在通过 UDP 9988 广播探测内网 OTA 服务...", Toast.LENGTH_SHORT).show()
+        val appContext = applicationContext
+        TvLanOtaManager.runInBackground {
+            val result = TvLanOtaManager.discoverServer(appContext, timeoutMillis = 2_000)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (result != null) {
+                    settingsPane.refresh()
+                    val label = result.title ?: result.service
+                    Toast.makeText(
+                        this,
+                        "已发现 $label：${result.baseUrl} (v${result.version})",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this,
+                        "未在局域网探测到 OTA 服务响应，当前使用地址：${settings.identity.otaServerUrl}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun checkOtaUpdate(manual: Boolean) {
+        if (manual) {
+            Toast.makeText(this, "正在检查内网 OTA 更新...", Toast.LENGTH_SHORT).show()
+        }
+        val appContext = applicationContext
+        TvLanOtaManager.runInBackground {
+            runCatching {
+                TvLanOtaManager.checkForUpdate(appContext, tryDiscoveryFirst = true)
+            }.onSuccess { result ->
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (::settingsPane.isInitialized) {
+                        settingsPane.refresh()
+                    }
+                    if (result.hasUpdate && result.release != null) {
+                        showOtaUpdateDialog(result)
+                    } else if (manual) {
+                        val installed = TvLanOtaManager.currentAppVersion(this)
+                        val note = result.message ?: "当前已是最新版本"
+                        Toast.makeText(
+                            this,
+                            "TVPlay v${installed.versionName} (${installed.versionCode})：$note",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }.onFailure { error ->
+                if (manual) {
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        Toast.makeText(
+                            this,
+                            "检查内网 OTA 更新失败：${error.message ?: error.javaClass.simpleName}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showOtaUpdateDialog(checkResult: LanOtaCheckResult) {
+        val release = checkResult.release ?: return
+        val installed = TvLanOtaManager.currentAppVersion(this)
+        val sizeText = LanOtaProtocol.formatFileSize(release.fileSize)
+        val changelogText = release.changelog.ifBlank { "性能优化与稳定性改进" }
+        val mandatoryHint = if (checkResult.forceUpdate) "\n\n【重要提示】该版本为强制更新版本，请立即完成升级。" else ""
+        val message = buildString {
+            append("发现新版本：v${release.versionName} (Build ${release.versionCode})\n")
+            append("当前版本：v${installed.versionName} (Build ${installed.versionCode})\n")
+            append("更新通道：${release.channel} · 安装包大小：$sizeText\n")
+            if (!release.publishedAt.isNullOrBlank()) {
+                append("发布时间：${release.publishedAt}\n")
+            }
+            append("\n更新说明：\n$changelogText")
+            append(mandatoryHint)
+        }
+
+        val builder = appDialogBuilder(this)
+            .setTitle("发现 TVPlay 内网 OTA 更新")
+            .setMessage(message)
+            .setCancelable(!checkResult.forceUpdate)
+            .setPositiveButton("立即下载并升级") { _, _ ->
+                startOtaDownloadAndInstall(checkResult)
+            }
+        if (!checkResult.forceUpdate) {
+            builder.setNegativeButton("稍后提醒", null)
+        }
+        showTrackedDialog(builder.create())
+    }
+
+    private fun startOtaDownloadAndInstall(checkResult: LanOtaCheckResult) {
+        val release = checkResult.release ?: return
+        val density = resources.displayMetrics.density
+        val palette = TvColorScheme.resolve(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padH = (24 * density).toInt()
+            val padV = (16 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+        }
+        val statusText = TextView(this).apply {
+            text = "正在连接内网 OTA 服务器下载 v${release.versionName}..."
+            setTextColor(palette.textPrimary)
+            setPadding(0, 0, 0, (12 * density).toInt())
+        }
+        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = false
+            max = 100
+            progress = 0
+        }
+        val detailText = TextView(this).apply {
+            text = "0% · 支持 HTTP Range 断点续传与 SHA-256 完整性校验"
+            setTextColor(palette.textSecondary)
+            setPadding(0, (8 * density).toInt(), 0, 0)
+        }
+        container.addView(statusText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        container.addView(progressBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        container.addView(detailText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        val progressDialog = appDialogBuilder(this)
+            .setTitle("正在下载 TVPlay v${release.versionName}")
+            .setView(container)
+            .setCancelable(false)
+            .create()
+        showTrackedDialog(progressDialog)
+
+        val appContext = applicationContext
+        TvLanOtaManager.runInBackground {
+            runCatching {
+                TvLanOtaManager.downloadRelease(appContext, checkResult) { progress ->
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed || !progressDialog.isShowing) return@runOnUiThread
+                        progressBar.progress = progress.percent
+                        val downloadedStr = LanOtaProtocol.formatFileSize(progress.downloadedBytes)
+                        val totalStr = if (progress.totalBytes > 0L) {
+                            LanOtaProtocol.formatFileSize(progress.totalBytes)
+                        } else {
+                            "未知大小"
+                        }
+                        val resumeTag = if (progress.resumedFromBytes > 0L) "（已断点续传）" else ""
+                        statusText.text = "正在下载安装包 $resumeTag..."
+                        detailText.text = "${progress.percent}% ($downloadedStr / $totalStr)"
+                    }
+                }
+            }.onSuccess { apkFile ->
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    runCatching { progressDialog.dismiss() }
+                    when (
+                        val launch = TvLanOtaManager.installApk(
+                            activity = this,
+                            apkFile = apkFile,
+                            checkResult = checkResult,
+                            requestCodeUnknownSources = REQUEST_OTA_UNKNOWN_SOURCES,
+                        )
+                    ) {
+                        TvLanOtaManager.InstallLaunchResult.InstallerLaunched -> {
+                            Toast.makeText(
+                                this,
+                                "安装包校验通过，请在系统安装界面确认升级",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        TvLanOtaManager.InstallLaunchResult.UnknownSourcesPermissionRequested -> {
+                            Toast.makeText(
+                                this,
+                                "请先开启「允许安装未知应用」权限，返回后将自动启动升级",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        is TvLanOtaManager.InstallLaunchResult.Failed -> {
+                            Toast.makeText(
+                                this,
+                                "启动系统安装程序失败：${launch.message}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    runCatching { progressDialog.dismiss() }
+                    appDialogBuilder(this)
+                        .setTitle("内网 OTA 更新下载失败")
+                        .setMessage("原因：${error.message ?: error.javaClass.simpleName}\n\n已保留已下载分片，可点击重试继续断点续传。")
+                        .setPositiveButton("断点续传重试") { _, _ ->
+                            startOtaDownloadAndInstall(checkResult)
+                        }
+                        .setNegativeButton("取消", null)
+                        .create()
+                        .also(::showTrackedDialog)
+                }
+            }
+        }
+    }
+
     companion object {
         private const val REQUEST_PROJECTION_PERMISSIONS = 1001
         private const val REQUEST_VPN_PERMISSION = 1002
         private const val REQUEST_SAVE_DIAGNOSTIC_LOG = 1003
         private const val REQUEST_BLUETOOTH_CONNECT_FOR_DIALOG = 1004
         private const val REQUEST_BLUETOOTH_DISCOVERABLE = 1005
+        private const val REQUEST_OTA_UNKNOWN_SOURCES = 1006
 
         fun isLauncherIntent(intent: Intent?): Boolean =
             intent?.action == Intent.ACTION_MAIN &&

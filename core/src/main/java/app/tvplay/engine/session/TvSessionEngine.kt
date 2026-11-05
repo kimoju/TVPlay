@@ -801,7 +801,12 @@ class TvSessionEngine(
         }
 
         override fun onSessionEnded(session: AirPlaySession) {
-            if (activeSession === session) {
+            val currentActive = activeSession
+            if (currentActive != null && currentActive !== session) {
+                debugLog("Non-active AirPlay connection ended peer=${session.host}; keeping live session")
+                return
+            }
+            if (currentActive === session) {
                 activeSession = null
                 synchronized(albumReplayLock) { initialArtworkReplay = null }
                 synchronized(playbackStatus) {
@@ -1561,6 +1566,9 @@ class TvSessionEngine(
                 endpoint = endpoint,
                 timeoutMillis = controlLoopTimeoutMillis(),
                 keepAliveAfterDeadline = { keepBluetoothControlAlive(generation) },
+                suppressSessionBootstrap = {
+                    activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation)
+                },
                 beforeStartSession = { startedHotspot?.validateReady() },
                 onStartSessionSent = { watchdog.startSessionSent(it.sentAtNanos) },
                 onIncoming = ::onRouteFrame,
@@ -1688,6 +1696,7 @@ class TvSessionEngine(
                         identification = identification,
                         endpoint = endpoint,
                         timeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
+                        suppressSessionBootstrap = { true },
                         onReady = {
                             onWirelessTunnelReady(generation)
                         },
@@ -1750,7 +1759,9 @@ class TvSessionEngine(
 
             override fun onTransportError(message: String) {
                 if (isStaleWirelessRun(generation)) return
-                watchdog.terminate()
+                if (activeSession == null && !wirelessConnectionProof.hasRenderedFrame(generation)) {
+                    watchdog.terminate()
+                }
                 sessionListener.onTransportError(message)
             }
 
@@ -1831,8 +1842,8 @@ class TvSessionEngine(
 
     private fun keepBluetoothControlAlive(generation: Int): Boolean = synchronized(wirelessResourceLock) {
         !closed && phase == Phase.WIRELESS && generation == wirelessGeneration.get() &&
-            !wirelessFailureReported.get() && activeSession != null &&
-            wirelessConnectionProof.hasRenderedFrame(generation)
+            !wirelessFailureReported.get() &&
+            (activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation))
     }
 
     private fun armWirelessHandoffWatchdog(generation: Int) {
@@ -1865,11 +1876,11 @@ class TvSessionEngine(
             !wirelessHandoffRequested.get() || wirelessActiveReported.get() || wirelessTunnelReady.get()) {
             return@synchronized
         }
-        if (activeSession != null && wirelessConnectionProof.hasRenderedFrame(generation)) {
+        if (activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation)) {
             if (!wirelessActiveReported.compareAndSet(false, true)) return@synchronized
             wirelessHandoffFellBack.set(true)
             debugLog(
-                "wireless handoff fallback after rendered video; tunnel iAP2 unavailable; " +
+                "wireless handoff fallback; tunnel iAP2 unavailable; " +
                     "preserving AirPlay and keeping the Bluetooth bootstrap for iAP2 control",
             )
             onStatus(CarPlayStatus.WirelessActiveFallback, generation)
@@ -2442,7 +2453,13 @@ class TvSessionEngine(
                 config.lanWifiSsid,
                 config.lanWifiPassphrase,
                 ::debugLog,
-                onNetworkChanged = { if (!isStaleWirelessRun(generation)) restartWireless() },
+                onNetworkChanged = {
+                    if (!isStaleWirelessRun(generation) && !isWirelessSessionOrHandoffActive(generation)) {
+                        restartWireless()
+                    } else {
+                        debugLog("existing Wi-Fi network change ignored while CarPlay session is active")
+                    }
+                },
                 preferredInterface = config.lanNetworkInterface,
             )
         }

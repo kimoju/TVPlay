@@ -100,21 +100,26 @@ class UsbTunnelVpnService : VpnService() {
             }
             require(hostMac.size == 6) { "hostMac must be 6 bytes" }
 
-            val tunFd = runCatching {
-                if (prepare(this) != null) {
-                    trySilentVpnPreConsent()
-                }
-                Builder()
-                    .addAddress(linkLocal, LINK_PREFIX)
-                    .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
-                    .setSession(SESSION_NAME)
-                    .setMtu(TUN_MTU)
-                    .setBlocking(true)
-                    // An empty app list routes every UID through this VPN. Scope it before establish;
-                    // rejection must reach the existing attachment cleanup, never an unscoped retry.
-                    .addAllowedApplication(packageName)
-                    .establish()
-            }.getOrNull()
+            val directUsbBind = findDirectUsbInterfaceBindAddress(listener)
+            val tunFd = if (directUsbBind != null) {
+                null
+            } else {
+                runCatching {
+                    if (prepare(this) != null) {
+                        trySilentVpnPreConsent()
+                    }
+                    Builder()
+                        .addAddress(linkLocal, LINK_PREFIX)
+                        .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
+                        .setSession(SESSION_NAME)
+                        .setMtu(TUN_MTU)
+                        .setBlocking(true)
+                        // An empty app list routes every UID through this VPN. Scope it before establish;
+                        // rejection must reach the existing attachment cleanup, never an unscoped retry.
+                        .addAllowedApplication(packageName)
+                        .establish()
+                }.getOrNull()
+            }
             tun = tunFd
 
             if (tunFd != null) {
@@ -129,7 +134,7 @@ class UsbTunnelVpnService : VpnService() {
                     AirPlayAttachment(scopedToTunnel(address, listener), config, identity, pairings, mfi, listener, media),
                 )
             } else {
-                val directBind = selectDirectUsbBindAddress(address, listener)
+                val directBind = directUsbBind ?: selectDirectUsbBindAddress(address, listener)
                 startAirPlayServer(
                     generation,
                     AirPlayAttachment(directBind, config, identity, pairings, mfi, listener, media),
@@ -230,14 +235,11 @@ class UsbTunnelVpnService : VpnService() {
         }
     }
 
-    private fun selectDirectUsbBindAddress(
-        requestedAddress: Inet6Address,
-        listener: AirPlaySessionListener,
-    ): InetAddress {
+    private fun findDirectUsbInterfaceBindAddress(listener: AirPlaySessionListener): InetAddress? {
         val candidates = tunnelCandidates()
         val usbIface = candidates.firstOrNull { candidate ->
             val lower = candidate.name.lowercase()
-            lower.startsWith("usb") || lower.startsWith("ncm") || lower.startsWith("rndis") || lower.startsWith("eth")
+            lower.startsWith("usb") || lower.startsWith("ncm") || lower.startsWith("rndis")
         }
         if (usbIface != null) {
             val linkLocal = usbIface.addresses.filterIsInstance<Inet6Address>().firstOrNull { it.isLinkLocalAddress }
@@ -248,6 +250,14 @@ class UsbTunnelVpnService : VpnService() {
                 return Inet6Address.getByAddress(null, linkLocal.address, usbIface.index)
             }
         }
+        return null
+    }
+
+    private fun selectDirectUsbBindAddress(
+        requestedAddress: Inet6Address,
+        listener: AirPlaySessionListener,
+    ): InetAddress {
+        findDirectUsbInterfaceBindAddress(listener)?.let { return it }
         runCatching {
             listener.onDebugLog("wired AirPlay running without VPN tunnel; binding wildcard IPv6 [::] for direct USB/local transport (requested=${requestedAddress.hostAddress})")
         }
@@ -323,7 +333,6 @@ class UsbTunnelVpnService : VpnService() {
                 Log.i(TAG, "airplay connection accepted from ${socket.remoteSocketAddress}")
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
-                socket.setSoLinger(true, 0)
                 val session = synchronized(this) {
                     if (!active.get() || generation != attachGeneration ||
                         (serverSocket !== server && additionalServers.none { it === server })) {
@@ -364,6 +373,10 @@ class UsbTunnelVpnService : VpnService() {
                             override fun onSessionEnded(session: AirPlaySession) {
                                 removeSession(session)
                                 if (current.listenerIdentity == null || !internalPeer) current.listener.onSessionEnded(session)
+                            }
+
+                            override fun onTransportError(message: String) {
+                                if (current.listenerIdentity == null || !internalPeer) current.listener.onTransportError(message)
                             }
                         },
                         media = current.media,

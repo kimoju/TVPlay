@@ -585,7 +585,9 @@ class NtpClock : Closeable {
     private fun handleMessage(message: ByteArray, source: InetSocketAddress) {
         when (message[1].toInt() and 0xff) {
             PT_REQUEST -> respondToRequest(message, source)
-            PT_RESPONSE -> if (source.address == peer?.address) handleResponse(message)
+            PT_RESPONSE -> if (peer?.address?.let { isSameOrAuthorizedAirPlayPeer(source.address, it) } == true) {
+                handleResponse(message)
+            }
         }
     }
 

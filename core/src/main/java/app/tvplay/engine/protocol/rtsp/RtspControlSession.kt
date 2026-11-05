@@ -177,7 +177,7 @@ class RtspControlSession(
     val hasRenderedMainFrame: Boolean get() = mainFrameRendered && !closed.get()
 
     private val closed = AtomicBoolean(false)
-    internal val isClosed: Boolean get() = closed.get()
+    val isClosed: Boolean get() = closed.get()
     private val notified = AtomicBoolean(false)
     private var eventServer: ServerSocket? = null
     private var eventSocket: Socket? = null
@@ -258,7 +258,14 @@ class RtspControlSession(
             true
         } catch (error: Exception) {
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
-            close()
+            if (eventSocket === socket) {
+                eventSocket = null
+                eventCipher = null
+            }
+            safeClose(socket)
+            if (!hasActiveMediaStreams() && !mainFrameRendered) {
+                close()
+            }
             false
         }
     }
@@ -775,39 +782,48 @@ class RtspControlSession(
     private fun acceptEvent(server: ServerSocket) {
         try {
             val expected = peerAddress ?: throw IOException("control peer unknown")
-            val socket = server.acceptFrom(expected) { debugLog("airplay event rejected sender outside the control session") }
-            socket.setSoLinger(true, 0)
-            socket.tcpNoDelay = true
-            debugLog("airplay event connection accepted from ${socket.remoteSocketAddress} noDelay=${socket.tcpNoDelay}")
-            eventSocket = socket
-            val shared = pairVerify.shared
-            if (shared == null) {
-                Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
-                safeClose(socket)
-                close()
-                return
+            while (!closed.get() && !server.isClosed) {
+                val socket = server.acceptFrom(expected) {
+                    debugLog("airplay event rejected sender outside the control session")
+                }
+                configureTcpLiveness(socket) { debugLog(it) }
+                socket.tcpNoDelay = true
+                debugLog("airplay event connection accepted from ${socket.remoteSocketAddress} noDelay=${socket.tcpNoDelay}")
+                val shared = pairVerify.shared
+                if (shared == null) {
+                    Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
+                    safeClose(socket)
+                    if (!hasActiveMediaStreams() && !mainFrameRendered) {
+                        close()
+                    }
+                    return
+                }
+                val writeKey = AirPlayCrypto.hkdfSha512(
+                    shared,
+                    "Events-Salt".toByteArray(Charsets.US_ASCII),
+                    "Events-Write-Encryption-Key".toByteArray(Charsets.US_ASCII),
+                    32,
+                )
+                val readKey = AirPlayCrypto.hkdfSha512(
+                    shared,
+                    "Events-Salt".toByteArray(Charsets.US_ASCII),
+                    "Events-Read-Encryption-Key".toByteArray(Charsets.US_ASCII),
+                    32,
+                )
+                synchronized(eventWriteLock) {
+                    safeClose(eventSocket)
+                    eventSocket = socket
+                    eventCipher = ControlCipher(readKey, writeKey)
+                    sendPendingNightModeLocked()
+                }
+                runEventRead(socket)
             }
-            val writeKey = AirPlayCrypto.hkdfSha512(
-                shared,
-                "Events-Salt".toByteArray(Charsets.US_ASCII),
-                "Events-Write-Encryption-Key".toByteArray(Charsets.US_ASCII),
-                32,
-            )
-            val readKey = AirPlayCrypto.hkdfSha512(
-                shared,
-                "Events-Salt".toByteArray(Charsets.US_ASCII),
-                "Events-Read-Encryption-Key".toByteArray(Charsets.US_ASCII),
-                32,
-            )
-            eventCipher = ControlCipher(readKey, writeKey)
-            synchronized(eventWriteLock) {
-                sendPendingNightModeLocked()
-            }
-            runEventRead(socket)
         } catch (error: Exception) {
             if (!closed.get()) {
                 Log.e(TAG, "airplay event accept failed", error)
-                close()
+                if (!hasActiveMediaStreams() && !mainFrameRendered) {
+                    close()
+                }
             }
         }
     }
@@ -822,7 +838,7 @@ class RtspControlSession(
             while (!closed.get()) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                val cipher = eventCipher ?: break
+                val cipher = synchronized(eventWriteLock) { eventCipher } ?: break
                 encrypted += buffer.copyOf(count)
                 val decrypted = try {
                     cipher.decrypt(encrypted)
@@ -855,10 +871,16 @@ class RtspControlSession(
             if (!closed.get()) Log.e(TAG, "airplay event read failed", error)
         } finally {
             debugLog("airplay event connection closed")
-            if (eventSocket === socket) eventSocket = null
-            eventCipher = null
+            synchronized(eventWriteLock) {
+                if (eventSocket === socket) {
+                    eventSocket = null
+                    eventCipher = null
+                }
+            }
             safeClose(socket)
-            if (!closed.get()) close()
+            if (!closed.get() && !hasActiveMediaStreams() && !mainFrameRendered) {
+                close()
+            }
         }
     }
 

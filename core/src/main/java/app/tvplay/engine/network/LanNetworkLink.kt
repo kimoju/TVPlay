@@ -259,9 +259,11 @@ class LanNetworkLink(
         }
     }.getOrNull()
 
-    private fun sameLink(properties: LinkProperties): Boolean =
-        properties.interfaceName == interfaceName && properties.linkAddresses.any { it.address == host } &&
-            existingWifiHostAddresses(properties.linkAddresses.map { it.address }, interfaceIndex).toSet() == hosts.toSet()
+    private fun sameLink(properties: LinkProperties): Boolean {
+        if (properties.interfaceName != interfaceName) return false
+        val bound = host ?: return true
+        return properties.linkAddresses.any { it.address.address.contentEquals(bound.address) }
+    }
 
     private fun security(): Iap2WirelessSecurity =
         if (passphrase.isEmpty()) Iap2WirelessSecurity.NONE else Iap2WirelessSecurity.WPA_WPA2

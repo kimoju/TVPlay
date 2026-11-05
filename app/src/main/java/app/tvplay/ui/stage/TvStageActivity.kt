@@ -909,6 +909,10 @@ class TvStageActivity : Activity() {
 
         override fun onVideoFrameRendered(session: AirPlaySession) {
             if (controllerGeneration != restartGeneration) return
+            if (activeAirPlaySession == null) {
+                activeAirPlaySession = session
+            }
+            CarPlayBackgroundSession.active = true
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
                 reconnectAttempts = 0
@@ -963,7 +967,12 @@ class TvStageActivity : Activity() {
             TvDiagnosticsLogger.record("AirPlay transport error: $message")
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
-                val hadActive = activeAirPlaySession != null || streamingActive
+                val active = activeAirPlaySession
+                if (active != null && !active.isClosed) {
+                    TvDiagnosticsLogger.record("Ignoring transport error while active AirPlay session is open: $message")
+                    return@post
+                }
+                val hadActive = active != null || streamingActive
                 if (hadActive) {
                     activeAirPlaySession = null
                     CarPlayBackgroundSession.active = false

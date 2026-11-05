@@ -766,6 +766,7 @@ class Iap2WirelessControlClient(
         // Evaluated only in the authenticated control loop when its original deadline expires.
         // The caller must prove that the current CarPlay session is usable before keeping it alive.
         keepAliveAfterDeadline: () -> Boolean = { false },
+        suppressSessionBootstrap: () -> Boolean = { false },
         onProgress: (String) -> Unit = {},
     ): Iap2WirelessControlResult {
         require(identification.wireless != null) {
@@ -850,6 +851,10 @@ class Iap2WirelessControlClient(
             when (incoming.messageId) {
                 REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
                     onProgress("iap2 rx=0x5702 request-wifi-configuration")
+                    if (suppressSessionBootstrap()) {
+                        onProgress("iap2 0x5703 suppressed: wireless session already active")
+                        continue
+                    }
                     val postTransport = transportNotificationSeen
                     val sentCount = if (postTransport) {
                         postTransportWiFiConfigurationsSent
@@ -888,6 +893,10 @@ class Iap2WirelessControlClient(
                 CARPLAY_AVAILABILITY -> {
                     onProgress("iap2 rx=0x4300 carplay-availability")
                     onProgress(carPlayAvailabilityDiagnostic(incoming))
+                    if (suppressSessionBootstrap()) {
+                        onProgress("iap2 0x4301 suppressed: wireless session already active")
+                        continue
+                    }
                     beforeStartSession()
                     sendStartSession(endpoint, ::sendControl, onStartSessionSent)
                     stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
@@ -905,6 +914,15 @@ class Iap2WirelessControlClient(
                     transportNotificationSeen = true
                     val identifiers = Iap2WirelessMessages.deviceTransportIdentifier(incoming)
                     stage = later(stage, Iap2WirelessControlStage.TRANSPORT_NOTIFIED)
+                    if (suppressSessionBootstrap()) {
+                        onProgress(
+                            "iap2 rx=0x4e0e device-transport-identifier " +
+                                "bluetooth=${identifiers.bluetoothMac ?: "none"} " +
+                                "usb=${identifiers.usbTransportIdentifier ?: "none"}; " +
+                                "0x5703 suppressed (wireless session already active)",
+                        )
+                        continue
+                    }
                     onProgress(
                         "iap2 rx=0x4e0e device-transport-identifier " +
                             "bluetooth=${identifiers.bluetoothMac ?: "none"} " +

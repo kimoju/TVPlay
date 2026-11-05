@@ -1249,7 +1249,7 @@ class CarPlayMediaEngine(
     }
 
     override fun onFeedback(session: RtspControlSession): Map<String, Any?>? {
-        val active = audioMeta.values.toList()
+        val active = audioMeta.entries.filter { it.key.session === session }.map { it.value }
         val buffered = bufferedStreams[session]
         if (active.isEmpty() && buffered == null) return null
         val streams = active.map { meta ->
@@ -1314,8 +1314,8 @@ class CarPlayMediaEngine(
             .filter { it.type == STREAM_TYPE_MAIN_SCREEN }
             .forEach { sink.onScreenStreamActive(it.type, false) }
         sessionStreams.forEach { streams.remove(it)?.close() }
-        audioMeta.clear()
-        pendingMicrophone.clear()
+        audioMeta.keys.filter { it.session === session }.forEach { audioMeta.remove(it) }
+        pendingMicrophone.keys.filter { it.session === session }.forEach { pendingMicrophone.remove(it) }
     }
 
     private fun detachBufferedLocked(session: RtspControlSession): BufferedStream? {

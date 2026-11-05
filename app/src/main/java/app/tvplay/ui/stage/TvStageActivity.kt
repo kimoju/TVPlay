@@ -131,6 +131,8 @@ class TvStageActivity : Activity() {
 
     private var streamingActive = false
     private var firstFrameRendered = false
+    private val isProjectionVisible: Boolean
+        get() = streamingActive && firstFrameRendered
     private var sessionHevc = false
     private var vpnPromptedThisSession = false
     private var permissionsPromptedThisSession = false
@@ -150,7 +152,7 @@ class TvStageActivity : Activity() {
     private var bluetoothReceiverRegistered = false
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (isFinishing || isDestroyed || streamingActive) return
+            if (isFinishing || isDestroyed || isProjectionVisible) return
             if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return
             when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
@@ -353,7 +355,7 @@ class TvStageActivity : Activity() {
         }
 
         val waitingVisible = waitingBindings.stageOverlay.visibility == View.VISIBLE
-        if (waitingVisible && !streamingActive) {
+        if (waitingVisible && !isProjectionVisible) {
             if (event.keyCode == KeyEvent.KEYCODE_MENU && event.action == KeyEvent.ACTION_UP) {
                 showQuickControlOverlay()
                 return true
@@ -372,8 +374,8 @@ class TvStageActivity : Activity() {
             menuOpen = quickControlOverlay?.visibility == View.VISIBLE || pictureTuningOverlay?.visibility == View.VISIBLE,
             suppressBackReleaseAfterLongPress = suppressBackReleaseAfterLongPress,
             setSuppressBackRelease = { suppressBackReleaseAfterLongPress = it },
-            hasActiveScreenStream = streamingActive,
-            sessionActive = streamingActive,
+            hasActiveScreenStream = isProjectionVisible,
+            sessionActive = isProjectionVisible,
             sendKnob = { state, momentary ->
                 activeAirPlaySession?.let {
                     it.sendKnob(state, momentary)
@@ -398,7 +400,7 @@ class TvStageActivity : Activity() {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (streamingActive && quickControlOverlay?.visibility != View.VISIBLE) {
+        if (isProjectionVisible && quickControlOverlay?.visibility != View.VISIBLE) {
             val viewW = videoContainer.width.coerceAtLeast(1)
             val viewH = videoContainer.height.coerceAtLeast(1)
             val layout = TvVideoSurfaceHost.computeContentRect(sessionDisplay, viewW, viewH)
@@ -907,8 +909,26 @@ class TvStageActivity : Activity() {
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
                 streamingActive = true
+                if (!firstFrameRendered) {
+                    waitingBindings.stageStatusView.text = "iPhone 已建立 AirPlay 会话，正在启动视频解码与画面渲染..."
+                }
                 TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
                 refreshOverlayVisibility()
+            }
+        }
+
+        override fun onVideoFrameRendered(session: AirPlaySession) {
+            if (controllerGeneration != restartGeneration) return
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration) return@post
+                firstFrameRendered = true
+                streamingActive = true
+                retryBudget.firstFrame(session, System.currentTimeMillis())
+                LastConnectionProblem.clear(this@TvStageActivity)
+                refreshOverlayVisibility()
+                if (TvPreferencesStore.loadFpsCounter(this@TvStageActivity)) {
+                    fpsHudOverlay.start()
+                }
             }
         }
 
@@ -966,6 +986,32 @@ class TvStageActivity : Activity() {
 
         override fun onDebugLog(message: String) {
             TvDiagnosticsLogger.record(message)
+            if (controllerGeneration != restartGeneration || isProjectionVisible) return
+            val progressHint = when {
+                message.contains("wireless accepted inbound iAP2 RFCOMM") ||
+                    message.contains("wireless RFCOMM connected") ->
+                    "蓝牙 RFCOMM 通道已连接，正在进行 iAP2 身份与 MFi 认证..."
+                message.contains("iap2 tx=0x1D00") ->
+                    "正在向 iPhone 发送 CarPlay 身份特征，等待 MFi 签名验证..."
+                message.contains("iap2 tx=0xAA03") ->
+                    "MFi 硬件证书签名已提交，等待 iPhone 验证通过..."
+                message.contains("iap2 rx=0xAA05") ->
+                    "MFi 认证已通过，正在等待 iPhone 请求无线网络配置..."
+                message.contains("iap2 tx=0x5703") ->
+                    "已向 iPhone 下发 Wi-Fi 凭证 (0x5703)，等待 iPhone 接入电视无线网络..."
+                message.contains("iap2 tx=0x4301") ->
+                    "已发送启动无线 CarPlay 指令 (0x4301)，等待 iPhone 连接 AirPlay 端口..."
+                message.contains("first-tcp watchdog disarmed") ||
+                    message.contains("wireless type-130 tunnel data stream accepted") ->
+                    "iPhone 已连入电视无线网络，正在协商 RTSP 音视频流..."
+                else -> null
+            } ?: return
+            mainHandler.post {
+                if (controllerGeneration != restartGeneration || isProjectionVisible) return@post
+                if (lastStatus !is CarPlayStatus.Failed) {
+                    waitingBindings.stageStatusView.text = progressHint
+                }
+            }
         }
     }
 
@@ -1016,12 +1062,14 @@ class TvStageActivity : Activity() {
                 reconnectAttempts = 0
                 cancelScheduledReconnect()
             } else if (status is CarPlayStatus.ControlEnded) {
-                if (!streamingActive) {
+                if (!isProjectionVisible) {
+                    streamingActive = false
                     firstFrameRendered = false
                     scheduleAutoReconnect(3_500L)
                 }
             } else if (status is CarPlayStatus.Failed) {
-                if (!streamingActive) {
+                if (!isProjectionVisible) {
+                    streamingActive = false
                     firstFrameRendered = false
                     val retryAllowed = status.startupFailure?.retryable != false &&
                         !status.wifiResetRequired
@@ -1047,7 +1095,7 @@ class TvStageActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_STAGE_PERMISSIONS) {
-            if (grantResults.any { it == PackageManager.PERMISSION_GRANTED } && !streamingActive) {
+            if (grantResults.any { it == PackageManager.PERMISSION_GRANTED } && !isProjectionVisible) {
                 reconnectAttempts = 0
                 val engine = sessionEngine
                 if (engine != null && !engine.isClosed() && lastStatus !is CarPlayStatus.Failed) {
@@ -1076,7 +1124,7 @@ class TvStageActivity : Activity() {
         cancelScheduledReconnect()
         val task = Runnable {
             reconnectRunnable = null
-            if (!isFinishing && !isDestroyed && !streamingActive) {
+            if (!isFinishing && !isDestroyed && !isProjectionVisible) {
                 reconnectNow()
             }
         }
@@ -1385,7 +1433,7 @@ class TvStageActivity : Activity() {
     }
 
     private fun returnToWorkbench() {
-        if (!streamingActive) {
+        if (!isProjectionVisible) {
             cancelScheduledReconnect()
             stopActiveSession()
             TvSessionForegroundService.stop(this)
@@ -1396,7 +1444,7 @@ class TvStageActivity : Activity() {
                 putExtra("page", "home")
             },
         )
-        if (!streamingActive) {
+        if (!isProjectionVisible) {
             finish()
         }
     }

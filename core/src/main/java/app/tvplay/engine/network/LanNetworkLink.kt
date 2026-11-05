@@ -108,6 +108,7 @@ class LanNetworkLink(
                 var apBssid: ByteArray? = null
                 var liveSsid: String? = null
                 var observedSecurity = -1
+                var scanCapabilities: String? = null
                 if (configured == null && wifi != null) {
                     val capabilities = network?.let { runCatching { connectivity.getNetworkCapabilities(it) }.getOrNull() }
                     val networkInfo = if (Build.VERSION.SDK_INT >= 31) capabilities?.transportInfo as? WifiInfo else null
@@ -118,9 +119,25 @@ class LanNetworkLink(
                     liveSsid = readableSsid(info)
                     frequency = info?.frequency?.takeIf { it > 0 }
                     channel = frequency?.let(::wifiFrequencyMhzToChannel) ?: 0
-                    apBssid = accessPointAddress(info?.bssid)
+                    val rawBssid = info?.bssid
+                    apBssid = accessPointAddress(rawBssid)
                     if (Build.VERSION.SDK_INT >= 31 && info != null) {
                         observedSecurity = info.currentSecurityType
+                    }
+                    val matchingScan = runCatching {
+                        @Suppress("MissingPermission")
+                        val scans = wifi.scanResults.orEmpty()
+                        scans.firstOrNull {
+                            (!rawBssid.isNullOrBlank() && it.BSSID.equals(rawBssid, ignoreCase = true)) ||
+                                (!liveSsid.isNullOrBlank() && it.SSID == liveSsid)
+                        }
+                    }.getOrNull()
+                    if (matchingScan != null) {
+                        scanCapabilities = matchingScan.capabilities
+                        if (frequency == null && matchingScan.frequency > 0) {
+                            frequency = matchingScan.frequency
+                            channel = wifiFrequencyMhzToChannel(matchingScan.frequency) ?: 0
+                        }
                     }
                 }
                 val configuredSsid = ssid.trim().takeUnless { it.isEmpty() || it.equals("TVPlay", ignoreCase = true) }
@@ -137,20 +154,33 @@ class LanNetworkLink(
                         "家庭局域网模式需要先在「连接与配对」中填写路由器 Wi-Fi 名称与密码，或点击下方「切换连接模式」改用「Wi-Fi Direct 直连」模式",
                     )
                 }
-                if (configured == null && Build.VERSION.SDK_INT >= 31) {
-                    when (observedSecurity) {
-                        WifiInfo.SECURITY_TYPE_OPEN -> if (passphrase.isNotEmpty()) {
-                            throw WirelessStartupException(
-                                WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                                "当前连接的 Wi-Fi ($effectiveSsid) 为开放网络（无密码），请在连接设置中清空 Wi-Fi 密码",
-                            )
-                        }
-                        WifiInfo.SECURITY_TYPE_PSK, WifiInfo.SECURITY_TYPE_SAE -> if (passphrase.isEmpty()) {
-                            throw WirelessStartupException(
-                                WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                                "当前连接的路由器 Wi-Fi ($effectiveSsid) 需要密码，请在「连接与配对」中填写该 Wi-Fi 密码，或点击「切换连接模式」改用无需密码的「Wi-Fi Direct 直连」",
-                            )
-                        }
+                if (configured == null) {
+                    val capsUpper = scanCapabilities?.uppercase().orEmpty()
+                    val scanIndicatesSecured = capsUpper.contains("WPA") ||
+                        capsUpper.contains("RSN") ||
+                        capsUpper.contains("PSK") ||
+                        capsUpper.contains("SAE") ||
+                        capsUpper.contains("WEP") ||
+                        capsUpper.contains("EAP")
+                    val scanIndicatesOpen = scanCapabilities != null && !scanIndicatesSecured
+                    val isKnownOpen = (Build.VERSION.SDK_INT >= 31 && observedSecurity == WifiInfo.SECURITY_TYPE_OPEN) ||
+                        (observedSecurity == -1 && scanIndicatesOpen)
+                    val isKnownSecured = (
+                        Build.VERSION.SDK_INT >= 31 &&
+                            (observedSecurity == WifiInfo.SECURITY_TYPE_PSK || observedSecurity == WifiInfo.SECURITY_TYPE_SAE)
+                        ) || scanIndicatesSecured
+
+                    if (isKnownOpen && passphrase.isNotEmpty()) {
+                        throw WirelessStartupException(
+                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                            "当前连接的 Wi-Fi ($effectiveSsid) 为开放网络（无密码），请在连接设置中清空 Wi-Fi 密码",
+                        )
+                    }
+                    if (passphrase.isEmpty() && (isKnownSecured || (!isKnownOpen && configuredSsid == null))) {
+                        throw WirelessStartupException(
+                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
+                            "当前连接的路由器 Wi-Fi ($effectiveSsid) 需要密码才能下发给 iPhone，请先在「连接与配对」中填写该 Wi-Fi 密码，或点击下方「切换连接模式」改用免密码的「Wi-Fi Direct 直连」",
+                        )
                     }
                 }
                 val finalSsid = effectiveSsid

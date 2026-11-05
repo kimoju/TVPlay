@@ -217,7 +217,7 @@ class FirstTcpWatchdog(
         val cancel = synchronized(lock) {
             val sentAt = startSentAtNanos
             if (terminated || disarmed || event.listener !== listener || event.internal ||
-                sentAt == null || event.acceptedAtNanos < sentAt) {
+                (sentAt != null && event.acceptedAtNanos < sentAt)) {
                 return false
             }
             disarmed = true
@@ -226,6 +226,15 @@ class FirstTcpWatchdog(
         cancel?.invoke()
         log("first-tcp watchdog disarmed by external AirPlay TCP accept")
         return true
+    }
+
+    fun disarm() {
+        val cancel = synchronized(lock) {
+            if (terminated || disarmed) return
+            disarmed = true
+            cancelScheduled.also { cancelScheduled = null }
+        }
+        cancel?.invoke()
     }
 
     fun sessionEstablished(): Boolean = synchronized(lock) { !terminated }
@@ -1345,6 +1354,11 @@ class TvSessionEngine(
                 )
             }
             val hostAddressText = hostAddressText(hostAddress)
+            val allBindAddresses = (listOf(hostAddress) + candidates + hotspotInfo.hostAddresses)
+                .distinct()
+                .filter { it !is Inet6Address || (it.isLinkLocalAddress && it.scopeId != 0) }
+            val additionalBindAddresses = allBindAddresses.filter { it != hostAddress }
+            val endpointAddressTexts = allBindAddresses.map(::hostAddressText).distinct().ifEmpty { listOf(hostAddressText) }
             val deviceIdentifier = hotspotInfo.bssid
                 ?.takeUnless { it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true) }
                 ?: airPlayConfig.deviceId
@@ -1411,7 +1425,7 @@ class TvSessionEngine(
                         listener = wirelessSessionListener(generation, watchdog),
                         listenerIdentity = watchdog.listener,
                         media = media,
-                        additionalBindAddresses = hotspotInfo.hostAddresses.filter { it != hostAddress },
+                        additionalBindAddresses = additionalBindAddresses,
                     )
                 ) {
                     UsbTunnelVpnService.AttachResult.Started -> Unit
@@ -1441,7 +1455,7 @@ class TvSessionEngine(
                 advertisedHost = hostAddress.hostAddress,
                 useInterfaceMdns = true,
                 onEvent = { event -> debugLog("wireless bonjour: ${event.diagnosticSummary()}") },
-                additionalAddresses = hotspotInfo.hostAddresses.filter { it != hostAddress },
+                additionalAddresses = additionalBindAddresses,
             )
             synchronized(wirelessResourceLock) {
                 if (isStaleWirelessRun(generation)) return
@@ -1512,7 +1526,7 @@ class TvSessionEngine(
                 passphrase = hotspotInfo.passphrase,
                 channel = hotspotInfo.channel,
                 security = hotspotInfo.security,
-                ipAddresses = listOf(hostAddressText),
+                ipAddresses = endpointAddressTexts,
                 airPlayPort = listenerPort,
                 deviceIdentifier = deviceIdentifier,
                 publicKey = identity.publicKeyHex,
@@ -1546,6 +1560,9 @@ class TvSessionEngine(
                 onStartSessionSent = { watchdog.startSessionSent(it.sentAtNanos) },
                 onIncoming = ::onRouteFrame,
                 onProgress = { message ->
+                    if (message.startsWith("iap2 tx=0x5703")) {
+                        watchdog.startSessionSent()
+                    }
                     diagnostics.controlProgress(message)
                     debugLog(message)
                 },
@@ -1686,6 +1703,7 @@ class TvSessionEngine(
 
             override fun onSessionActive(session: AirPlaySession) {
                 if (isStaleWirelessRun(generation) || !watchdog.sessionEstablished()) return
+                watchdog.disarm()
                 wirelessDiagnostics?.let {
                     it.sessionActive()
                     it.close()
@@ -2481,14 +2499,18 @@ class TvSessionEngine(
                             continue
                         }
                         var accepted = false
+                        var inFlightOutbound: BluetoothSocket? = null
                         synchronized(wirelessResourceLock) {
                             if (!isStaleWirelessRun(generation) && bluetoothServerSocket === server) {
                                 acceptedBluetoothSocket?.let { runCatching { it.close() } }
                                 acceptedBluetoothSocket = incoming
+                                inFlightOutbound = bluetoothSocket
+                                bluetoothSocket = null
                                 accepted = true
                             }
                         }
                         if (accepted) {
+                            inFlightOutbound?.let { runCatching { it.close() } }
                             debugLog("wireless accepted inbound iAP2 RFCOMM from address=${remote.address}")
                             notifyBluetoothPeerChanged()
                             break
@@ -2551,140 +2573,150 @@ class TvSessionEngine(
         val waitDeadlineNanos = System.nanoTime() + PAIRING_WAIT_TIMEOUT_MILLIS * 1_000_000L
         var targetDevice: BluetoothDevice? = null
         var loggedWaitingForPairing = false
-        var accessoryServerStarted = false
-        while (targetDevice == null) {
-            if (isStaleWirelessRun(generation)) {
-                closeAccessoryIap2Server()
-                throw InterruptedIOException("Wireless Bluetooth selection cancelled")
-            }
-            takeAcceptedBluetoothSocket()?.let { inbound ->
-                closeAccessoryIap2Server()
-                return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
-            }
-            if (!adapter.isEnabled) {
-                closeAccessoryIap2Server()
-                throw IOException(BluetoothRadioCheck.RADIO_OFF)
-            }
-            try {
-                targetDevice = selectWirelessBluetoothDevice(adapter)
-            } catch (failure: ConnectionFailureException) {
-                if (!accessoryServerStarted) {
-                    accessoryServerStarted = true
+        startAccessoryIap2Server(adapter, generation)
+        try {
+            while (targetDevice == null) {
+                if (isStaleWirelessRun(generation)) {
+                    throw InterruptedIOException("Wireless Bluetooth selection cancelled")
+                }
+                takeAcceptedBluetoothSocket()?.let { inbound ->
+                    return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+                }
+                if (!adapter.isEnabled) {
+                    throw IOException(BluetoothRadioCheck.RADIO_OFF)
+                }
+                try {
+                    targetDevice = selectWirelessBluetoothDevice(adapter)
+                } catch (failure: ConnectionFailureException) {
                     startAccessoryIap2Server(adapter, generation)
-                }
-                val waitWindowMillis = if (failure.reason == ConnectionFailureCause.IPHONE_NOT_CHOSEN) {
-                    12_000L
-                } else {
-                    PAIRING_WAIT_TIMEOUT_MILLIS
-                }
-                val effectiveDeadline = minOf(
-                    waitDeadlineNanos,
-                    System.nanoTime() + waitWindowMillis * 1_000_000L,
-                )
-                if (System.nanoTime() >= effectiveDeadline) {
-                    closeAccessoryIap2Server()
-                    throw failure
-                }
-                if (!loggedWaitingForPairing) {
-                    loggedWaitingForPairing = true
-                    debugLog(
-                        "wireless waiting for iPhone Bluetooth pairing/connection (${failure.reason}) " +
-                            "while keeping hotspot and AirPlay ready",
+                    val waitWindowMillis = if (failure.reason == ConnectionFailureCause.IPHONE_NOT_CHOSEN) {
+                        12_000L
+                    } else {
+                        PAIRING_WAIT_TIMEOUT_MILLIS
+                    }
+                    val effectiveDeadline = minOf(
+                        waitDeadlineNanos,
+                        System.nanoTime() + waitWindowMillis * 1_000_000L,
                     )
+                    if (System.nanoTime() >= effectiveDeadline) {
+                        throw failure
+                    }
+                    if (!loggedWaitingForPairing) {
+                        loggedWaitingForPairing = true
+                        debugLog(
+                            "wireless waiting for iPhone Bluetooth pairing/connection (${failure.reason}) " +
+                                "while keeping hotspot and AirPlay ready",
+                        )
+                    }
+                    startedHotspot?.validateReady()
+                    waitForBluetoothPeerChange(1_000L)
                 }
-                startedHotspot?.validateReady()
-                waitForBluetoothPeerChange(1_000L)
             }
-        }
 
-        takeAcceptedBluetoothSocket()?.let { inbound ->
-            closeAccessoryIap2Server()
-            return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
-        }
-        closeAccessoryIap2Server()
-
-        var device: BluetoothDevice = requireNotNull(targetDevice)
-        debugLog(
-            "wireless selected Bluetooth target name=${runCatching { device.name }.getOrNull() ?: "unknown"} " +
-                "address=${device.address} localBt=$hostBluetoothMac",
-        )
-        onStatus(CarPlayStatus.ConnectingBluetooth)
-        runCatching { adapter.cancelDiscovery() }
-
-        var lastError: Throwable? = null
-        for (attempt in 1..MAX_RFCOMM_ATTEMPTS) {
-            if (isStaleWirelessRun(generation)) {
-                closeAccessoryIap2Server()
-                throw InterruptedIOException("Wireless RFCOMM connect cancelled")
-            }
             takeAcceptedBluetoothSocket()?.let { inbound ->
-                closeAccessoryIap2Server()
                 return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
             }
-            closeAccessoryIap2Server()
-            if (!adapter.isEnabled) throw IOException(BluetoothRadioCheck.RADIO_OFF)
+
+            var device: BluetoothDevice = requireNotNull(targetDevice)
             debugLog(
-                "wireless RFCOMM connecting attempt=$attempt/$MAX_RFCOMM_ATTEMPTS " +
-                    "address=${device.address} uuid=$IAP2_IPHONE_UUID",
+                "wireless selected Bluetooth target name=${runCatching { device.name }.getOrNull() ?: "unknown"} " +
+                    "address=${device.address} localBt=$hostBluetoothMac",
             )
-            val socket = synchronized(wirelessResourceLock) {
+            onStatus(CarPlayStatus.ConnectingBluetooth)
+            runCatching { adapter.cancelDiscovery() }
+
+            var lastError: Throwable? = null
+            for (attempt in 1..MAX_RFCOMM_ATTEMPTS) {
                 if (isStaleWirelessRun(generation)) {
                     throw InterruptedIOException("Wireless RFCOMM connect cancelled")
                 }
-                device.createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
-                    .also { bluetoothSocket = it }
-            }
-            if (attempt == 1) {
-                logBluetoothConnectionSnapshot(device, "before-connect")
-            }
-            val bluetoothStarted = System.nanoTime()
-            try {
-                connectBluetoothSocket(socket, device.address)
-                val connectMillis = elapsedMillis(bluetoothStarted)
-                connectionDiagnostic(
-                    "Bluetooth connect completed attempt=$attempt elapsedMs=$connectMillis " +
-                        "socketReportedConnected=${runCatching { socket.isConnected }.getOrNull() ?: "unknown"}",
-                )
-                return ConnectedBluetoothLink(device, socket, connectMillis)
-            } catch (error: Throwable) {
-                runCatching { socket.close() }
-                synchronized(wirelessResourceLock) {
-                    if (bluetoothSocket === socket) bluetoothSocket = null
-                }
-                connectionDiagnostic(
-                    "Bluetooth connect failed attempt=$attempt elapsedMs=${elapsedMillis(bluetoothStarted)} " +
-                        "failureClass=${diagnosticFailureClass(error)}",
-                )
-                lastError = error
-                if (
-                    isStaleWirelessRun(generation) ||
-                    BluetoothLinkCheck.socketServiceMissing(error) ||
-                    !adapter.isEnabled ||
-                    attempt == MAX_RFCOMM_ATTEMPTS
-                ) {
-                    logBluetoothConnectionSnapshot(device, "after-failure")
-                    closeAccessoryIap2Server()
-                    throw error
-                }
-                startedHotspot?.validateReady()
-                debugLog(
-                    "wireless RFCOMM connect attempt $attempt/$MAX_RFCOMM_ATTEMPTS failed " +
-                        "(${error.message}); retrying in ${RFCOMM_RETRY_DELAY_MILLIS}ms while keeping hotspot alive",
-                )
                 startAccessoryIap2Server(adapter, generation)
-                waitForBluetoothPeerChange(RFCOMM_RETRY_DELAY_MILLIS)
                 takeAcceptedBluetoothSocket()?.let { inbound ->
-                    closeAccessoryIap2Server()
                     return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
                 }
-                closeAccessoryIap2Server()
-                runCatching { selectWirelessBluetoothDevice(adapter) }.getOrNull()?.let { refreshed ->
-                    device = refreshed
+                if (!adapter.isEnabled) throw IOException(BluetoothRadioCheck.RADIO_OFF)
+
+                // When the iPhone has just established an ACL link (e.g., user tapped the TV in
+                // iOS CarPlay settings), iOS opens an inbound RFCOMM channel to IAP2_ACCESSORY_UUID
+                // within ~200-1500ms. Give that inbound connection a head start so an immediate
+                // outbound RFCOMM connect does not collide with iOS SDP/RFCOMM setup.
+                if (isBluetoothDeviceConnected(device)) {
+                    val inboundGraceDeadline = System.nanoTime() + 1_800L * 1_000_000L
+                    while (!isStaleWirelessRun(generation) && System.nanoTime() < inboundGraceDeadline) {
+                        takeAcceptedBluetoothSocket()?.let { inbound ->
+                            return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+                        }
+                        waitForBluetoothPeerChange(120L)
+                    }
+                }
+                takeAcceptedBluetoothSocket()?.let { inbound ->
+                    return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+                }
+
+                debugLog(
+                    "wireless RFCOMM connecting attempt=$attempt/$MAX_RFCOMM_ATTEMPTS " +
+                        "address=${device.address} uuid=$IAP2_IPHONE_UUID",
+                )
+                val socket = synchronized(wirelessResourceLock) {
+                    if (isStaleWirelessRun(generation)) {
+                        throw InterruptedIOException("Wireless RFCOMM connect cancelled")
+                    }
+                    device.createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                        .also { bluetoothSocket = it }
+                }
+                if (attempt == 1) {
+                    logBluetoothConnectionSnapshot(device, "before-connect")
+                }
+                val bluetoothStarted = System.nanoTime()
+                try {
+                    connectBluetoothSocket(socket, device.address)
+                    val connectMillis = elapsedMillis(bluetoothStarted)
+                    connectionDiagnostic(
+                        "Bluetooth connect completed attempt=$attempt elapsedMs=$connectMillis " +
+                            "socketReportedConnected=${runCatching { socket.isConnected }.getOrNull() ?: "unknown"}",
+                    )
+                    return ConnectedBluetoothLink(device, socket, connectMillis)
+                } catch (error: Throwable) {
+                    runCatching { socket.close() }
+                    synchronized(wirelessResourceLock) {
+                        if (bluetoothSocket === socket) bluetoothSocket = null
+                    }
+                    takeAcceptedBluetoothSocket()?.let { inbound ->
+                        return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+                    }
+                    connectionDiagnostic(
+                        "Bluetooth connect failed attempt=$attempt elapsedMs=${elapsedMillis(bluetoothStarted)} " +
+                            "failureClass=${diagnosticFailureClass(error)}",
+                    )
+                    lastError = error
+                    if (
+                        isStaleWirelessRun(generation) ||
+                        BluetoothLinkCheck.socketServiceMissing(error) ||
+                        !adapter.isEnabled ||
+                        attempt == MAX_RFCOMM_ATTEMPTS
+                    ) {
+                        logBluetoothConnectionSnapshot(device, "after-failure")
+                        throw error
+                    }
+                    startedHotspot?.validateReady()
+                    debugLog(
+                        "wireless RFCOMM connect attempt $attempt/$MAX_RFCOMM_ATTEMPTS failed " +
+                            "(${error.message}); retrying in ${RFCOMM_RETRY_DELAY_MILLIS}ms while keeping hotspot alive",
+                    )
+                    startAccessoryIap2Server(adapter, generation)
+                    waitForBluetoothPeerChange(RFCOMM_RETRY_DELAY_MILLIS)
+                    takeAcceptedBluetoothSocket()?.let { inbound ->
+                        return ConnectedBluetoothLink(inbound.remoteDevice, inbound, connectMillis = 250L)
+                    }
+                    runCatching { selectWirelessBluetoothDevice(adapter) }.getOrNull()?.let { refreshed ->
+                        device = refreshed
+                    }
                 }
             }
+            throw lastError ?: IOException("Could not connect RFCOMM to ${device.address}")
+        } finally {
+            closeAccessoryIap2Server()
         }
-        closeAccessoryIap2Server()
-        throw lastError ?: IOException("Could not connect RFCOMM to ${device.address}")
     }
 
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
@@ -3321,8 +3353,8 @@ class TvSessionEngine(
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val IAP2_ACCESSORY_UUID = "00000000-deca-fade-deca-deafdecacaff"
         private const val PAIRING_WAIT_TIMEOUT_MILLIS = 60_000L
-        private const val RFCOMM_RETRY_DELAY_MILLIS = 2_500L
-        private const val MAX_RFCOMM_ATTEMPTS = 3
+        private const val RFCOMM_RETRY_DELAY_MILLIS = 3_000L
+        private const val MAX_RFCOMM_ATTEMPTS = 5
         private const val PROFILE_A2DP_SINK = 11
         private const val PROFILE_HEADSET_CLIENT = 16
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
@@ -3336,7 +3368,7 @@ class TvSessionEngine(
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
         private const val WIRELESS_HANDOFF_TIMEOUT_MILLIS = 45_000L
-        private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 15_000L
+        private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 8_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         const val REENUMERATION_WAIT_MILLIS = 10_000L
         private const val IPHONE_NOT_LISTED_AFTER_MILLIS = 20_000L

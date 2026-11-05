@@ -149,11 +149,11 @@ class TvAvRenderPipeline(
     }
 
     /**
-     * Attaches or detaches the main TV [Surface] and updates the target decode dimensions.
+     * Attaches or detaches the main TV [Surface] without overwriting the negotiated stream
+     * decode dimensions (`videoWidth` / `videoHeight`).
      */
+    @Suppress("UNUSED_PARAMETER")
     fun setMainSurface(surface: Surface?, width: Int = videoWidth, height: Int = videoHeight) {
-        if (width > 0) videoWidth = width
-        if (height > 0) videoHeight = height
         synchronized(videoOwnershipLock) {
             if (videoClosed) return
             defaultSurface = surface

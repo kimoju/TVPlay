@@ -87,6 +87,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
         if (savedInstanceState == null && shouldAutoLaunchProjection(intent)) {
             val wireless = intent.getBooleanExtra("wireless", settings.connection.wirelessEnabled)
+            intent.removeExtra("wireless")
+            intent.removeExtra("auto_connect_token")
             launchProjectionStage(wireless)
         }
     }
@@ -100,6 +102,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
         if (shouldAutoLaunchProjection(intent)) {
             val wireless = intent.getBooleanExtra("wireless", settings.connection.wirelessEnabled)
+            intent.removeExtra("wireless")
+            intent.removeExtra("auto_connect_token")
             launchProjectionStage(wireless)
         }
     }
@@ -298,15 +302,6 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             ) {
                 showLanWifiConfigDialog(launchAfterSave = true)
                 return
-            }
-        } else {
-            val vpnPrepare = UsbTunnelVpnService.prepare(this)
-            if (vpnPrepare != null) {
-                val dialogStarted = runCatching {
-                    startActivityForResult(vpnPrepare, REQUEST_VPN_PERMISSION)
-                    true
-                }.getOrDefault(false)
-                if (dialogStarted) return
             }
         }
 

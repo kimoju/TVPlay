@@ -265,7 +265,7 @@ class TvStageActivity : Activity() {
         applyLaunchIntentMode(intent)
         val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
         if (
-            isIphoneUsbAttachment(intent) ||
+            (!currentWireless && isIphoneUsbAttachment(intent)) ||
             previousWireless != currentWireless ||
             PendingReconnect.isPending()
         ) {
@@ -275,14 +275,10 @@ class TvStageActivity : Activity() {
 
     private fun applyLaunchIntentMode(launchIntent: Intent?) {
         if (launchIntent == null) return
-        when {
-            isIphoneUsbAttachment(launchIntent) -> {
-                TvPreferencesStore.saveWirelessEnabled(this, false)
-            }
-            launchIntent.hasExtra("wireless") -> {
-                val wireless = launchIntent.getBooleanExtra("wireless", TvPreferencesStore.loadWirelessEnabled(this))
-                TvPreferencesStore.saveWirelessEnabled(this, wireless)
-            }
+        if (launchIntent.hasExtra("wireless")) {
+            val wireless = launchIntent.getBooleanExtra("wireless", TvPreferencesStore.loadWirelessEnabled(this))
+            launchIntent.removeExtra("wireless")
+            TvPreferencesStore.saveWirelessEnabled(this, wireless)
         }
     }
 
@@ -601,18 +597,6 @@ class TvStageActivity : Activity() {
                 runCatching {
                     requestPermissions(missingPermissions.toTypedArray(), REQUEST_STAGE_PERMISSIONS)
                 }
-            }
-        }
-
-        if (!wirelessEnabled && !vpnPromptedThisSession) {
-            val vpnPrepare = UsbTunnelVpnService.prepare(this)
-            if (vpnPrepare != null) {
-                vpnPromptedThisSession = true
-                val dialogStarted = runCatching {
-                    startActivityForResult(vpnPrepare, REQUEST_STAGE_VPN_PERMISSION)
-                    true
-                }.getOrDefault(false)
-                if (dialogStarted) return
             }
         }
 
@@ -1157,6 +1141,7 @@ class TvStageActivity : Activity() {
             .setTitle("切换 CarPlay 连接模式")
             .setSingleChoiceItems(options, currentIndex) { dialog, which ->
                 dialog.dismiss()
+                intent?.removeExtra("wireless")
                 when (which) {
                     0 -> {
                         TvPreferencesStore.saveWirelessEnabled(this, true)

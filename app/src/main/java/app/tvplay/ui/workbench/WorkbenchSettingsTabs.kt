@@ -135,6 +135,13 @@ class WorkbenchSettingsTabs(
     }
 
     fun selectCategory(category: SettingsCategory) {
+        val sameCategory = selectedCategory == category
+        val focusedTag = if (sameCategory) contentContainer.findFocus()?.tag as? String else null
+        val previousScrollY = if (sameCategory) {
+            (contentContainer.getChildAt(0) as? ScrollView)?.scrollY ?: 0
+        } else {
+            0
+        }
         selectedCategory = category
         tabButtons.forEach { (cat, chip) ->
             styleTabChip(chip, selected = cat == category, focused = chip.isFocused)
@@ -153,6 +160,12 @@ class WorkbenchSettingsTabs(
         }
         scroll.addView(page, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         contentContainer.addView(scroll, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        if (previousScrollY > 0) {
+            scroll.scrollTo(0, previousScrollY)
+        }
+        if (focusedTag != null) {
+            page.findViewWithTag<View>(focusedTag)?.requestFocus()
+        }
     }
 
     fun refresh() {
@@ -206,19 +219,58 @@ class WorkbenchSettingsTabs(
         setPadding(dp(2), dp(4), dp(4), dp(16))
 
         addView(sectionHeader("主连接方式（无线 / USB 有线）"))
+        val currentTransportKey = when {
+            !settings.connection.wirelessEnabled -> "USB"
+            settings.connection.wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> "LAN"
+            else -> "DIRECT"
+        }
+        val transportOptions = listOf(
+            "DIRECT" to "无线 · Wi-Fi Direct 直连",
+            "LAN" to "无线 · 家庭局域网",
+            "USB" to "USB 有线数据线直连",
+        )
+        fun applyTransportKey(key: String) {
+            when (key) {
+                "DIRECT" -> {
+                    settings.connection.wirelessEnabled = true
+                    settings.connection.wirelessHotspotMode = TvWirelessMode.WIFI_DIRECT
+                }
+                "LAN" -> {
+                    settings.connection.wirelessEnabled = true
+                    settings.connection.wirelessHotspotMode = TvWirelessMode.LAN_WIFI
+                }
+                "USB" -> {
+                    settings.connection.wirelessEnabled = false
+                }
+            }
+            onSettingChanged?.invoke()
+            refresh()
+        }
         addView(
             cycleCard(
                 title = "CarPlay 连接模式",
-                subtitle = "支持无线 CarPlay（蓝牙握手 + 高速 Wi-Fi）与 USB 有线数据线直连双模式",
-                options = listOf(
-                    true to "无线 CarPlay 投屏",
-                    false to "USB 有线数据线直连",
-                ),
-                current = settings.connection.wirelessEnabled,
-            ) { wireless ->
-                settings.connection.wirelessEnabled = wireless
-                onSettingChanged?.invoke()
-                refresh()
+                subtitle = "按确认键弹出模式选择，或按左右方向键 ◀▶ 切换无线 Wi-Fi Direct、家庭局域网与 USB 有线模式",
+                options = transportOptions,
+                current = currentTransportKey,
+                onClickOverride = {
+                    val dialogItems = arrayOf(
+                        "无线 · Wi-Fi Direct 5GHz 直连（推荐：免路由器密码，点对点直连）",
+                        "无线 · 家庭局域网模式（电视与 iPhone 连接同一 Wi-Fi 或网线）",
+                        "USB 有线数据线直连（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
+                    )
+                    val checkedIndex = transportOptions.indexOfFirst { it.first == currentTransportKey }.coerceAtLeast(0)
+                    android.app.AlertDialog.Builder(context)
+                        .setTitle("选择 CarPlay 连接模式")
+                        .setSingleChoiceItems(dialogItems, checkedIndex) { dialog, which ->
+                            dialog.dismiss()
+                            val chosenKey = transportOptions.getOrNull(which)?.first ?: return@setSingleChoiceItems
+                            applyTransportKey(chosenKey)
+                        }
+                        .setNegativeButton("取消", null)
+                        .show()
+                },
+            ) { key ->
+                applyTransportKey(key)
             },
             cardLayoutParams(),
         )
@@ -754,6 +806,7 @@ class WorkbenchSettingsTabs(
                 onToggle(current)
             },
         ).apply {
+            tag = "card:$title"
             addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
@@ -767,6 +820,7 @@ class WorkbenchSettingsTabs(
         subtitle: String,
         options: List<Pair<T, String>>,
         current: T,
+        onClickOverride: (() -> Unit)? = null,
         onSelected: (T) -> Unit,
     ): LinearLayout {
         var index = options.indexOfFirst { it.first == current }.coerceAtLeast(0)
@@ -793,7 +847,13 @@ class WorkbenchSettingsTabs(
         }
 
         return focusableCard(
-            onClick = { step(1) },
+            onClick = {
+                if (onClickOverride != null) {
+                    onClickOverride()
+                } else {
+                    step(1)
+                }
+            },
             onHorizontalKey = { keyCode ->
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
@@ -808,6 +868,7 @@ class WorkbenchSettingsTabs(
                 }
             },
         ).apply {
+            tag = "card:$title"
             addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
@@ -829,6 +890,7 @@ class WorkbenchSettingsTabs(
             setPadding(dp(14), dp(8), dp(14), dp(8))
         }
         return focusableCard(onClick = onClick).apply {
+            tag = "card:$title"
             addView(
                 cardTitleColumn(title, subtitle),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },

@@ -78,14 +78,7 @@
             android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
             android:theme="@style/Theme.TVPlay"
-            android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/usb_device_filter" />
-        </activity>
+            android:windowSoftInputMode="adjustResize" />
 
         <receiver
             android:name="app.tvplay.runtime.BootAutoStartReceiver"

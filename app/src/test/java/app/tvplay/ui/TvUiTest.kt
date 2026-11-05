@@ -377,15 +377,18 @@ class TvUiTest {
 
         stageController.pause().stop().destroy()
 
-        // 6. Exercise USB mode stage launch and onNewIntent mode switch
+        // 6. Exercise USB mode stage launch and verify USB_DEVICE_ATTACHED does not hijack wireless mode
         val usbStageController = Robolectric.buildActivity(
             TvStageActivity::class.java,
-            Intent(UsbManager.ACTION_USB_DEVICE_ATTACHED),
+            Intent().putExtra("wireless", false),
         ).setup()
         val usbStage = usbStageController.get()
         assertFalse(usbStage.isFinishing)
         assertFalse(TvPreferencesStore.loadWirelessEnabled(usbStage))
         usbStageController.newIntent(Intent().putExtra("wireless", true))
+        assertTrue(TvPreferencesStore.loadWirelessEnabled(usbStage))
+        // Spurious USB cable attachment while in Wireless mode must NOT flip wirelessEnabled back to false
+        usbStageController.newIntent(Intent(UsbManager.ACTION_USB_DEVICE_ATTACHED))
         assertTrue(TvPreferencesStore.loadWirelessEnabled(usbStage))
         usbStageController.pause().stop().destroy()
     }

@@ -100,29 +100,41 @@ class UsbTunnelVpnService : VpnService() {
             }
             require(hostMac.size == 6) { "hostMac must be 6 bytes" }
 
-            val tunFd = Builder()
-                .addAddress(linkLocal, LINK_PREFIX)
-                .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
-                .setSession(SESSION_NAME)
-                .setMtu(TUN_MTU)
-                .setBlocking(true)
-                // An empty app list routes every UID through this VPN. Scope it before establish;
-                // rejection must reach the existing attachment cleanup, never an unscoped retry.
-                .addAllowedApplication(packageName)
-                .establish()
-                ?: throw IOException("VpnService.establish returned null")
+            val tunFd = runCatching {
+                if (prepare(this) != null) {
+                    trySilentVpnPreConsent()
+                }
+                Builder()
+                    .addAddress(linkLocal, LINK_PREFIX)
+                    .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
+                    .setSession(SESSION_NAME)
+                    .setMtu(TUN_MTU)
+                    .setBlocking(true)
+                    // An empty app list routes every UID through this VPN. Scope it before establish;
+                    // rejection must reach the existing attachment cleanup, never an unscoped retry.
+                    .addAllowedApplication(packageName)
+                    .establish()
+            }.getOrNull()
             tun = tunFd
 
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
-                onTransportError(generation, listener, error)
-            }
-            ipv6Bridge.start()
-            bridge = ipv6Bridge
+            if (tunFd != null) {
+                val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
+                    onTransportError(generation, listener, error)
+                }
+                ipv6Bridge.start()
+                bridge = ipv6Bridge
 
-            startAirPlayServer(
-                generation,
-                AirPlayAttachment(scopedToTunnel(address, listener), config, identity, pairings, mfi, listener, media),
-            )
+                startAirPlayServer(
+                    generation,
+                    AirPlayAttachment(scopedToTunnel(address, listener), config, identity, pairings, mfi, listener, media),
+                )
+            } else {
+                val directBind = selectDirectUsbBindAddress(address, listener)
+                startAirPlayServer(
+                    generation,
+                    AirPlayAttachment(directBind, config, identity, pairings, mfi, listener, media),
+                )
+            }
             AttachResult.Started
         } catch (error: Exception) {
             releaseLocked()
@@ -204,6 +216,44 @@ class UsbTunnelVpnService : VpnService() {
      * "Invalid argument". Scope it to the tunnel that owns the address on every version; when no
      * interface owns it, keep the unscoped address and the platform's own behavior.
      */
+    private fun trySilentVpnPreConsent() {
+        val pkg = packageName
+        val commands = arrayOf(
+            arrayOf("sh", "-c", "cmd appops set $pkg ACTIVATE_VPN allow >/dev/null 2>&1 || appops set $pkg ACTIVATE_VPN allow >/dev/null 2>&1"),
+        )
+        for (cmd in commands) {
+            runCatching {
+                val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+                proc.waitFor(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                proc.destroyForcibly()
+            }
+        }
+    }
+
+    private fun selectDirectUsbBindAddress(
+        requestedAddress: Inet6Address,
+        listener: AirPlaySessionListener,
+    ): InetAddress {
+        val candidates = tunnelCandidates()
+        val usbIface = candidates.firstOrNull { candidate ->
+            val lower = candidate.name.lowercase()
+            lower.startsWith("usb") || lower.startsWith("ncm") || lower.startsWith("rndis") || lower.startsWith("eth")
+        }
+        if (usbIface != null) {
+            val linkLocal = usbIface.addresses.filterIsInstance<Inet6Address>().firstOrNull { it.isLinkLocalAddress }
+            if (linkLocal != null) {
+                runCatching {
+                    listener.onDebugLog("wired AirPlay direct USB interface bind iface=${usbIface.name} addr=${linkLocal.hostAddress}")
+                }
+                return Inet6Address.getByAddress(null, linkLocal.address, usbIface.index)
+            }
+        }
+        runCatching {
+            listener.onDebugLog("wired AirPlay running without VPN tunnel; binding wildcard IPv6 [::] for direct USB/local transport (requested=${requestedAddress.hostAddress})")
+        }
+        return InetAddress.getByName("::")
+    }
+
     private fun scopedToTunnel(address: Inet6Address, listener: AirPlaySessionListener): InetAddress {
         if (address.scopeId != 0) return address
         var interfaces = emptyList<TunnelCandidate>()

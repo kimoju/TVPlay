@@ -119,6 +119,7 @@ class WorkbenchHeroStage(
                 }
             },
         )
+        val focusedTag = root.findFocus()?.tag as? String
         root.removeAllViews()
         root.addView(
             view,
@@ -127,6 +128,9 @@ class WorkbenchHeroStage(
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
+        if (focusedTag != null) {
+            view.findViewWithTag<View>(focusedTag)?.requestFocus()
+        }
     }
 
     data class StageModel(
@@ -248,6 +252,7 @@ class WorkbenchHeroStage(
         heroCard.addView(space(dp(18)))
 
         val primaryButton = TvPlayButton(context).apply {
+            tag = "primary_launch"
             text = when {
                 model.sessionActive -> "进入全屏 CarPlay 画面"
                 model.sessionRunning -> "打开全屏投屏等待画面"
@@ -269,6 +274,7 @@ class WorkbenchHeroStage(
         if (model.sessionRunning || model.sessionActive) {
             heroCard.addView(space(dp(10)))
             val stopButton = TvPlayButton(context).apply {
+                tag = "stop_session"
                 text = "断开当前连接并停止后台服务"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 style(TvPlayButtonKind.TONAL_DANGER, palette, overlay = false)
@@ -290,6 +296,7 @@ class WorkbenchHeroStage(
 
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
+            tag = "mode_wireless"
             text = if (model.wirelessEnabled) "✓ 无线 CarPlay" else "无线 CarPlay"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             style(
@@ -300,6 +307,7 @@ class WorkbenchHeroStage(
             setOnClickListener { callbacks.onChooseTransportMode(true) }
         }
         val usbBtn = TvPlayButton(context).apply {
+            tag = "mode_usb"
             text = if (!model.wirelessEnabled) "✓ USB 有线直连" else "USB 有线直连"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             style(
@@ -324,6 +332,7 @@ class WorkbenchHeroStage(
             val switchRow = row()
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
             val directBtn = TvPlayButton(context).apply {
+                tag = "mode_direct"
                 text = if (isDirect) "✓ Wi-Fi Direct 直连" else "Wi-Fi Direct 直连"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 style(
@@ -334,6 +343,7 @@ class WorkbenchHeroStage(
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
             }
             val lanBtn = TvPlayButton(context).apply {
+                tag = "mode_lan"
                 text = if (!isDirect) "✓ 家庭局域网 / 网线" else "家庭局域网 / 网线"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 style(
@@ -383,7 +393,7 @@ class WorkbenchHeroStage(
                 stepItem(
                     "3",
                     "点击上方「立即启动 USB 有线 CarPlay 投屏」",
-                    "首次使用 USB 模式时，若系统弹出本地虚拟网卡授权请点击允许（仅用于读取 USB 网卡视频流）。",
+                    "无需开启 VPN，直接通过 USB 数据线建立高速投屏通道。",
                     palette,
                 ),
             )

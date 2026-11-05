@@ -775,6 +775,12 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
     private var readCounter = 0L
     private var writeCounter = 0L
 
+    internal fun currentWriteCounter(): Long = writeCounter
+
+    internal fun restoreWriteCounter(counter: Long) {
+        writeCounter = counter
+    }
+
     fun decrypt(buffer: ByteArray): Decrypted {
         val output = ArrayList<ByteArray>()
         var offset = 0

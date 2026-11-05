@@ -3,14 +3,17 @@ package app.tvplay.ui.workbench
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -73,6 +76,7 @@ class WorkbenchSettingsTabs(
     private val tabButtons = LinkedHashMap<SettingsCategory, TextView>()
     private val contentContainer = FrameLayout(context)
     private var selectedCategory: SettingsCategory = SettingsCategory.CONNECTION
+    private var isRebuilding: Boolean = false
 
     var onChooseIphoneClicked: (() -> Unit)? = null
     var onPairBluetoothClicked: (() -> Unit)? = null
@@ -135,36 +139,42 @@ class WorkbenchSettingsTabs(
     }
 
     fun selectCategory(category: SettingsCategory) {
-        val sameCategory = selectedCategory == category
-        val focusedTag = if (sameCategory) contentContainer.findFocus()?.tag as? String else null
-        val previousScrollY = if (sameCategory) {
-            (contentContainer.getChildAt(0) as? ScrollView)?.scrollY ?: 0
-        } else {
-            0
-        }
-        selectedCategory = category
-        tabButtons.forEach { (cat, chip) ->
-            styleTabChip(chip, selected = cat == category, focused = chip.isFocused)
-        }
-        contentContainer.removeAllViews()
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = true
-            isFillViewport = true
-            clipToPadding = false
-        }
-        val page = when (category) {
-            SettingsCategory.CONNECTION -> buildConnectionPage()
-            SettingsCategory.DISPLAY -> buildDisplayPage()
-            SettingsCategory.AUDIO -> buildAudioPage()
-            SettingsCategory.ABOUT -> buildAboutPage()
-        }
-        scroll.addView(page, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        contentContainer.addView(scroll, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        if (previousScrollY > 0) {
-            scroll.scrollTo(0, previousScrollY)
-        }
-        if (focusedTag != null) {
-            page.findViewWithTag<View>(focusedTag)?.requestFocus()
+        if (isRebuilding) return
+        isRebuilding = true
+        try {
+            val sameCategory = selectedCategory == category
+            val focusedTag = if (sameCategory) contentContainer.findFocus()?.tag as? String else null
+            val previousScrollY = if (sameCategory) {
+                (contentContainer.getChildAt(0) as? ScrollView)?.scrollY ?: 0
+            } else {
+                0
+            }
+            selectedCategory = category
+            tabButtons.forEach { (cat, chip) ->
+                styleTabChip(chip, selected = cat == category, focused = chip.isFocused)
+            }
+            contentContainer.removeAllViews()
+            val scroll = ScrollView(context).apply {
+                isVerticalScrollBarEnabled = true
+                isFillViewport = true
+                clipToPadding = false
+            }
+            val page = when (category) {
+                SettingsCategory.CONNECTION -> buildConnectionPage()
+                SettingsCategory.DISPLAY -> buildDisplayPage()
+                SettingsCategory.AUDIO -> buildAudioPage()
+                SettingsCategory.ABOUT -> buildAboutPage()
+            }
+            scroll.addView(page, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            contentContainer.addView(scroll, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            if (previousScrollY > 0) {
+                scroll.scrollTo(0, previousScrollY)
+            }
+            if (focusedTag != null) {
+                page.findViewWithTag<View>(focusedTag)?.requestFocus()
+            }
+        } finally {
+            isRebuilding = false
         }
     }
 
@@ -908,19 +918,31 @@ class WorkbenchSettingsTabs(
         onChanged: (String) -> Unit,
     ): LinearLayout {
         val card = LinearLayout(context).apply {
+            tag = "card:$title"
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
             background = cardBackground(focused = false)
         }
         card.addView(cardTitleColumn(title, subtitle), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+        var lastCommittedValue = initialValue
+        fun commitIfChanged(raw: String) {
+            if (isRebuilding) return
+            if (raw != lastCommittedValue) {
+                lastCommittedValue = raw
+                onChanged(raw)
+            }
+        }
+
         val editText = EditText(context).apply {
+            tag = "input:$title"
             setText(initialValue)
             this.hint = hint
             setTextColor(palette.textPrimary)
             setHintTextColor(palette.textSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             inputType = if (secret) {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             } else {
@@ -933,10 +955,28 @@ class WorkbenchSettingsTabs(
                 setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
             }
             setPadding(dp(12), dp(9), dp(12), dp(9))
+            addTextChangedListener(
+                object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        commitIfChanged(s?.toString().orEmpty())
+                    }
+                },
+            )
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
+                    commitIfChanged(text?.toString().orEmpty())
+                    false
+                } else {
+                    false
+                }
+            }
             setOnFocusChangeListener { _, hasFocus ->
+                if (isRebuilding) return@setOnFocusChangeListener
                 card.background = cardBackground(focused = hasFocus)
                 if (!hasFocus) {
-                    onChanged(text?.toString().orEmpty())
+                    commitIfChanged(text?.toString().orEmpty())
                 }
             }
         }

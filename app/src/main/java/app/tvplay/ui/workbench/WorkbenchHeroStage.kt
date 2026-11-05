@@ -119,7 +119,8 @@ class WorkbenchHeroStage(
                 }
             },
         )
-        val focusedTag = root.findFocus()?.tag as? String
+        val hadFocus = root.hasFocus()
+        val focusedTag = if (hadFocus) root.findFocus()?.tag as? String else null
         root.removeAllViews()
         root.addView(
             view,
@@ -128,7 +129,7 @@ class WorkbenchHeroStage(
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
-        if (focusedTag != null) {
+        if (hadFocus && focusedTag != null) {
             view.findViewWithTag<View>(focusedTag)?.requestFocus()
         }
     }

@@ -333,14 +333,17 @@ class Iap2LinkEngine(
                 handleSynchronization(it, header.sequence)
             }
         }
+        val hasData = (header.control and CONTROL_ACKNOWLEDGEMENT.inv()) == 0 && payload != null
         if ((header.control and CONTROL_ACKNOWLEDGEMENT) != 0) {
-            accumulatedAcknowledgements += 1
+            if (hasData) {
+                accumulatedAcknowledgements += 1
+            }
             handleAcknowledgement(header.acknowledgement, nowMillis)
         }
         if ((header.control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) != 0 && payload != null) {
             handleExtendedAcknowledgement(payload)
         }
-        if ((header.control and CONTROL_ACKNOWLEDGEMENT.inv()) == 0 && payload != null) {
+        if (hasData && payload != null) {
             handleData(Packet(header.sequence, header.sessionId, payload), nowMillis)
         }
         if (peerSynchronization.maxAcknowledgements > 0 &&
@@ -516,6 +519,10 @@ class Iap2LinkEngine(
     private fun writePacket(payload: ByteArray?, sequence: Int, control: Int, sessionId: Int) {
         if (state == State.DEAD) return
         accumulatedAcknowledgements = 0
+        if ((control and CONTROL_ACKNOWLEDGEMENT) != 0) {
+            lastAcknowledgedReceived = lastReceivedInOrder
+            sendAcknowledgementDeadlineMillis = null
+        }
         val length = payload?.size?.plus(HEADER_BYTES + CHECKSUM_BYTES) ?: HEADER_BYTES
         val header = ByteArray(HEADER_BYTES)
         header[0] = LINK_START_HIGH

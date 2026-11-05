@@ -1223,7 +1223,12 @@ class CarPlayMediaEngine(
             bridge.close()
             throw error
         }
-        streams[StreamKey(session, STREAM_TYPE_DATA)] = if (handler != null) bridge else tunnel
+        val newDataStream = if (handler != null) bridge else tunnel
+        streams.put(StreamKey(session, STREAM_TYPE_DATA), newDataStream)?.let { previous ->
+            if (previous !== newDataStream) {
+                runCatching { previous.close() }
+            }
+        }
         return linkedMapOf<String, Any?>("type" to STREAM_TYPE_DATA, "streamID" to 1L, "dataPort" to port)
             .apply {
                 stream["streamConnectionID"]?.let { connectionId ->

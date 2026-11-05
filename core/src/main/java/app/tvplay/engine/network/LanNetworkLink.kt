@@ -117,16 +117,16 @@ class LanNetworkLink(
                     val capabilities = network?.let { runCatching { connectivity.getNetworkCapabilities(it) }.getOrNull() }
                     val networkInfo = if (Build.VERSION.SDK_INT >= 31) capabilities?.transportInfo as? WifiInfo else null
                     @Suppress("DEPRECATION")
-                    val stationInfo = try { wifi.connectionInfo } catch (_: SecurityException) { null }
+                    val stationInfo = runCatching { wifi.connectionInfo }.getOrNull()
                     val info = listOfNotNull(networkInfo, stationInfo).firstOrNull { readableSsid(it) != null }
                         ?: networkInfo ?: stationInfo
                     liveSsid = readableSsid(info)
-                    frequency = info?.frequency?.takeIf { it > 0 }
-                    channel = frequency?.let(::wifiFrequencyMhzToChannel) ?: 0
-                    val rawBssid = info?.bssid
+                    frequency = runCatching { info?.frequency }.getOrNull()?.takeIf { it > 0 }
+                    channel = (frequency?.let(::wifiFrequencyMhzToChannel) ?: 0).takeIf { it in 0..255 } ?: 0
+                    val rawBssid = runCatching { info?.bssid }.getOrNull()
                     apBssid = accessPointAddress(rawBssid)
                     if (Build.VERSION.SDK_INT >= 31 && info != null) {
-                        observedSecurity = info.currentSecurityType
+                        observedSecurity = runCatching { info.currentSecurityType }.getOrDefault(-1)
                     }
                     val matchingScan = runCatching {
                         @Suppress("MissingPermission")
@@ -140,54 +140,33 @@ class LanNetworkLink(
                         scanCapabilities = matchingScan.capabilities
                         if (frequency == null && matchingScan.frequency > 0) {
                             frequency = matchingScan.frequency
-                            channel = wifiFrequencyMhzToChannel(matchingScan.frequency) ?: 0
+                            channel = (wifiFrequencyMhzToChannel(matchingScan.frequency) ?: 0).takeIf { it in 0..255 } ?: 0
                         }
                     }
                 }
                 val configuredSsid = ssid.trim().takeUnless { it.isEmpty() || it.equals("TVPlay", ignoreCase = true) }
-                val effectiveSsid = configuredSsid ?: liveSsid
                 if (configured == null && liveSsid != null && configuredSsid != null && !liveSsid.equals(configuredSsid, ignoreCase = false)) {
-                    throw WirelessStartupException(
-                        WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                        "已配置的 Wi-Fi 名称 ($configuredSsid) 与电视当前连接的 Wi-Fi ($liveSsid) 不一致，请在连接设置中核对",
-                    )
+                    onDiagnostic("Configured SSID ($configuredSsid) differs from connected Wi-Fi ($liveSsid); using configured SSID for iPhone")
                 }
-                if (effectiveSsid == null) {
-                    throw WirelessStartupException(
-                        WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                        "家庭局域网模式需要先在「连接与配对」中填写路由器 Wi-Fi 名称与密码，或点击下方「切换连接模式」改用「Wi-Fi Direct 直连」模式",
-                    )
-                }
-                if (configured == null) {
-                    val capsUpper = scanCapabilities?.uppercase().orEmpty()
-                    val scanIndicatesSecured = capsUpper.contains("WPA") ||
-                        capsUpper.contains("RSN") ||
-                        capsUpper.contains("PSK") ||
-                        capsUpper.contains("SAE") ||
-                        capsUpper.contains("WEP") ||
-                        capsUpper.contains("EAP")
-                    val scanIndicatesOpen = scanCapabilities != null && !scanIndicatesSecured
-                    val isKnownOpen = (Build.VERSION.SDK_INT >= 31 && observedSecurity == WifiInfo.SECURITY_TYPE_OPEN) ||
+                val capsUpper = scanCapabilities?.uppercase().orEmpty()
+                val scanIndicatesSecured = capsUpper.contains("WPA") ||
+                    capsUpper.contains("RSN") ||
+                    capsUpper.contains("PSK") ||
+                    capsUpper.contains("SAE") ||
+                    capsUpper.contains("WEP") ||
+                    capsUpper.contains("EAP")
+                val scanIndicatesOpen = scanCapabilities != null && !scanIndicatesSecured
+                val isKnownOpen = configured == null && (
+                    (Build.VERSION.SDK_INT >= 31 && observedSecurity == WifiInfo.SECURITY_TYPE_OPEN) ||
                         (observedSecurity == -1 && scanIndicatesOpen)
-                    val isKnownSecured = (
-                        Build.VERSION.SDK_INT >= 31 &&
-                            (observedSecurity == WifiInfo.SECURITY_TYPE_PSK || observedSecurity == WifiInfo.SECURITY_TYPE_SAE)
-                        ) || scanIndicatesSecured
-
-                    if (isKnownOpen && passphrase.isNotEmpty()) {
-                        throw WirelessStartupException(
-                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                            "当前连接的 Wi-Fi ($effectiveSsid) 为开放网络（无密码），请在连接设置中清空 Wi-Fi 密码",
-                        )
-                    }
-                    if (passphrase.isEmpty() && (isKnownSecured || (!isKnownOpen && configuredSsid == null))) {
-                        throw WirelessStartupException(
-                            WirelessStartupFailure.HOTSPOT_CONFIGURATION,
-                            "当前连接的路由器 Wi-Fi ($effectiveSsid) 需要密码才能下发给 iPhone，请先在「连接与配对」中填写该 Wi-Fi 密码，或点击下方「切换连接模式」改用免密码的「Wi-Fi Direct 直连」",
-                        )
-                    }
+                    )
+                val finalSsid = configuredSsid ?: liveSsid ?: name.ifBlank { "LAN" }
+                val effectivePassphrase = if (isKnownOpen) "" else passphrase
+                val effectiveSecurity = if (effectivePassphrase.isEmpty()) {
+                    Iap2WirelessSecurity.NONE
+                } else {
+                    Iap2WirelessSecurity.WPA_WPA2
                 }
-                val finalSsid = effectiveSsid
 
                 synchronized(lock) {
                     check(!closed) { "ExistingWifiManager is closed" }
@@ -197,9 +176,14 @@ class LanNetworkLink(
                     interfaceIndex = iface.index
                     interfaceName = name
                     val request = requestWithoutDefaultCapabilities()
-                    if (configured == null) {
-                        request.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                        request.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    if (configured == null && network != null) {
+                        val activeCaps = runCatching { connectivity.getNetworkCapabilities(network) }.getOrNull()
+                        when {
+                            activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ->
+                                request.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                            activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true ->
+                                request.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                        }
                     }
                     runCatching {
                         connectivity.registerNetworkCallback(
@@ -215,13 +199,13 @@ class LanNetworkLink(
                 }
                 onDiagnostic(
                     "Existing LAN attached iface=$name host=${address.hostAddress} " +
-                        "networkNameReadable=${liveSsid != null} channel=$channel security=${security()} " +
+                        "networkNameReadable=${liveSsid != null} channel=$channel security=$effectiveSecurity " +
                         "receiverIdentity=saved" + if (configured != null) " configuredInterface=$configured" else "",
                 )
                 return WirelessHotspotInfo(
                     ssid = finalSsid,
-                    passphrase = passphrase,
-                    security = security(),
+                    passphrase = effectivePassphrase,
+                    security = effectiveSecurity,
                     channel = channel,
                     frequencyMHz = frequency,
                     bssid = null,
@@ -296,6 +280,7 @@ class LanNetworkLink(
     override fun close() {
         synchronized(lock) {
             closed = true
+            selected = null
             if (callbackRegistered) {
                 runCatching { connectivity.unregisterNetworkCallback(callback) }
                 callbackRegistered = false
@@ -323,12 +308,29 @@ class LanNetworkLink(
             }
             val networkInfo = if (Build.VERSION.SDK_INT >= 31) activeCap?.transportInfo as? WifiInfo else null
             @Suppress("DEPRECATION")
-            val stationInfo = try { wifi?.connectionInfo } catch (_: SecurityException) { null }
+            val stationInfo = runCatching { wifi?.connectionInfo }.getOrNull()
             listOfNotNull(networkInfo, stationInfo).firstNotNullOfOrNull { info ->
                 info.ssid?.removeSurrounding("\"")
                     ?.takeUnless { it == WifiManager.UNKNOWN_SSID || it.isBlank() }
             }
         }.getOrNull()
+
+        fun hasActiveLanNetwork(context: Context): Boolean = runCatching {
+            val app = context.applicationContext
+            val connectivity = app.getSystemService(ConnectivityManager::class.java)
+            val hasNetwork = connectivity?.allNetworks?.any { net ->
+                val caps = runCatching { connectivity.getNetworkCapabilities(net) }.getOrNull()
+                caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+            } == true
+            if (hasNetwork) return@runCatching true
+            Collections.list(NetworkInterface.getNetworkInterfaces()).any { iface ->
+                iface.isUp && !iface.isLoopback && !iface.isVirtual &&
+                    (iface.name.startsWith("wlan") || iface.name.startsWith("eth")) &&
+                    wirelessHostAddress(Collections.list(iface.inetAddresses), iface.index) != null
+            }
+        }.getOrDefault(false)
     }
 }
 

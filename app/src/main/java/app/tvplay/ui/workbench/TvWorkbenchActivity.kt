@@ -130,10 +130,19 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         }
     }
 
+    @SuppressLint("GestureBackNavigation")
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
             launchProjectionStage(settings.connection.wirelessEnabled)
             return true
+        }
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            val focused = currentFocus
+            if (focused is EditText) {
+                focused.clearFocus()
+                stagePane.primaryLaunchButton.requestFocus()
+                return true
+            }
         }
         return super.onKeyDown(keyCode, event)
     }
@@ -298,7 +307,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 settings.connection.wirelessHotspotMode == TvWirelessMode.LAN_WIFI &&
                 settings.connection.existingWifiSsid.isBlank() &&
                 settings.connection.existingWifiInterface.isBlank() &&
-                LanNetworkLink.detectConnectedWifiSsid(this) == null
+                LanNetworkLink.detectConnectedWifiSsid(this) == null &&
+                !LanNetworkLink.hasActiveLanNetwork(this)
             ) {
                 showLanWifiConfigDialog(launchAfterSave = true)
                 return
@@ -523,15 +533,9 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             .setPositiveButton("保存并启动局域网投屏") { _, _ ->
                 val ssid = ssidInput.text?.toString()?.trim().orEmpty()
                 val pass = passInput.text?.toString().orEmpty()
-                if (ssid.isBlank()) {
-                    Toast.makeText(
-                        this,
-                        "请填写路由器 Wi-Fi 名称，或点击「改用 Wi-Fi Direct 直连」",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    return@setPositiveButton
+                if (ssid.isNotBlank() || pass.isNotBlank()) {
+                    settings.connection.saveExistingWifiCredentials(ssid, pass)
                 }
-                settings.connection.saveExistingWifiCredentials(ssid, pass)
                 refreshWorkbenchStatus()
                 settingsPane.refresh()
                 if (launchAfterSave) {

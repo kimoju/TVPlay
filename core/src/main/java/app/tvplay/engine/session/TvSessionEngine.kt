@@ -240,6 +240,10 @@ class FirstTcpWatchdog(
 
     fun sessionEstablished(): Boolean = synchronized(lock) { !terminated }
 
+    fun isDisarmed(): Boolean = synchronized(lock) { disarmed && !terminated }
+
+    fun isArmed(): Boolean = synchronized(lock) { startSentAtNanos != null && !terminated }
+
     fun terminate() {
         val cancel = synchronized(lock) {
             if (terminated) return
@@ -1593,7 +1597,11 @@ class TvSessionEngine(
                             "wirelessActive=${wirelessActiveReported.get()}",
                     )
                     if (!wirelessActiveReported.get()) {
-                        if (!isWirelessSessionOrHandoffActive(generation)) {
+                        val handoffInProgress = isWirelessSessionOrHandoffActive(generation) ||
+                            result.carPlayStartSessionsSent > 0 ||
+                            watchdog.isDisarmed() ||
+                            watchdog.isArmed()
+                        if (!handoffInProgress) {
                             throw IOException(
                                 "Wireless CarPlay control channel closed before tunnel iAP2 ready",
                             )
@@ -1607,7 +1615,11 @@ class TvSessionEngine(
                 }
                 Iap2WirelessControlTerminal.TIMED_OUT ->
                     if (!wirelessActiveReported.get()) {
-                        if (isWirelessSessionOrHandoffActive(generation)) {
+                        val handoffInProgress = isWirelessSessionOrHandoffActive(generation) ||
+                            result.carPlayStartSessionsSent > 0 ||
+                            watchdog.isDisarmed() ||
+                            watchdog.isArmed()
+                        if (handoffInProgress) {
                             debugLog(
                                 "wireless Bluetooth bootstrap timed out while Wi-Fi AirPlay session is active; " +
                                     "keeping Wi-Fi session alive",
@@ -1622,7 +1634,10 @@ class TvSessionEngine(
             if (isStaleWirelessRun(generation)) {
                 return
             }
-            if (isWirelessSessionOrHandoffActive(generation) && error !is Error) {
+            val handoffInProgress = isWirelessSessionOrHandoffActive(generation) ||
+                firstTcpWatchdog?.isDisarmed() == true ||
+                firstTcpWatchdog?.isArmed() == true
+            if (handoffInProgress && error !is Error) {
                 debugLog("wireless RFCOMM control ended while Wi-Fi AirPlay session is active: ${error.message}")
                 onWirelessBootstrapEndedWithActiveSession(generation)
             } else {
@@ -1683,7 +1698,11 @@ class TvSessionEngine(
             debugLog("Could not open the tunneled iAP2 link", error)
             return false
         }
+        val previousChannel = wirelessTunnelChannel
         wirelessTunnelChannel = channel
+        if (previousChannel != null && previousChannel !== channel) {
+            closeBestEffort("previous tunneled iAP2 link") { previousChannel.close() }
+        }
         val generation = wirelessGeneration.get()
         debugLog("wireless iAP2 runtime tunnel control starting")
         return try {

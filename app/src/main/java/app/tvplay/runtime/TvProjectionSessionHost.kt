@@ -322,6 +322,11 @@ object TvProjectionSessionHost {
         message == context.getString(R.string.could_not_start_carplay_return_to_diplay_and_check_app_per) -> message
         message == context.getString(R.string.waiting_for_mfi_coprocessor) ||
             message == context.getString(R.string.requesting_mfi_usb_permission) -> message
+        message == context.getString(R.string.existing_wifi_attaching) ||
+            message == context.getString(R.string.starting_wireless_hotspot) ||
+            message == context.getString(R.string.starting_airplay_service) ||
+            message.startsWith("局域网网络已就绪") ||
+            message.startsWith("无线直连已就绪") -> message
         message == context.getString(R.string.hotspot_network_not_ready) ||
             message == context.getString(R.string.first_tcp_timeout) ||
             message == context.getString(R.string.wifi_direct_refused_beside_hotspot) ||

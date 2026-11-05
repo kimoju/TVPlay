@@ -164,7 +164,7 @@ class BonjourServiceAdvertiser(
     private val discoveryEvents = LinkedBlockingQueue<CarPlayBonjourEvent.Discovery>(32)
     private val seenServices = ConcurrentHashMap.newKeySet<String>()
     private val lifecycleLock = Any()
-    private val localAdvertisedAddress = advertisedHostAddress()
+    private val localAdvertisedAddress = advertisedHostAddress(additionalAddresses)
     private val advertisedAddresses = (listOfNotNull(localAdvertisedAddress) + additionalAddresses).distinct()
     @Volatile private var publishedFamilies = "none"
     private val addedCount = AtomicInteger()
@@ -180,9 +180,12 @@ class BonjourServiceAdvertiser(
             "bonjourAddressMismatch=${addressMismatchCount.get()} connectProbes=${probeCount.get()} " +
             "connectProbe2xx=${successfulProbeCount.get()} lastProbe=${lastProbe.get()} " +
             "mdnsFamilies=$publishedFamilies"
-    private val multicastLock = (context.applicationContext ?: context)
-        .getSystemService(WifiManager::class.java)
-        .createMulticastLock("carplay-bonjour").apply { setReferenceCounted(false) }
+    private val multicastLock = runCatching {
+        (context.applicationContext ?: context)
+            .getSystemService(WifiManager::class.java)
+            ?.createMulticastLock("carplay-bonjour")
+            ?.apply { setReferenceCounted(false) }
+    }.getOrNull()
 
     private var started = false
     @Volatile
@@ -283,29 +286,47 @@ class BonjourServiceAdvertiser(
             if (started) return
             started = true
             try {
-                multicastLock.acquire()
+                runCatching { multicastLock?.acquire() }
                 if (useInterfaceMdns) {
                     requireNotNull(localAdvertisedAddress) {
                         "Interface mDNS requires a local advertised address"
                     }
                     // A JmDNS instance joins only its address family's multicast group.
                     val hostName = "carplay-${config.deviceId.replace(":", "")}"
+                    val startedAddresses = ArrayList<InetAddress>(advertisedAddresses.size)
+                    var lastMdnsError: Throwable? = null
                     for (address in advertisedAddresses) {
-                        // Cache the local name to avoid reverse DNS while preserving the IPv6 scope.
-                        val mdnsAddress = if (address is Inet6Address) {
-                            Inet6Address.getByAddress(hostName, address.address, address.scopeId)
-                        } else {
-                            InetAddress.getByAddress(hostName, address.address)
+                        try {
+                            // Cache the local name to avoid reverse DNS while preserving the IPv6 scope.
+                            val mdnsAddress = if (address is Inet6Address) {
+                                val scopedIface = address.scopedInterface
+                                if (scopedIface != null) {
+                                    Inet6Address.getByAddress(hostName, address.address, scopedIface)
+                                } else {
+                                    Inet6Address.getByAddress(hostName, address.address, address.scopeId)
+                                }
+                            } else {
+                                InetAddress.getByAddress(hostName, address.address)
+                            }
+                            val dns = JmDNS.create(mdnsAddress, hostName)
+                            interfaceMdns.add(dns)
+                            dns.addServiceListener("$CARPLAY_CONTROL_SERVICE_TYPE.local.", interfaceListener)
+                            dns.registerService(ServiceInfo.create(
+                                "$AIRPLAY_SERVICE_TYPE.local.", config.deviceName, config.port,
+                                0, 0, CarPlayBonjourProtocol.airPlayTxtRecords(config, identity),
+                            ))
+                            startedAddresses.add(address)
+                        } catch (error: Throwable) {
+                            lastMdnsError = error
+                            Log.w(TAG, "Interface mDNS start skipped for $address", error)
                         }
-                        val dns = JmDNS.create(mdnsAddress, hostName)
-                        interfaceMdns.add(dns)
-                        dns.addServiceListener("$CARPLAY_CONTROL_SERVICE_TYPE.local.", interfaceListener)
-                        dns.registerService(ServiceInfo.create(
-                            "$AIRPLAY_SERVICE_TYPE.local.", config.deviceName, config.port,
-                            0, 0, CarPlayBonjourProtocol.airPlayTxtRecords(config, identity),
-                        ))
                     }
-                    publishedFamilies = advertisedAddresses.joinToString(",") {
+                    if (interfaceMdns.isEmpty()) {
+                        val cause = lastMdnsError
+                        if (cause is Exception) throw cause
+                        throw IllegalStateException("Interface mDNS failed to start on any address", cause)
+                    }
+                    publishedFamilies = startedAddresses.joinToString(",") {
                         if (it is Inet4Address) "IPv4" else "IPv6"
                     }
                 } else {
@@ -322,7 +343,7 @@ class BonjourServiceAdvertiser(
                     isDaemon = true
                     start()
                 }
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 closed = true
                 if (registrationRequested) {
                     registrationRequested = false
@@ -337,8 +358,10 @@ class BonjourServiceAdvertiser(
                 interfaceMdns.forEach { dns -> runCatching { dns.close() } }
                 interfaceMdns.clear()
                 publishedFamilies = "none"
-                if (multicastLock.isHeld) multicastLock.release()
-                throw error
+                runCatching { if (multicastLock?.isHeld == true) multicastLock.release() }
+                if (error is Exception) throw error
+                if (error is Error) throw error
+                throw RuntimeException(error)
             }
         }
     }
@@ -368,7 +391,7 @@ class BonjourServiceAdvertiser(
             workerToJoin = worker
             worker = null
             workerToJoin?.interrupt()
-            if (multicastLock.isHeld) multicastLock.release()
+            runCatching { if (multicastLock?.isHeld == true) multicastLock.release() }
         }
         dnsToClose.forEach { dns -> runCatching { dns.close() } }
         workerToJoin?.let(::joinWorker)
@@ -392,10 +415,13 @@ class BonjourServiceAdvertiser(
         )
     }
 
-    private fun advertisedHostAddress(): InetAddress? {
+    private fun advertisedHostAddress(additionalAddresses: List<InetAddress> = emptyList()): InetAddress? {
         val value = advertisedHost?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val normalized = value.removeSurrounding("[", "]")
+        val rawHost = normalized.substringBefore('%')
+        val scopeToken = normalized.substringAfter('%', "").takeIf { it.isNotEmpty() }
         val address = try {
-            InetAddress.getByName(value.removeSurrounding("[", "]"))
+            InetAddress.getByName(rawHost)
         } catch (error: Exception) {
             throw IllegalArgumentException("Invalid advertised host: $value", error)
         }
@@ -404,6 +430,25 @@ class BonjourServiceAdvertiser(
         }
         require(address !is Inet6Address || address.isLinkLocalAddress) {
             "advertisedHost must be link-local IPv6 or IPv4"
+        }
+        if (address is Inet6Address && address.scopeId == 0) {
+            val matchingScoped = additionalAddresses.filterIsInstance<Inet6Address>()
+                .firstOrNull { it.address.contentEquals(address.address) && it.scopeId > 0 }
+            if (matchingScoped != null) {
+                return matchingScoped
+            }
+            if (scopeToken != null) {
+                val numericScope = scopeToken.toIntOrNull()
+                if (numericScope != null && numericScope > 0) {
+                    return runCatching { Inet6Address.getByAddress(null, address.address, numericScope) }
+                        .getOrDefault(address)
+                }
+                val iface = runCatching { java.net.NetworkInterface.getByName(scopeToken) }.getOrNull()
+                if (iface != null) {
+                    return runCatching { Inet6Address.getByAddress(null, address.address, iface) }
+                        .getOrDefault(address)
+                }
+            }
         }
         return address
     }

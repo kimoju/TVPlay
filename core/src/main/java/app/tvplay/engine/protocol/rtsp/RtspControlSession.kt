@@ -246,13 +246,33 @@ class RtspControlSession(
     /** Stable identity of the usable primary screen; replaced on SETUP, absent after teardown/close. */
     fun mainScreenSessionToken(): Any? = if (closed.get()) null else mainScreenToken
 
-    fun sendCommand(command: Map<String, Any?>): Boolean = synchronized(eventWriteLock) {
-        sendCommandLocked(command)
+    fun sendCommand(command: Map<String, Any?>): Boolean {
+        if (isMainThread()) {
+            val canQueue = synchronized(eventWriteLock) {
+                eventSocket != null && eventCipher != null && !closed.get()
+            }
+            if (!canQueue) return false
+            return runCatching {
+                eventWriteExecutor.execute {
+                    synchronized(eventWriteLock) {
+                        if (!closed.get()) {
+                            sendCommandLocked(command)
+                        }
+                    }
+                }
+                true
+            }.getOrDefault(false)
+        }
+        return synchronized(eventWriteLock) {
+            sendCommandLocked(command)
+        }
     }
 
     private fun sendCommandLocked(command: Map<String, Any?>, extraHeaders: String = ""): Boolean {
         val socket = eventSocket ?: return false
         val cipher = eventCipher ?: return false
+        val savedCseq = eventCseq
+        val savedWriteCounter = cipher.currentWriteCounter()
         eventCseq++
         val body = BplistCodec.encode(command)
         val head = "POST /command RTSP/1.0\r\n" + extraHeaders +
@@ -269,15 +289,15 @@ class RtspControlSession(
                 true
             } catch (mainThreadError: Exception) {
                 if (mainThreadError.javaClass.name == "android.os.NetworkOnMainThreadException") {
+                    // Roll back the CSeq and AEAD write nonce before releasing eventWriteLock so
+                    // another thread cannot encrypt and transmit nonce N+1 ahead of nonce N.
+                    eventCseq = savedCseq
+                    cipher.restoreWriteCounter(savedWriteCounter)
                     runCatching {
                         eventWriteExecutor.execute {
                             synchronized(eventWriteLock) {
                                 if (eventSocket === socket && !closed.get()) {
-                                    runCatching {
-                                        val out = socket.getOutputStream()
-                                        out.write(bytes)
-                                        out.flush()
-                                    }
+                                    sendCommandLocked(command, extraHeaders)
                                 }
                             }
                         }
@@ -379,10 +399,34 @@ class RtspControlSession(
         }
     }
 
-    fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
-        pendingNightMode = night
-        sendPendingNightModeLocked()
+    fun setNightMode(night: Boolean): Boolean {
+        if (isMainThread()) {
+            val canSendNow = synchronized(eventWriteLock) {
+                pendingNightMode = night
+                eventSocket != null && eventCipher != null && !closed.get()
+            }
+            if (!canSendNow) return false
+            return runCatching {
+                eventWriteExecutor.execute {
+                    synchronized(eventWriteLock) {
+                        if (!closed.get()) {
+                            sendPendingNightModeLocked()
+                        }
+                    }
+                }
+                true
+            }.getOrDefault(false)
+        }
+        return synchronized(eventWriteLock) {
+            pendingNightMode = night
+            sendPendingNightModeLocked()
+        }
     }
+
+    private fun isMainThread(): Boolean = runCatching {
+        val mainLooper = android.os.Looper.getMainLooper()
+        mainLooper != null && mainLooper.thread === Thread.currentThread()
+    }.getOrDefault(false)
 
     private fun sendPendingNightModeLocked(): Boolean {
         val night = pendingNightMode ?: return true

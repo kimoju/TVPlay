@@ -71,9 +71,17 @@ fun isInternalAirPlayPeer(peer: InetAddress, local: InetAddress): Boolean {
 
 private fun InetAddress.isPrivateOrLocalAirPlayPeer(): Boolean {
     if (isLinkLocalAddress || isSiteLocalAddress) return true
-    if (this is java.net.Inet6Address) {
-        val raw = address
-        if (raw.isNotEmpty() && (raw[0].toInt() and 0xfe) == 0xfc) return true
+    val raw = address
+    if (this is java.net.Inet4Address && raw.size == 4) {
+        val b0 = raw[0].toInt() and 0xff
+        val b1 = raw[1].toInt() and 0xff
+        // RFC 6598 Carrier-Grade NAT / Tailscale / enterprise LAN subnet 100.64.0.0/10
+        if (b0 == 100 && (b1 and 0xc0) == 64) return true
+    }
+    if (this is java.net.Inet6Address && raw.isNotEmpty()) {
+        val first = raw[0].toInt() and 0xff
+        // Unique Local IPv6 (fc00::/7) or Global Unicast IPv6 (2000::/3) assigned by dual-stack LAN SLAAC/DHCPv6
+        if ((first and 0xfe) == 0xfc || (first and 0xe0) == 0x20) return true
     }
     return false
 }

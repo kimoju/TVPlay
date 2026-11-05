@@ -163,6 +163,8 @@ class BonjourServiceAdvertiser(
     private val interfaceServices = LinkedBlockingQueue<Pair<CarPlayBonjourEndpoint, InetAddress>>()
     private val discoveryEvents = LinkedBlockingQueue<CarPlayBonjourEvent.Discovery>(32)
     private val seenServices = ConcurrentHashMap.newKeySet<String>()
+    private val discoveredInterfaceEndpoints = ConcurrentHashMap<String, Pair<CarPlayBonjourEndpoint, InetAddress>>()
+    private val discoveredNsdServices = ConcurrentHashMap<String, NsdServiceInfo>()
     private val lifecycleLock = Any()
     private val localAdvertisedAddress = advertisedHostAddress(additionalAddresses)
     private val advertisedAddresses = (listOfNotNull(localAdvertisedAddress) + additionalAddresses).distinct()
@@ -207,7 +209,9 @@ class BonjourServiceAdvertiser(
         }
 
         override fun serviceRemoved(event: ServiceEvent) {
-            seenServices.remove("${event.name}|${event.dns.inetAddress is Inet4Address}")
+            val key = "${event.name}|${event.dns.inetAddress is Inet4Address}"
+            seenServices.remove(key)
+            discoveredInterfaceEndpoints.remove(key)
         }
 
         override fun serviceResolved(event: ServiceEvent) {
@@ -226,12 +230,14 @@ class BonjourServiceAdvertiser(
                 ))
                 return
             }
-            // A failed probe on one family must not suppress the other family's endpoint.
-            if (!seenServices.add("${event.name}|${address is Inet4Address}")) return
+            val key = "${event.name}|${address is Inet4Address}"
             val endpoint = CarPlayBonjourEndpoint(
                 event.name, address.hostAddress ?: return, info.port,
                 info.getPropertyString("id"),
             )
+            discoveredInterfaceEndpoints[key] = endpoint to address
+            // A failed probe on one family must not suppress the other family's endpoint.
+            if (!seenServices.add(key)) return
             interfaceServices.offer(endpoint to address)
         }
     }
@@ -268,6 +274,7 @@ class BonjourServiceAdvertiser(
             val name = serviceInfo.serviceName ?: return
             val type = serviceInfo.serviceType ?: CARPLAY_CONTROL_SERVICE_TYPE
             val key = "$type|$name"
+            discoveredNsdServices[key] = serviceInfo
             if (!seenServices.add(key)) return
             services.offer(serviceInfo)
         }
@@ -275,7 +282,64 @@ class BonjourServiceAdvertiser(
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
             val name = serviceInfo.serviceName ?: return
             val type = serviceInfo.serviceType ?: CARPLAY_CONTROL_SERVICE_TYPE
-            seenServices.remove("$type|$name")
+            val key = "$type|$name"
+            seenServices.remove(key)
+            discoveredNsdServices.remove(key)
+        }
+    }
+
+    /**
+     * Re-triggers `_carplay-ctrl._tcp` discovery and re-probes any endpoints discovered before
+     * `0x4301` (`CarPlayStartSession`) was sent over Bluetooth (common on shared LAN networks).
+     */
+    fun onStartSessionSent() {
+        val dnsSnapshot = synchronized(lifecycleLock) {
+            if (closed || !started) return
+            seenServices.clear()
+            discoveredInterfaceEndpoints.forEach { (key, pair) ->
+                if (seenServices.add(key)) {
+                    interfaceServices.offer(pair)
+                }
+            }
+            discoveredNsdServices.forEach { (key, info) ->
+                if (seenServices.add(key)) {
+                    services.offer(info)
+                }
+            }
+            interfaceMdns.toList()
+        }
+        if (dnsSnapshot.isNotEmpty()) {
+            Thread(
+                {
+                    dnsSnapshot.forEach { dns ->
+                        runCatching {
+                            val infos = dns.list("$CARPLAY_CONTROL_SERVICE_TYPE.local.", 1_200L)
+                            for (info in infos) {
+                                if (closed) break
+                                val address = info.inetAddresses.firstOrNull {
+                                    (it is Inet4Address) == (dns.inetAddress is Inet4Address)
+                                }?.let(::applyLocalScope) ?: continue
+                                if (info.port !in 1..65535) continue
+                                val key = "${info.name}|${address is Inet4Address}"
+                                val endpoint = CarPlayBonjourEndpoint(
+                                    info.name,
+                                    address.hostAddress ?: continue,
+                                    info.port,
+                                    info.getPropertyString("id"),
+                                )
+                                discoveredInterfaceEndpoints[key] = endpoint to address
+                                if (seenServices.add(key)) {
+                                    interfaceServices.offer(endpoint to address)
+                                }
+                            }
+                        }
+                    }
+                },
+                "carplay-bonjour-refresh",
+            ).apply {
+                isDaemon = true
+                start()
+            }
         }
     }
 
@@ -334,6 +398,21 @@ class BonjourServiceAdvertiser(
                     publishedFamilies = startedAddresses.joinToString(",") {
                         if (it is Inet4Address) "IPv4" else "IPv6"
                     }
+                    // Also register and discover via Android's system NsdManager (mdnsd) when available
+                    // so home routers / Android TV firmware that intercept UDP 5353 in mdnsd still
+                    // answer iPhone _airplay._tcp queries and discover _carplay-ctrl._tcp.
+                    runCatching {
+                        registerAirPlay()
+                        registrationRequested = true
+                    }
+                    runCatching {
+                        nsdManager.discoverServices(
+                            CARPLAY_CONTROL_SERVICE_TYPE,
+                            NsdManager.PROTOCOL_DNS_SD,
+                            discoveryListener,
+                        )
+                        discoveryRequested = true
+                    }
                 } else {
                     registerAirPlay()
                     registrationRequested = true
@@ -390,6 +469,8 @@ class BonjourServiceAdvertiser(
             services.clear()
             interfaceServices.clear()
             discoveryEvents.clear()
+            discoveredInterfaceEndpoints.clear()
+            discoveredNsdServices.clear()
             dnsToClose = interfaceMdns.toList()
             interfaceMdns.clear()
             publishedFamilies = "none"
@@ -471,11 +552,19 @@ class BonjourServiceAdvertiser(
             if (useInterfaceMdns) {
                 try {
                     while (true) emit(discoveryEvents.poll() ?: break)
-                    val (endpoint, address) = interfaceServices.poll(
-                        WORKER_POLL_MILLIS, TimeUnit.MILLISECONDS,
-                    ) ?: continue
-                    emit(CarPlayBonjourEvent.Resolved(endpoint))
-                    probe(endpoint, address)?.let(::emit)
+                    val interfacePair = interfaceServices.poll(
+                        100L, TimeUnit.MILLISECONDS,
+                    )
+                    if (interfacePair != null) {
+                        val (endpoint, address) = interfacePair
+                        emit(CarPlayBonjourEvent.Resolved(endpoint))
+                        probe(endpoint, address)?.let(::emit)
+                        continue
+                    }
+                    val nsdService = services.poll()
+                    if (nsdService != null && !closed) {
+                        handleService(nsdService)
+                    }
                 } catch (_: InterruptedException) {
                     return
                 } catch (error: Exception) {
@@ -582,8 +671,9 @@ class BonjourServiceAdvertiser(
         }
         return addresses.firstOrNull { it is Inet6Address && it.isLinkLocalAddress }
             ?.let(::applyLocalScope)
+            ?.takeIf { it is Inet6Address && it.scopeId != 0 }
             ?: addresses.firstOrNull { it is Inet4Address }
-            ?: addresses.firstOrNull { it is Inet6Address }
+            ?: addresses.firstOrNull { it is Inet6Address && (!it.isLinkLocalAddress || it.scopeId != 0) }
             ?: addresses.firstOrNull()
     }
 
@@ -640,7 +730,7 @@ class BonjourServiceAdvertiser(
         }
         try {
             emit(CarPlayBonjourEvent.ProbeProgress(CarPlayBonjourEvent.ProbeProgress.Stage.CONNECTING, attempt, address is Inet6Address))
-            sourceAddressFor(address)?.let { socket.bind(InetSocketAddress(it, 0)) }
+            sourceAddressFor(address)?.let { runCatching { socket.bind(InetSocketAddress(it, 0)) } }
             socket.connect(InetSocketAddress(address, port), CONNECT_TIMEOUT_MILLIS)
             stage = CarPlayBonjourEvent.ProbeProgress.Stage.TCP_CONNECTED
             emit(CarPlayBonjourEvent.ProbeProgress(CarPlayBonjourEvent.ProbeProgress.Stage.TCP_CONNECTED, attempt, address is Inet6Address))

@@ -347,15 +347,19 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 }
             }
 
-            if (
-                settings.connection.wirelessHotspotMode == TvWirelessMode.LAN_WIFI &&
-                settings.connection.existingWifiSsid.isBlank() &&
-                settings.connection.existingWifiInterface.isBlank() &&
-                LanNetworkLink.detectConnectedWifiSsid(this) == null &&
-                !LanNetworkLink.hasActiveLanNetwork(this)
-            ) {
-                showLanWifiConfigDialog(launchAfterSave = true)
-                return
+            if (settings.connection.wirelessHotspotMode == TvWirelessMode.LAN_WIFI) {
+                if (settings.connection.existingWifiSsid.isBlank()) {
+                    LanNetworkLink.detectConnectedWifiSsid(this)?.let { detected ->
+                        settings.connection.existingWifiSsid = detected
+                    }
+                }
+                val missingSsid = settings.connection.existingWifiSsid.isBlank()
+                val missingPassphrase = settings.connection.existingWifiPassphrase.isBlank() &&
+                    !LanNetworkLink.isConnectedWifiOpen(this)
+                if (missingSsid || missingPassphrase) {
+                    showLanWifiConfigDialog(launchAfterSave = true)
+                    return
+                }
             }
         }
 

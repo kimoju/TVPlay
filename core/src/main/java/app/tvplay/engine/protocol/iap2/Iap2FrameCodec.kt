@@ -1833,8 +1833,8 @@ object Iap2CarPlayMessages {
             wireless?.let {
                 group(1) {
                     string(0, it.ssid)
-                    string(1, it.passphrase)
-                    u8(2, it.channel)
+                    optionalString(1, it.passphrase.takeIf { p -> p.isNotEmpty() && it.securityType != 0 })
+                    u8(2, it.channel.takeIf { ch -> ch > 0 } ?: 36)
                     it.ipAddresses.forEach { address -> string(3, address) }
                     u8(4, it.securityType)
                 }
@@ -1916,9 +1916,9 @@ object Iap2WirelessMessages {
     ): Iap2Frame = Iap2Messages.build(Iap2Endpoints.ACCESSORY_WIFI_CONFIGURATION) {
         optionalBytes(0, bssid)
         string(1, ssid)
-        string(2, passphrase)
+        optionalString(2, passphrase.takeIf { it.isNotEmpty() && securityType != 0 })
         u8(3, securityType)
-        u8(4, channel)
+        optionalU8(4, channel.takeIf { it > 0 })
     }
 
     fun wifiInformation(frame: Iap2Frame): Iap2WifiInformation {

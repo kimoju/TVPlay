@@ -1337,16 +1337,16 @@ class TvSessionEngine(
             wirelessConnectionProof.begin(generation) {
                 if (!isStaleWirelessRun(generation)) startedHotspot?.onCarPlayConfirmed()
             }
+            val wirelessPrefs = appContext.getSharedPreferences(WIRELESS_PREFS, Context.MODE_PRIVATE)
             val preferredFamily = if (config.wirelessHotspotMode == TvWirelessMode.LAN_WIFI) {
                 HotspotAddressPolicy.FAMILY_IPV4
             } else {
                 HotspotAddressPolicy.parseFamily(
-                    appContext.getSharedPreferences(WIRELESS_PREFS, Context.MODE_PRIVATE)
-                        .getString(HOTSPOT_FAMILY_PREFERENCE_KEY, null),
+                    wirelessPrefs.getString(HOTSPOT_FAMILY_PREFERENCE_KEY, null),
                 )
             }
             val addressRecovery = HotspotAddressRecovery(
-                sample = { hotspotCandidates(hotspotInfo, fallbackToSnapshot = false) },
+                sample = { hotspotCandidates(hotspotInfo, fallbackToSnapshot = true) },
                 cancelled = { isStaleWirelessRun(generation) },
                 pause = Thread::sleep,
                 log = { if (!isStaleWirelessRun(generation)) debugLog(it) },
@@ -1373,12 +1373,18 @@ class TvSessionEngine(
             }
             val hostAddressText = hostAddressText(hostAddress)
             val allBindAddresses = (listOf(hostAddress) + candidates + hotspotInfo.hostAddresses)
-                .distinct()
+                .distinctBy { it.address.toList() }
                 .filter { it !is Inet6Address || (it.isLinkLocalAddress && it.scopeId != 0) }
-            val additionalBindAddresses = allBindAddresses.filter { it != hostAddress }
-            val endpointAddressTexts = listOf(hostAddressText)
-            val deviceIdentifier = hotspotInfo.bssid
+            val additionalBindAddresses = allBindAddresses.filter { !it.address.contentEquals(hostAddress.address) }
+            val endpointAddressTexts = allBindAddresses.map(::hostAddressText).distinct()
+            val liveBssid = hotspotInfo.bssid
                 ?.takeUnless { it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true) }
+            if (liveBssid != null) {
+                wirelessPrefs.edit().putString(WIRELESS_DEVICE_ID_PREFERENCE_KEY, liveBssid).apply()
+            }
+            val deviceIdentifier = liveBssid
+                ?: wirelessPrefs.getString(WIRELESS_DEVICE_ID_PREFERENCE_KEY, null)
+                    ?.takeIf { it.isNotBlank() && !it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true) }
                 ?: airPlayConfig.deviceId
             debugLog(
                 "wireless hotspot backend=${hotspotInfo.backend.label} " +
@@ -1582,7 +1588,10 @@ class TvSessionEngine(
                     activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation)
                 },
                 beforeStartSession = { startedHotspot?.validateReady() },
-                onStartSessionSent = { watchdog.startSessionSent(it.sentAtNanos) },
+                onStartSessionSent = {
+                    watchdog.startSessionSent(it.sentAtNanos)
+                    startedBonjour?.onStartSessionSent()
+                },
                 onIncoming = ::onRouteFrame,
                 onProgress = { message ->
                     diagnostics.controlProgress(message)
@@ -1673,7 +1682,10 @@ class TvSessionEngine(
             if (isStaleWirelessRun(generation)) return
             closeBluetoothBootstrapTransport()
         }
-        if (wirelessHandoffRequested.compareAndSet(false, true)) {
+        val hasActiveWifiConnection = activeSession != null ||
+            wirelessTunnelChannel != null ||
+            wirelessConnectionProof.hasRenderedFrame(generation)
+        if (hasActiveWifiConnection && wirelessHandoffRequested.compareAndSet(false, true)) {
             armWirelessHandoffWatchdog(generation)
         }
         maybeCompleteWirelessHandoff()
@@ -3465,6 +3477,7 @@ class TvSessionEngine(
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val WIRELESS_PREFS = "diplay_wireless"
         private const val HOTSPOT_FAMILY_PREFERENCE_KEY = "hotspot_address_family"
+        private const val WIRELESS_DEVICE_ID_PREFERENCE_KEY = "wireless_device_identifier"
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L

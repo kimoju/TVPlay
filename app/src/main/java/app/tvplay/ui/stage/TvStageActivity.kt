@@ -22,6 +22,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -34,7 +35,10 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import app.tvplay.R
 import app.tvplay.config.MfiAssetInstaller
@@ -58,6 +62,7 @@ import app.tvplay.engine.av.TvDisplaySpec
 import app.tvplay.engine.av.UiDensityScale
 import app.tvplay.engine.av.ViewportTouchMapper
 import app.tvplay.engine.av.ViewportVideoLayout
+import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.UsbTunnelVpnService
 import app.tvplay.engine.network.WirelessStartupFailure
 import app.tvplay.engine.protocol.iap2.Iap2ArtworkTransfer
@@ -533,7 +538,18 @@ class TvStageActivity : Activity() {
         val waitingColors = TvPreferencesStore.loadWaitingScreenColors(this)
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
-        val lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+        var lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+        if (wirelessEnabled && wirelessMode == TvWirelessMode.LAN_WIFI && lanSsid.isBlank()) {
+            val detected = LanNetworkLink.detectConnectedWifiSsid(this)
+            if (detected != null) {
+                lanSsid = detected
+                TvPreferencesStore.saveExistingWifiCredentials(
+                    this,
+                    detected,
+                    TvPreferencesStore.loadExistingWifiPassphrase(this),
+                )
+            }
+        }
 
         waitingBindings = StageWaitingOverlay.build(
             context = this,
@@ -599,7 +615,18 @@ class TvStageActivity : Activity() {
         val controllerGeneration = ++restartGeneration
         val wirelessEnabled = TvPreferencesStore.loadWirelessEnabled(this)
         val wirelessMode = TvPreferencesStore.loadWirelessHotspotMode(this)
-        val lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+        var lanSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+        if (wirelessEnabled && wirelessMode == TvWirelessMode.LAN_WIFI && lanSsid.isBlank()) {
+            val detected = LanNetworkLink.detectConnectedWifiSsid(this)
+            if (detected != null) {
+                lanSsid = detected
+                TvPreferencesStore.saveExistingWifiCredentials(
+                    this,
+                    detected,
+                    TvPreferencesStore.loadExistingWifiPassphrase(this),
+                )
+            }
+        }
         waitingBindings.connectionInstructionsView.text = StageWaitingOverlay.connectionInstructions(
             context = this,
             status = null,
@@ -1145,6 +1172,13 @@ class TvStageActivity : Activity() {
                 if (!isProjectionVisible) {
                     streamingActive = false
                     firstFrameRendered = false
+                    if (
+                        wirelessEnabled &&
+                        wirelessMode == TvWirelessMode.LAN_WIFI &&
+                        status.startupFailure == WirelessStartupFailure.HOTSPOT_CONFIGURATION
+                    ) {
+                        showLanWifiConfigDialog()
+                    }
                     val retryAllowed = status.startupFailure?.retryable != false &&
                         !status.wifiResetRequired
                     if (retryAllowed) {
@@ -1237,7 +1271,17 @@ class TvStageActivity : Activity() {
                         TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.LAN_WIFI)
                         permissionsPromptedThisSession = false
                         reconnectAttempts = 0
-                        reconnectNow()
+                        val currentPass = TvPreferencesStore.loadExistingWifiPassphrase(this)
+                        val currentSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+                            .ifBlank { LanNetworkLink.detectConnectedWifiSsid(this).orEmpty() }
+                        if (currentSsid.isNotBlank()) {
+                            TvPreferencesStore.saveExistingWifiCredentials(this, currentSsid, currentPass)
+                        }
+                        if (currentSsid.isBlank() || (currentPass.isBlank() && !LanNetworkLink.isConnectedWifiOpen(this))) {
+                            showLanWifiConfigDialog()
+                        } else {
+                            reconnectNow()
+                        }
                     }
                     2 -> {
                         TvPreferencesStore.saveWirelessEnabled(this, false)
@@ -1247,6 +1291,76 @@ class TvStageActivity : Activity() {
                         reconnectNow()
                     }
                 }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showLanWifiConfigDialog() {
+        if (isFinishing || isDestroyed) return
+        val density = resources.displayMetrics.density
+        val palette = TvColorScheme.resolve(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padH = (24 * density).toInt()
+            val padV = (12 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+        }
+        val detectedSsid = LanNetworkLink.detectConnectedWifiSsid(this).orEmpty()
+        val ssidInput = EditText(this).apply {
+            hint = "家庭路由器 Wi-Fi 名称 (SSID)"
+            setText(TvPreferencesStore.loadExistingWifiSsid(this@TvStageActivity).ifBlank { detectedSsid })
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textSecondary)
+            isSingleLine = true
+        }
+        val passLabel = TextView(this).apply {
+            text = "家庭路由器 Wi-Fi 密码（iAP2 握手时需下发给 iPhone，若为无密码开放网络可留空）："
+            setTextColor(palette.textSecondary)
+            setPadding(0, (10 * density).toInt(), 0, (4 * density).toInt())
+        }
+        val passInput = EditText(this).apply {
+            hint = "WPA2 Wi-Fi 密码"
+            setText(TvPreferencesStore.loadExistingWifiPassphrase(this@TvStageActivity))
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textSecondary)
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        container.addView(
+            ssidInput,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        container.addView(
+            passLabel,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        container.addView(
+            passInput,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+
+        appDialogBuilder(this)
+            .setTitle("配置家庭局域网路由器 Wi-Fi")
+            .setMessage(
+                "局域网模式下，无线 CarPlay 蓝牙握手 (0x5703 / 0x4301) 必须向 iPhone 下发当前路由器的真实 Wi-Fi 名称与密码，iPhone 才会连接电视的 AirPlay 端口。\n" +
+                    "• 请在下方确认路由器 Wi-Fi 名称并填写密码；\n" +
+                    "• 或直接改用「Wi-Fi Direct 5GHz 直连」（免填密码）。",
+            )
+            .setView(container)
+            .setPositiveButton("保存并重新连接") { _, _ ->
+                val ssid = ssidInput.text?.toString()?.trim().orEmpty()
+                val pass = passInput.text?.toString().orEmpty()
+                TvPreferencesStore.saveExistingWifiCredentials(this, ssid, pass)
+                reconnectAttempts = 0
+                reconnectNow()
+            }
+            .setNeutralButton("改用 Wi-Fi Direct 直连（推荐）") { _, _ ->
+                TvPreferencesStore.saveWirelessEnabled(this, true)
+                TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
+                permissionsPromptedThisSession = false
+                reconnectAttempts = 0
+                reconnectNow()
             }
             .setNegativeButton("取消", null)
             .show()

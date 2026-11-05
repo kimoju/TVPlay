@@ -243,13 +243,22 @@ object WirelessPermissions {
     ): List<String> = when {
         hotspotMode == TvWirelessMode.LAN_WIFI ->
             if (sdkInt >= Build.VERSION_CODES.S) {
-                listOf(Manifest.permission.BLUETOOTH_CONNECT)
+                listOf(
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                )
             } else {
-                emptyList()
+                listOf(
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                )
             }
         sdkInt >= Build.VERSION_CODES.TIRAMISU -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.NEARBY_WIFI_DEVICES,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
         )
         sdkInt >= Build.VERSION_CODES.S -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,

@@ -14,6 +14,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -27,6 +28,7 @@ import app.tvplay.config.WaitingScreenColorPreset
 import app.tvplay.engine.av.CarPlayPhysicalSizePreset
 import app.tvplay.engine.av.MediaAudioBuffer
 import app.tvplay.engine.av.UiDensityScale
+import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.WifiP2pChannels
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
@@ -335,6 +337,11 @@ class WorkbenchSettingsTabs(
 
         when (settings.connection.wirelessHotspotMode) {
             TvWirelessMode.LAN_WIFI -> {
+                if (settings.connection.existingWifiSsid.isBlank()) {
+                    LanNetworkLink.detectConnectedWifiSsid(context)?.let { detected ->
+                        settings.connection.existingWifiSsid = detected
+                    }
+                }
                 addView(
                     textFieldCard(
                         title = "家庭路由器 Wi-Fi 名称 (SSID)",
@@ -961,6 +968,8 @@ class WorkbenchSettingsTabs(
             setOnClickListener {
                 isFocusableInTouchMode = true
                 requestFocus()
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
             }
             addTextChangedListener(
                 object : TextWatcher {

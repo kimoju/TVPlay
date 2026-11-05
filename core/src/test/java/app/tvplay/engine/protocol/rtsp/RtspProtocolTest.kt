@@ -339,4 +339,21 @@ class RtspProtocolTest {
             acceptedSocket.close()
         }
     }
+
+    @Test
+    fun airPlayPeerValidationAcceptsDualStackLanIpv4AndIpv6UnicastPeers() {
+        val ipv4ControlPeer = java.net.InetAddress.getByName("192.168.1.25")
+        val ipv6LinkLocalStreamPeer = java.net.InetAddress.getByName("fe80::1a2b:3c4d:5e6f:7788")
+        val ipv6UlaStreamPeer = java.net.InetAddress.getByName("fd12:3456:789a::42")
+        val ipv6GlobalSlaacStreamPeer = java.net.InetAddress.getByName("240e:390:1000:1::88")
+        val cgnatLanPeer = java.net.InetAddress.getByName("100.64.10.22")
+        val loopbackPeer = java.net.InetAddress.getByName("127.0.0.1")
+
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv4ControlPeer, ipv4ControlPeer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6LinkLocalStreamPeer, ipv4ControlPeer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6UlaStreamPeer, ipv4ControlPeer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(ipv6GlobalSlaacStreamPeer, ipv4ControlPeer))
+        assertTrue(isSameOrAuthorizedAirPlayPeer(cgnatLanPeer, ipv4ControlPeer))
+        assertFalse(isSameOrAuthorizedAirPlayPeer(loopbackPeer, ipv4ControlPeer))
+    }
 }

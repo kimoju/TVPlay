@@ -48,7 +48,14 @@ class TvConfigTest {
             hotspotMode = TvWirelessMode.LAN_WIFI,
             sdkInt = Build.VERSION_CODES.TIRAMISU,
         )
-        assertEquals(listOf(Manifest.permission.BLUETOOTH_CONNECT), lanWifi33)
+        assertEquals(
+            listOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            ),
+            lanWifi33,
+        )
         assertTrue(WiredPermissions.required(Build.VERSION_CODES.TIRAMISU).isEmpty())
     }
 

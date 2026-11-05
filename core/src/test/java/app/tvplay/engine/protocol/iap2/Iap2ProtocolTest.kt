@@ -2,6 +2,7 @@ package app.tvplay.engine.protocol.iap2
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,5 +68,68 @@ class Iap2ProtocolTest {
         val strBytes = Iap2WireCodec.string("Apple CarPlay")
         assertNotNull(strBytes)
         assertEquals("Apple CarPlay", Iap2WireCodec.readString(strBytes))
+    }
+
+    @Test
+    fun wirelessOpenNetworkFramesOmitZeroLengthPassphraseAndZeroChannel() {
+        val openEndpoint = Iap2WirelessCarPlayEndpoint(
+            ssid = "OpenHomeWiFi",
+            passphrase = "",
+            channel = 0,
+            security = Iap2WirelessSecurity.NONE,
+            ipAddresses = listOf("192.168.1.50", "fe80::1234"),
+            airPlayPort = 7000,
+            deviceIdentifier = "02:11:22:33:44:55",
+            publicKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            sourceVersion = "950.7.1",
+            accessPointBssid = null,
+        )
+
+        val wifiConfigFrame = Iap2WirelessControlClient.accessoryWiFiConfiguration(openEndpoint)
+        assertEquals(0x5703, wifiConfigFrame.messageId)
+        val wifiConfigParams = Iap2ParameterList.parse(wifiConfigFrame.payload)
+        assertTrue(wifiConfigParams.has(1)) // SSID
+        assertFalse("0x5703 must not include empty passphrase TLV on open network", wifiConfigParams.has(2))
+        assertFalse("0x5703 must not include channel=0 TLV", wifiConfigParams.has(4))
+        assertFalse("0x5703 must not include BSSID when null", wifiConfigParams.has(5))
+
+        val startSessionFrame = Iap2WirelessControlClient.carPlayStartSession(openEndpoint)
+        assertEquals(0x4301, startSessionFrame.messageId)
+        val startParams = Iap2ParameterList.parse(startSessionFrame.payload)
+        val wirelessGroup = Iap2ParameterList.parse(startParams.require(1).payload)
+        assertTrue(wirelessGroup.has(0)) // SSID
+        assertFalse("0x4301 must not include empty passphrase TLV on open network", wirelessGroup.has(1))
+        assertEquals(36, Iap2WireCodec.readU8(wirelessGroup.require(2).payload))
+        assertEquals(2, wirelessGroup.all(3).size)
+    }
+
+    @Test
+    fun wirelessSecuredNetworkFramesIncludePassphraseAndResolvedChannel() {
+        val securedEndpoint = Iap2WirelessCarPlayEndpoint(
+            ssid = "MyHome5G",
+            passphrase = "supersecretpassword",
+            channel = 149,
+            security = Iap2WirelessSecurity.WPA_WPA2,
+            ipAddresses = listOf("192.168.31.88"),
+            airPlayPort = 7000,
+            deviceIdentifier = "02:11:22:33:44:55",
+            publicKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            sourceVersion = "950.7.1",
+            accessPointBssid = null,
+        )
+
+        val wifiConfigFrame = Iap2WirelessControlClient.accessoryWiFiConfiguration(securedEndpoint)
+        val wifiConfigParams = Iap2ParameterList.parse(wifiConfigFrame.payload)
+        assertEquals("MyHome5G", Iap2WireCodec.readString(wifiConfigParams.require(1).payload))
+        assertEquals("supersecretpassword", Iap2WireCodec.readString(wifiConfigParams.require(2).payload))
+        assertEquals(2, Iap2WireCodec.readU8(wifiConfigParams.require(3).payload))
+        assertEquals(149, Iap2WireCodec.readU8(wifiConfigParams.require(4).payload))
+
+        val startSessionFrame = Iap2WirelessControlClient.carPlayStartSession(securedEndpoint)
+        val startParams = Iap2ParameterList.parse(startSessionFrame.payload)
+        val wirelessGroup = Iap2ParameterList.parse(startParams.require(1).payload)
+        assertEquals("MyHome5G", Iap2WireCodec.readString(wirelessGroup.require(0).payload))
+        assertEquals("supersecretpassword", Iap2WireCodec.readString(wirelessGroup.require(1).payload))
+        assertEquals(149, Iap2WireCodec.readU8(wirelessGroup.require(2).payload))
     }
 }

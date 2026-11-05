@@ -897,6 +897,13 @@ class Iap2WirelessControlClient(
                         onProgress("iap2 0x4301 suppressed: wireless session already active")
                         continue
                     }
+                    if (wifiConfigurationsSent == 0) {
+                        sendControl(accessoryWiFiConfiguration(endpoint))
+                        stage = later(stage, Iap2WirelessControlStage.WIFI_CONFIG_SENT)
+                        wifiConfigurationsSent++
+                        preTransportWiFiConfigurationsSent++
+                        onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
+                    }
                     beforeStartSession()
                     sendStartSession(endpoint, ::sendControl, onStartSessionSent)
                     stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)

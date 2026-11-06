@@ -87,6 +87,7 @@ class CarLinkControlSession(
         startTcpChannel(CarLinkChannelType.AUTH, bindAddress) { socket -> handleAuthSocket(socket) }
         startTcpChannel(CarLinkChannelType.CERT, bindAddress) { socket -> handleCertSocket(socket) }
         startTcpChannel(CarLinkChannelType.CONTROL, bindAddress) { socket -> handleControlSocket(socket) }
+        startTcpChannel(CarLinkChannelType.SENSOR, bindAddress) { socket -> handleSensorSocket(socket) }
         startTcpChannel(CarLinkChannelType.VIDEO, bindAddress) { socket -> handleVideoSocket(socket) }
         startTcpChannel(CarLinkChannelType.MEDIA, bindAddress) { socket -> handleMediaSocket(socket) }
         startTcpChannel(CarLinkChannelType.UIBC, bindAddress) { socket -> handleUibcSocket(socket) }
@@ -95,10 +96,71 @@ class CarLinkControlSession(
         onLog(
             "CarLink session listeners started on ports " +
                 "AUTH=${CarLinkChannelType.AUTH.port}, CERT=${CarLinkChannelType.CERT.port}, " +
-                "CONTROL=${CarLinkChannelType.CONTROL.port}, VIDEO=${CarLinkChannelType.VIDEO.port}, " +
-                "MEDIA=${CarLinkChannelType.MEDIA.port}, UIBC=${CarLinkChannelType.UIBC.port}, " +
-                "RTSP=${CarLinkChannelType.RTSP.port}, RTP=${CarLinkChannelType.RTP.port}",
+                "CONTROL=${CarLinkChannelType.CONTROL.port}, SENSOR=${CarLinkChannelType.SENSOR.port}, " +
+                "VIDEO=${CarLinkChannelType.VIDEO.port}, MEDIA=${CarLinkChannelType.MEDIA.port}, " +
+                "UIBC=${CarLinkChannelType.UIBC.port}, RTSP=${CarLinkChannelType.RTSP.port}, " +
+                "RTP=${CarLinkChannelType.RTP.port}",
         )
+    }
+
+    /**
+     * Initiates outbound TCP client channels (`startUCarChannel(peerAddress)` in `UCarAdapter`)
+     * to the phone's `CONTROL (57219)`, `CERT (57249)`, `MEDIA (57229)`, `SENSOR (57239)`,
+     * `UIBC (4321)`, and `RTSP (7236)` servers after `AuthConfirm`.
+     */
+    fun connectToPeer(peerAddress: String, wfdPort: Int = CarLinkChannelType.RTSP.port) {
+        if (closed.get() || peerAddress.isBlank()) return
+        connectOutboundChannel(CarLinkChannelType.CERT, peerAddress, CarLinkChannelType.CERT.port) { handleCertSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.CONTROL, peerAddress, CarLinkChannelType.CONTROL.port) { handleControlSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.SENSOR, peerAddress, CarLinkChannelType.SENSOR.port) { handleSensorSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.MEDIA, peerAddress, CarLinkChannelType.MEDIA.port) { handleMediaSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.UIBC, peerAddress, CarLinkChannelType.UIBC.port) { handleUibcSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.RTSP, peerAddress, wfdPort) { handleWfdRtspSocket(it) }
+    }
+
+    private fun connectOutboundChannel(
+        channel: CarLinkChannelType,
+        peerAddress: String,
+        port: Int,
+        handler: (Socket) -> Unit,
+    ) {
+        val thread = Thread(
+            {
+                var attempts = 0
+                while (!closed.get() && attempts < 6) {
+                    attempts++
+                    val socket = runCatching {
+                        Socket().apply {
+                            tcpNoDelay = true
+                            keepAlive = true
+                            connect(InetSocketAddress(peerAddress, port), 1_500)
+                        }
+                    }.getOrNull()
+                    if (socket != null) {
+                        activeSockets += socket
+                        try {
+                            handler(socket)
+                        } catch (e: Exception) {
+                            if (!closed.get()) {
+                                onLog("CarLink outbound ${channel.name} ($peerAddress:$port) closed: ${e.message}")
+                            }
+                        } finally {
+                            activeSockets.remove(socket)
+                            runCatching { socket.close() }
+                        }
+                        return@Thread
+                    }
+                    try {
+                        Thread.sleep(250L)
+                    } catch (_: InterruptedException) {
+                        return@Thread
+                    }
+                }
+            },
+            "carlink-${channel.name.lowercase()}-outbound",
+        ).apply { isDaemon = true }
+        workerThreads += thread
+        thread.start()
     }
 
     private fun startTcpChannel(
@@ -189,9 +251,18 @@ class CarLinkControlSession(
                     onLog("CarLink AUTH: processed AuthRequest from $connectedPhoneModel (PIN=$pin)")
                 }
                 CarLinkMethodIndex.AUTH_CONFIRM -> {
+                    val confirm = runCatching {
+                        CarLinkProtoCodec.decodeAuthConfirm(frame.body)
+                    }.getOrDefault(CarLinkProtoCodec.AuthConfirmMsg())
+                    val fallbackIp = socket.inetAddress?.hostAddress.orEmpty()
+                    val (peerIp, peerWfdPort) = handshakeSession?.parseAuthConfirmEndpoint(confirm, fallbackIp)
+                        ?: (fallbackIp to CarLinkChannelType.RTSP.port)
                     val ack = CarLinkFrameCodec.buildAckFrame(frame.header)
                     CarLinkFrameCodec.writeFrame(output, ack)
-                    onLog("CarLink AUTH: received AuthConfirm, authentication succeeded")
+                    onLog("CarLink AUTH: received AuthConfirm, peer=$peerIp:$peerWfdPort")
+                    if (peerIp.isNotEmpty() && peerIp != "127.0.0.1" && peerIp != "localhost") {
+                        connectToPeer(peerIp, peerWfdPort)
+                    }
                 }
                 else -> {
                     CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header))
@@ -207,7 +278,7 @@ class CarLinkControlSession(
     private fun handleCertSocket(socket: Socket) {
         val input = socket.getInputStream()
         val output = socket.getOutputStream()
-        onLog("CarLink CERT connected from ${socket.inetAddress.hostAddress}")
+        onLog("CarLink CERT connected with ${socket.inetAddress.hostAddress}")
         if (certBytes.isNotEmpty()) {
             val certBody = CarLinkProtoCodec.encodeCarCertificate(
                 CarLinkProtoCodec.CarCertificateMsg(content = certBytes),
@@ -221,28 +292,40 @@ class CarLinkControlSession(
                 format = CarLinkDataFormat.PB3,
                 messageType = CarLinkMessageType.SEND,
             )
-            CarLinkFrameCodec.writeFrame(output, certFrame)
+            CarLinkFrameCodec.writeFrame(output, certFrame, handshakeSession?.sessionKey)
             onLog("CarLink CERT: sent CarCertificate (${certBytes.size}B)")
         }
         while (!closed.get() && !socket.isClosed) {
-            val frame = CarLinkFrameCodec.readFrame(input) ?: break
-            CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header))
+            val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
+            CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), handshakeSession?.sessionKey)
         }
     }
 
     // -------------------------------------------------------------------------
-    // 3. CONTROL Channel (57219)
+    // 3. CONTROL Channel (57219) & SENSOR Channel (57239)
     // -------------------------------------------------------------------------
+
+    private fun handleSensorSocket(socket: Socket) {
+        val input = socket.getInputStream()
+        val output = socket.getOutputStream()
+        onLog("CarLink SENSOR connected with ${socket.inetAddress.hostAddress}")
+        while (!closed.get() && !socket.isClosed) {
+            val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
+            if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
+                CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), handshakeSession?.sessionKey)
+            }
+        }
+    }
 
     private fun handleControlSocket(socket: Socket) {
         val input = socket.getInputStream()
         val output = socket.getOutputStream()
         controlOutput = output
-        onLog("CarLink CONTROL connected from ${socket.inetAddress.hostAddress}")
+        onLog("CarLink CONTROL connected with ${socket.inetAddress.hostAddress}")
         onSessionConnected(connectedPhoneModel.ifBlank { "ICCOA CarLink" })
         try {
             while (!closed.get() && !socket.isClosed) {
-                val frame = CarLinkFrameCodec.readFrame(input) ?: break
+                val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
                 handleControlFrame(frame, output)
             }
         } finally {
@@ -255,11 +338,7 @@ class CarLinkControlSession(
 
     private fun handleControlFrame(frame: CarLinkFrame, output: OutputStream) {
         val sessionKey = handshakeSession?.sessionKey
-        val payload = if (
-            sessionKey != null &&
-            frame.body.size >= 24 &&
-            ByteBuffer.wrap(frame.body, 0, 4).order(ByteOrder.BIG_ENDIAN).int == 12
-        ) {
+        val payload = if (sessionKey != null && CarLinkAuthCipher.looksLikeGcmWire(frame.body)) {
             runCatching { CarLinkAuthCipher.decryptGcmWire(sessionKey, frame.body) }.getOrDefault(frame.body)
         } else {
             frame.body
@@ -272,12 +351,12 @@ class CarLinkControlSession(
                     seqId = frame.header.seqId,
                     category = CarLinkCmdCategory.CONTROL,
                     methodIndex = CarLinkMethodIndex.HEARTBEAT,
-                    body = maybeEncryptControlPayload(hb),
+                    body = hb,
                     source = CarLinkSourceDevice.CAR,
                     format = CarLinkDataFormat.PB3,
                     messageType = CarLinkMessageType.RES,
                 )
-                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply) }
+                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
             }
             CarLinkMethodIndex.GET_PORT_REQUEST -> {
                 val req = CarLinkProtoCodec.decodeGetPortRequest(payload)
@@ -297,12 +376,12 @@ class CarLinkControlSession(
                     seqId = frame.header.seqId,
                     category = CarLinkCmdCategory.CONTROL,
                     methodIndex = CarLinkMethodIndex.GET_PORT_RESPONSE,
-                    body = maybeEncryptControlPayload(respBytes),
+                    body = respBytes,
                     source = CarLinkSourceDevice.CAR,
                     format = CarLinkDataFormat.PB3,
                     messageType = CarLinkMessageType.RES,
                 )
-                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply) }
+                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
             }
             CarLinkMethodIndex.GET_UCAR_CONFIG_REQUEST -> {
                 val cfgBytes = CarLinkProtoCodec.encodeGetUCarConfigResponse(
@@ -336,19 +415,19 @@ class CarLinkControlSession(
                     seqId = frame.header.seqId,
                     category = CarLinkCmdCategory.CONTROL,
                     methodIndex = CarLinkMethodIndex.GET_UCAR_CONFIG_RESPONSE,
-                    body = maybeEncryptControlPayload(cfgBytes),
+                    body = cfgBytes,
                     source = CarLinkSourceDevice.CAR,
                     format = CarLinkDataFormat.PB3,
                     messageType = CarLinkMessageType.RES,
                 )
-                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply) }
+                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
                 onLog("CarLink CONTROL: sent GetUCarConfigResponse (${displaySpec.widthPixels}x${displaySpec.heightPixels}@${displaySpec.fps})")
             }
             CarLinkMethodIndex.NOTIFY_MUSIC_INFO -> {
                 val music = CarLinkProtoCodec.decodeNotifyMusicInfo(payload)
                 onMusicMetadata(music)
                 synchronized(output) {
-                    CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header))
+                    CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
                 }
             }
             CarLinkMethodIndex.DISCONNECT -> {
@@ -358,7 +437,7 @@ class CarLinkControlSession(
             else -> {
                 if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
                     synchronized(output) {
-                        CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header))
+                        CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
                     }
                 }
             }
@@ -425,7 +504,7 @@ class CarLinkControlSession(
         onLog("CarLink MEDIA connected from ${socket.inetAddress.hostAddress}")
         try {
             while (!closed.get() && !socket.isClosed) {
-                val frame = CarLinkFrameCodec.readFrame(input) ?: break
+                val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
                 if (frame.body.isNotEmpty()) {
                     val sink = mediaSink ?: continue
                     if (!audioConfigured) {

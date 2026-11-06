@@ -201,8 +201,39 @@ class CarLinkProtocolTest {
         // Verify AES-GCM SecurityManager wire format [ivLen:4B][iv][cipherLen:4B][ciphertext]
         val plaintext = "{\"type\":1,\"action\":0,\"x0\":960,\"y0\":540}".toByteArray(Charsets.UTF_8)
         val gcmWire = CarLinkAuthCipher.encryptGcmWire(serverSessionKey, plaintext)
+        assertTrue(CarLinkAuthCipher.looksLikeGcmWire(gcmWire))
         val decrypted = CarLinkAuthCipher.decryptGcmWire(clientSessionKey, gcmWire)
         assertArrayEquals(plaintext, decrypted)
+
+        // Verify AuthConfirm endpoint decryption ("<phoneIp>:<wfdPort>")
+        val confirmCipher = CarLinkAuthCipher.encryptGcmWire(
+            clientSessionKey,
+            "192.168.49.1:7236".toByteArray(Charsets.UTF_8),
+        )
+        val (peerIp, peerPort) = serverHandshake.parseAuthConfirmEndpoint(
+            CarLinkProtoCodec.AuthConfirmMsg(cipher = confirmCipher),
+            fallbackAddress = "10.0.0.1",
+        )
+        assertEquals("192.168.49.1", peerIp)
+        assertEquals(7236, peerPort)
+
+        // Verify encrypted SocketChannel frame round-trip (plaintext 20B header + AES-GCM body)
+        val plainCertFrame = CarLinkFrameCodec.buildFrame(
+            seqId = 99,
+            category = CarLinkCmdCategory.CERT,
+            methodIndex = CarLinkMethodIndex.CAR_CERTIFICATE,
+            body = CarLinkProtoCodec.encodeCarCertificate(
+                CarLinkProtoCodec.CarCertificateMsg(content = byteArrayOf(1, 2, 3, 4, 5)),
+            ),
+        )
+        val out = ByteArrayOutputStream()
+        CarLinkFrameCodec.writeFrame(out, plainCertFrame, serverSessionKey)
+        val wireBytes = out.toByteArray()
+        assertTrue(wireBytes.size > plainCertFrame.encode().size)
+        val decodedFrame = CarLinkFrameCodec.readFrame(ByteArrayInputStream(wireBytes), clientSessionKey)
+        assertNotNull(decodedFrame)
+        assertEquals(99, decodedFrame!!.header.seqId)
+        assertArrayEquals(plainCertFrame.body, decodedFrame.body)
     }
 
     @Test

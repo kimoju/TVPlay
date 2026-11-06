@@ -233,6 +233,19 @@ object CarLinkAuthCipher {
     }
 
     /**
+     * Checks whether [wireBytes] matches the structural layout of an ICCOA `SecurityManager`
+     * AES-GCM frame: `[ivLen:4B BE (12..16)][iv][cipherLen:4B BE (>=16)][ciphertext+tag]`.
+     */
+    fun looksLikeGcmWire(wireBytes: ByteArray): Boolean {
+        if (wireBytes.size < 28) return false
+        val buf = ByteBuffer.wrap(wireBytes).order(ByteOrder.BIG_ENDIAN)
+        val ivLen = buf.int
+        if (ivLen !in 12..16 || wireBytes.size < 8 + ivLen + 16) return false
+        val cipherLen = buf.getInt(4 + ivLen)
+        return cipherLen >= 16 && (8 + ivLen + cipherLen) == wireBytes.size
+    }
+
+    /**
      * Decrypts an ICCOA `SecurityManager` wire payload:
      * `[ivLen:4B BE][iv][cipherLen:4B BE][ciphertext+tag]`.
      */
@@ -317,6 +330,29 @@ object CarLinkAuthCipher {
                 dayOrNightMode = dayOrNightMode,
                 screenInfo = screenInfo,
             )
+        }
+
+        /**
+         * Decrypts `AuthConfirm.cipher` (`"<phoneIp>:<wfdPort>"`) using [sessionKey],
+         * falling back to [fallbackAddress] and port `7236` (`ChannelType.RTSP`).
+         */
+        fun parseAuthConfirmEndpoint(
+            confirm: CarLinkProtoCodec.AuthConfirmMsg,
+            fallbackAddress: String,
+        ): Pair<String, Int> {
+            val key = sessionKey
+            if (key != null && confirm.cipher.isNotEmpty()) {
+                val plain = runCatching {
+                    String(decryptGcmWire(key, confirm.cipher), Charsets.UTF_8).trim()
+                }.getOrNull()
+                if (!plain.isNullOrEmpty()) {
+                    val parts = plain.split(':')
+                    val ip = parts[0].trim().ifEmpty { fallbackAddress }
+                    val port = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: CarLinkChannelType.RTSP.port
+                    return ip to port
+                }
+            }
+            return fallbackAddress to CarLinkChannelType.RTSP.port
         }
     }
 

@@ -300,23 +300,47 @@ object CarLinkFrameCodec {
         )
 
     @Throws(IOException::class)
-    fun readFrame(input: InputStream): CarLinkFrame? {
+    fun readFrame(input: InputStream, sessionKey: ByteArray? = null): CarLinkFrame? {
         val headerBytes = ByteArray(CarLinkMessageHeader.HEADER_LENGTH)
         val first = input.read()
         if (first < 0) return null
         headerBytes[0] = first.toByte()
         readFully(input, headerBytes, 1, CarLinkMessageHeader.HEADER_LENGTH - 1)
         val header = CarLinkMessageHeader.decode(headerBytes)
-        val body = ByteArray(header.bodyLength)
-        if (body.isNotEmpty()) {
-            readFully(input, body, 0, body.size)
+        val wireBody = ByteArray(header.bodyLength)
+        if (wireBody.isNotEmpty()) {
+            readFully(input, wireBody, 0, wireBody.size)
         }
-        return CarLinkFrame(header, body)
+        if (sessionKey != null && wireBody.isNotEmpty() && CarLinkAuthCipher.looksLikeGcmWire(wireBody)) {
+            val decrypted = runCatching {
+                CarLinkAuthCipher.decryptGcmWire(sessionKey, wireBody)
+            }.getOrNull()
+            if (decrypted != null) {
+                return CarLinkFrame(
+                    header = header.copy(bodyLength = decrypted.size),
+                    body = decrypted,
+                )
+            }
+        }
+        return CarLinkFrame(header, wireBody)
     }
 
     @Throws(IOException::class)
-    fun writeFrame(output: OutputStream, frame: CarLinkFrame) {
-        output.write(frame.encode())
+    fun writeFrame(output: OutputStream, frame: CarLinkFrame, sessionKey: ByteArray? = null) {
+        val wireFrame = if (
+            sessionKey != null &&
+            frame.body.isNotEmpty() &&
+            !CarLinkAuthCipher.looksLikeGcmWire(frame.body)
+        ) {
+            val encryptedBody = CarLinkAuthCipher.encryptGcmWire(sessionKey, frame.body)
+            CarLinkFrame(
+                header = frame.header.copy(bodyLength = encryptedBody.size),
+                body = encryptedBody,
+            )
+        } else {
+            frame
+        }
+        output.write(wireFrame.encode())
         output.flush()
     }
 

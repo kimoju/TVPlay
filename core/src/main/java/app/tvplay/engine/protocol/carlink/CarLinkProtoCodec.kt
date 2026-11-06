@@ -253,6 +253,46 @@ object CarLinkProtoCodec {
         return out.toByteArray()
     }
 
+    /**
+     * `UCarProto.AwakenVoiceAssistant`:
+     * - `1`: `bytes pcmData` (optional)
+     * - `2`: `AudioFormat audioFormat` (optional)
+     * - `3`: `int32 userPreset` (optional, default 0)
+     */
+    fun encodeAwakenVoiceAssistant(userPreset: Int = 0): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeInt32(out, 3, userPreset, includeZero = true)
+        return out.toByteArray()
+    }
+
+    /**
+     * `UCarProto.PickUpCall` (`isPickUp = true` -> field 1 bool).
+     */
+    fun encodePickUpCall(isPickUp: Boolean = true): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeBool(out, 1, isPickUp)
+        return out.toByteArray()
+    }
+
+    /**
+     * `UCarProto.NotifyCallHungUp` (`isHungUp = true` -> field 1 bool).
+     */
+    fun encodeNotifyCallHungUp(isHungUp: Boolean = true): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeBool(out, 1, isHungUp)
+        return out.toByteArray()
+    }
+
+    /**
+     * Default ICCOA CarLink `ccd.data` head-unit certificate (Base64-encoded signed JSON
+     * with `cryptoConfigIndex = "o-5T4plzjMmcilZs"`, `signAlgorithm = "SHA256withRSA"`, `version = 1`).
+     * Required by the phone's `CarCertManager` on `CERT (57249)` before starting WFD projection.
+     */
+    const val DEFAULT_CAR_CERT_BASE64: String =
+        "eyJjb250ZW50IjpbMTIzLDM0LDExNSwxMDQsMTExLDExNCwxMTYsOTUsMTEwLDk3LDEwOSwxMDEsMzQsNTgsMzQsLTI2LC03NSwtMTE3LDQ4LC0yNCwtODEsLTEwNyw0OSwtMjQsLTY3LC05MCw1MCwtMjYsLTEwMCwtNzAsNTEsMzQsNDQsMzQsMTEyLDExNCwxMTEsMTAwLDExNyw5OSwxMTYsOTUsMTEwLDk3LDEwOSwxMDEsMzQsNTgsMzQsLTI2LC03NSwtMTE3LDQ4LC0yNCwtODEsLTEwNyw0OSwtMjQsLTY3LC05MCw1MCwtMjYsLTEwMCwtNzAsNTEsMzIsNTAsNDgsNTAsNTAsLTI2LC04NCwtNjYsMzQsNDQsMzQsMTE4LDEwMSwxMTAsMTAwLDExMSwxMTQsOTUsMTEwLDk3LDEwOSwxMDEsMzQsNTgsMzQsLTI2LC03NSwtMTE3LDQ4LC0yNCwtODEsLTEwNyw0OSwtMjQsLTY3LC05MCw1MCwtMjcsLTExNCwtMTI2LDUxLDM0LDQ0LDM0LDExOCwxMDEsMTEwLDEwMCwxMTEsMTE0LDk1LDEwNSwxMDAsMzQsNTgsMzQsNDgsNDgsNDgsNDksMzQsNDQsMzQsMTEyLDExNCwxMTEsMTAwLDExNyw5OSwxMTYsOTUsMTA1LDEwMCwzNCw1OCwzNCw0OCw0OCw0OCw0OSwzNCwxMjVdLCJjcnlwdG9Db25maWdJbmRleCI6Im8tNVQ0cGx6ak1tY2lsWnMiLCJzaWduQWxnb3JpdGhtIjoiU0hBMjU2d2l0aFJTQSIsInNpZ25hdHVyZSI6Wzk2LC02NCwxNiw1NiwtMTE0LC05OCwtNDEsNjMsOTEsLTc1LDEyNiwtNjcsLTExMSwyOSwtNTUsMTUsMjcsLTEwNywtNzYsNDksLTE2LDYyLC00NywtNDYsLTc1LC0xNCwyNCwxMDMsMzksMCwtMTA3LDEwNCw2LDk4LDEwNyw3MiwzNiwtNDYsODQsODgsLTY4LC0yMCw2NywtMTIyLC0xMDgsLTcxLC0xMjgsNTUsLTMyLC03LC0yMCwtMTA3LDg0LDExNyw4NSwzMiwtMTI2LC0xMTksNTYsNSwtMTgsLTg4LC01NywtODgsOTUsLTEyNiwtOTQsLTEwNSw1Miw4OCwtNTUsNiwtOTIsNDAsLTgyLC0zNCwxMTIsMzUsMjYsLTEzLDM5LC0xMDAsMTAyLDIxLDEyNywtMjksODMsLTQ3LC03OCw2OCw3Miw1MCwtOCwxMTUsMTUsLTEyNiwtNjgsLTQ1LC01MiwxMTEsNDksNDUsLTcsMjEsLTEwNyw0MywtMTIzLC0zOCwzNyw2NSwtNzIsMjcsODQsNzUsMTA0LC01NywtOTksMTQsMTExLC01NSwxMTIsLTUxLC0xMDksLTkyLC04MiwyNSwxMjQsODQsLTMzLDQ2LC01OCwtMTEsMTAyLC05MCwtMTI0LDUzLC0xMTUsLTQ2LC00MywtNiw5MCwtOSwtMTgsNDEsNDUsNzcsLTgyLC00NiwzMCw5NSw4NiwtNDQsLTExNSwtMTI3LDcxLDMyLDgsLTExNSwtMTgsODMsLTEwOSwtMTE1LDgxLC03MiwtOTIsOTIsLTYzLC05NywtNDUsLTM2LDY4LC05NCwtNTIsMTQsMjEsLTk3LC00LDEwOCwzNCw5MSw1MSwtNjQsODgsLTEwNSwtMTEyLDg5LC03MSwtODMsNTYsLTEwMywxMjIsLTk4LDk1LDEwNiwtNjEsLTYzLC05MSwzMCwtMTAxLDc2LDksLTk1LC0zMiwtNDYsMzksLTk2LC03NywtNDgsLTI3LDU2LDEwMSwtMTIyLC01MywtOCw3NywtMjEsLTExOSwtNzAsMTI3LDkxLDEwOCwtNDUsLTM1LC0xMDQsMzUsLTQ5LDg1LDQxLDEwMSw3LC00MSwtMTA4LC02OCwzMywtNDksLTYsNDksLTkzLDk1LDM0LC0xMjAsLTgxLC0xNCw3OSwtNzgsLTQzLDQ5LDQ5LDYyLC04NCwtMTA2LDc3LC0yNywxMDEsNjksMTExXSwidmVyc2lvbiI6MX0="
+
+    val DEFAULT_CAR_CERT_BYTES: ByteArray = DEFAULT_CAR_CERT_BASE64.toByteArray(Charsets.US_ASCII)
+
     // -------------------------------------------------------------------------
     // Decoders
     // -------------------------------------------------------------------------

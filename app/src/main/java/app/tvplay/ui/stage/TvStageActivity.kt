@@ -1173,6 +1173,31 @@ class TvStageActivity : Activity() {
                 message.contains("first-tcp watchdog disarmed") ||
                     message.contains("wireless type-130 tunnel data stream accepted") ->
                     "iPhone 已连入电视无线网络，正在协商 RTSP 音视频流..."
+                message.contains("CarLink BLE GATT: sent ServerConnectionInfo") ->
+                    "已向安卓手机下发 CarLink 无线凭证，等待手机发起安全认证..."
+                message.contains("CarLink AUTH: processed AuthRequest") && message.contains("result=1") -> {
+                    val pin = Regex("PIN=(\\d+)").find(message)?.groupValues?.getOrNull(1).orEmpty()
+                    if (pin.isNotEmpty()) {
+                        "手机正在请求 CarLink 配对，请在手机端输入连接码：$pin"
+                    } else {
+                        "手机正在请求 CarLink 配对，请在手机端输入 6 位连接码..."
+                    }
+                }
+                message.contains("CarLink AUTH: processed AuthRequest") && message.contains("result=2") -> {
+                    val pin = Regex("PIN=(\\d+)").find(message)?.groupValues?.getOrNull(1).orEmpty()
+                    if (pin.isNotEmpty()) {
+                        "CarLink 连接码校验未通过，请在手机端输入正确连接码：$pin"
+                    } else {
+                        "CarLink 连接码校验未通过，请核对 6 位连接码后重试..."
+                    }
+                }
+                message.contains("CarLink AUTH: processed AuthRequest") && message.contains("result=0") ->
+                    "CarLink 密钥协商已通过，正在建立控制与证书通道..."
+                message.contains("CarLink CERT: sent CarCertificate") ->
+                    "已下发 ICCOA CarLink 车机证书，正在协商 WFD 视频流..."
+                message.contains("CarLink WFD RTSP: sent M6 SETUP") ||
+                    message.contains("CarLink WFD RTSP: sent M7 PLAY") ->
+                    "CarLink WFD RTSP 握手完成，正在启动低延迟画面渲染..."
                 else -> null
             } ?: return
             mainHandler.post {
@@ -1231,9 +1256,11 @@ class TvStageActivity : Activity() {
                 reconnectAttempts = 0
                 cancelScheduledReconnect()
             } else if (status is CarPlayStatus.ControlEnded) {
-                if (!isProjectionVisible && !hasLiveAirPlaySession) {
+                if (!hasLiveAirPlaySession) {
+                    CarPlayBackgroundSession.active = false
                     streamingActive = false
                     firstFrameRendered = false
+                    fpsHudOverlay.stop()
                     scheduleAutoReconnect(3_500L)
                 }
             } else if (status is CarPlayStatus.Failed) {

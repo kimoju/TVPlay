@@ -1181,10 +1181,26 @@ class TvSessionEngine(
         return downCount == current.size
     }
 
-    /** Sends a CarPlay knob/touchpad movement or button state through the AirPlay HID channel. */
+    /** Sends a CarPlay knob/touchpad movement or button state through the AirPlay HID or CarLink channel. */
     fun sendKnob(state: AirPlayKnobState, momentary: Boolean = true): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+            return try {
+                touchExecutor.execute {
+                    when {
+                        state.home -> cl.sendMediaButton(3) // KEYCODE_HOME
+                        state.back -> cl.sendMediaButton(4) // KEYCODE_BACK
+                        state.select -> cl.sendMediaButton(23) // KEYCODE_DPAD_CENTER
+                        else -> cl.sendKnob(dx = state.x + state.wheel, dy = state.y)
+                    }
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
         val token = session.mainScreenSessionToken() ?: return false
         if (closed || activeSession !== session) return false
         return try {
@@ -1199,10 +1215,19 @@ class TvSessionEngine(
         }
     }
 
-    /** Sends a CarPlay rotary knob select button down/up state through the AirPlay HID channel. */
+    /** Sends a CarPlay rotary knob select button down/up state through the AirPlay HID or CarLink channel. */
     fun sendKnobSelect(down: Boolean): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+            return try {
+                touchExecutor.execute { cl.sendKnobSelect(down) }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
         val token = session.mainScreenSessionToken() ?: return false
         if (closed || activeSession !== session) return false
         return try {
@@ -1220,7 +1245,24 @@ class TvSessionEngine(
     /** Sends one CarPlay media-button press (an [app.tvplay.engine.protocol.rtsp.AirPlayHid] media index). */
     fun sendMedia(index: Int): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+            val keyCode = when (index) {
+                1 -> 126 // KEYCODE_MEDIA_PLAY
+                2 -> 127 // KEYCODE_MEDIA_PAUSE
+                3 -> 85 // KEYCODE_MEDIA_PLAY_PAUSE
+                4 -> 87 // KEYCODE_MEDIA_NEXT
+                5 -> 88 // KEYCODE_MEDIA_PREVIOUS
+                else -> 85
+            }
+            return try {
+                touchExecutor.execute { cl.sendMediaButton(keyCode) }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
         return try {
             touchExecutor.execute { session.sendMedia(index) }
             true
@@ -1234,7 +1276,18 @@ class TvSessionEngine(
     /** Sends one CarPlay telephony HID report (an [app.tvplay.engine.protocol.rtsp.AirPlayHid] telephony index). */
     fun sendTelephony(index: Int): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+            return try {
+                touchExecutor.execute {
+                    if (index == TELEPHONY_DROP) cl.endCall() else cl.answerCall()
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
         return try {
             touchExecutor.execute { session.sendTelephony(index) }
             true
@@ -1243,16 +1296,25 @@ class TvSessionEngine(
         }
     }
 
-    /** Answers the ringing call on the iPhone (telephony Hook Switch). */
+    /** Answers the ringing call on the iPhone/Android phone. */
     fun answerCall(): Boolean = sendTelephony(TELEPHONY_HOOK_SWITCH)
 
-    /** Ends the current call or declines the ringing one (telephony Drop). */
+    /** Ends the current call or declines the ringing one. */
     fun endCall(): Boolean = sendTelephony(TELEPHONY_DROP)
 
-    /** Opens Siri on the iPhone. */
+    /** Opens Siri / Voice Assistant on the connected phone. */
     fun invokeSiri(): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+            return try {
+                touchExecutor.execute { cl.invokeVoiceAssistant() }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
         return try {
             touchExecutor.execute { session.invokeSiri() }
             true

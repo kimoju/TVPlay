@@ -380,18 +380,49 @@ object CarLinkAuthCipher {
             }
 
             // Phase 2: Normal connection with 6-digit PIN
-            if (
-                request.authPkHmac.isNotEmpty() &&
-                !verifyPinHmac(
+            // In ucar-sdk (ClientKeyNegotiator / ServerKeyNegotiator), the phone computes:
+            //   authPkHmac = generateHmac(Bytes.concat(clientAuthPk, clientNonce), new byte[0])
+            // Support both the ucar-sdk formula (message = authPk + random, salt = empty)
+            // and the salted variant (message = authPk, salt = random).
+            if (request.authPkHmac.isNotEmpty()) {
+                val ucarPinValid = verifyPinHmac(
+                    expectedMac = request.authPkHmac,
+                    message = request.authPk + request.random,
+                    salt = ByteArray(0),
+                    pinCode = pinCode,
+                )
+                val legacyPinValid = verifyPinHmac(
                     expectedMac = request.authPkHmac,
                     message = request.authPk,
                     salt = request.random,
                     pinCode = pinCode,
                 )
+                if (!ucarPinValid && !legacyPinValid) {
+                    return CarLinkProtoCodec.AuthResponseMsg(
+                        version = PROTOCOL_VERSION_1_5,
+                        result = 2,
+                        workModes = negotiatedWorkModes,
+                        dayOrNightMode = dayOrNightMode,
+                        screenInfo = screenInfo,
+                    )
+                }
+            }
+
+            if (
+                request.authPk.size == 64 &&
+                request.agreementPk.size == 64 &&
+                request.agreementPkSig.isNotEmpty() &&
+                request.random.isNotEmpty() &&
+                !verifyEcdsa(
+                    peerRawAuthPublicKey = request.authPk,
+                    message = request.agreementPk,
+                    suffix = request.random,
+                    signatureBytes = request.agreementPkSig,
+                )
             ) {
                 return CarLinkProtoCodec.AuthResponseMsg(
                     version = PROTOCOL_VERSION_1_5,
-                    result = 2,
+                    result = 1,
                     workModes = negotiatedWorkModes,
                     dayOrNightMode = dayOrNightMode,
                     screenInfo = screenInfo,

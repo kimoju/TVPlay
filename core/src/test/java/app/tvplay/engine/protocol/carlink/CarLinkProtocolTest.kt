@@ -217,11 +217,16 @@ class CarLinkProtocolTest {
         val wrongPinResp = serverHandshake.processAuthRequest(wrongPinReq, dayOrNightMode = 2, screenInfo = "1920x1080")
         assertEquals(2, wrongPinResp.result)
 
-        // Phase 2b: Normal connection with valid 6-digit PIN -> must return result = 0 and cache peer record
+        // Phase 2b: Normal connection with ucar-sdk 6-digit PIN formula (message = authPk + nonce, salt = empty)
+        val ucarClientHmac = CarLinkAuthCipher.generatePinHmac(
+            message = clientAuthPk + clientNonce,
+            salt = ByteArray(0),
+            pinCode = pin,
+        )
         val authReq = CarLinkProtoCodec.AuthRequestMsg(
             version = CarLinkAuthCipher.PROTOCOL_VERSION_1_5,
             authPk = clientAuthPk,
-            authPkHmac = clientHmac,
+            authPkHmac = ucarClientHmac,
             agreementPk = clientAgreePk,
             agreementPkSig = clientSig,
             random = clientNonce,
@@ -235,6 +240,7 @@ class CarLinkProtocolTest {
         val serverSessionKey = serverHandshake.sessionKey
         assertNotNull(serverSessionKey)
         assertEquals(16, serverSessionKey!!.size)
+        assertEquals(2120, CarLinkProtoCodec.DEFAULT_CAR_CERT_BYTES.size)
 
         // Phase 3: Subsequent Quick connection for already-paired clientId -> must return result = 0
         val reconnectSession = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)

@@ -230,9 +230,9 @@ class WorkbenchHeroStage(
             model.sessionActive -> "已建立手机互联 · 正在投屏"
             model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待无线握手" else "后台待命 · 等待 USB 接入"
             model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ->
-                "ICCOA CarLink 就绪 · PIN 码 ${model.carLinkPinCode}"
+                "CarLink 就绪 · PIN ${model.carLinkPinCode}"
             model.projectionProtocol == TvProjectionProtocol.AUTO ->
-                "双模并发就绪 · MFi + CarLink PIN ${model.carLinkPinCode}"
+                "双模就绪 · PIN ${model.carLinkPinCode}"
             else -> "就绪 · 离线 MFi 硬件级认证"
         }
         val statusPill = row().apply {
@@ -417,24 +417,25 @@ class WorkbenchHeroStage(
 
         val heroProtoRow = row()
         val heroProtoItems = listOf(
-            TvProjectionProtocol.AUTO to "双模同时待命",
-            TvProjectionProtocol.APPLE_CARPLAY to "苹果 CarPlay",
-            TvProjectionProtocol.ICCOA_CARLINK to "安卓 CarLink",
+            TvProjectionProtocol.AUTO to "双模并发",
+            TvProjectionProtocol.APPLE_CARPLAY to "CarPlay",
+            TvProjectionProtocol.ICCOA_CARLINK to "安卓车联",
         )
         heroProtoItems.forEachIndexed { idx, (proto, titleText) ->
             val selected = model.projectionProtocol == proto
             val btn = TvPlayButton(context).apply {
                 tag = "hero_proto_${proto.key}"
                 text = titleText
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                minHeight = dp(42)
-                minimumHeight = dp(42)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
+                minHeight = dp(40)
+                minimumHeight = dp(40)
                 style(
                     if (selected) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = if (proto == TvProjectionProtocol.APPLE_CARPLAY) TvIconGlyph.SHIELD_MFI else TvIconGlyph.PHONE,
                 )
+                setPadding(dp(10), dp(8), dp(10), dp(8))
                 setOnClickListener { callbacks.onChooseProjectionProtocol(proto) }
             }
             heroProtoRow.addView(
@@ -454,22 +455,22 @@ class WorkbenchHeroStage(
                 model.sessionRunning -> "打开全屏投屏等待画面"
                 model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ->
                     if (model.wirelessEnabled) {
-                        "立即启动无线安卓 CarLink 投屏 (PIN: ${model.carLinkPinCode})"
+                        "启动无线安卓 CarLink (PIN: ${model.carLinkPinCode})"
                     } else {
-                        "立即启动 USB 有线安卓 CarLink 投屏"
+                        "启动 USB 有线安卓 CarLink 投屏"
                     }
                 model.projectionProtocol == TvProjectionProtocol.AUTO ->
                     if (model.wirelessEnabled) {
-                        "立即启动无线双模投屏 (CarPlay + 安卓 CarLink)"
+                        "启动无线双模投屏 (CarPlay + CarLink)"
                     } else {
-                        "立即启动 USB 有线双模投屏 (CarPlay + CarLink)"
+                        "启动 USB 有线双模投屏 (CarPlay + CarLink)"
                     }
-                model.wirelessEnabled -> "立即启动无线 Apple CarPlay 投屏"
-                else -> "立即启动 USB 有线 Apple CarPlay 投屏"
+                model.wirelessEnabled -> "启动无线 Apple CarPlay 投屏"
+                else -> "启动 USB 有线 Apple CarPlay 投屏"
             }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            minHeight = dp(52)
-            minimumHeight = dp(52)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            minHeight = dp(50)
+            minimumHeight = dp(50)
             style(TvPlayButtonKind.PRIMARY, palette, overlay = false, glyph = TvIconGlyph.PLAY)
             setOnClickListener { callbacks.onStartOrEnterProjection() }
         }
@@ -506,72 +507,42 @@ class WorkbenchHeroStage(
         modeCard.addView(
             bentoSectionHeader(
                 glyph = TvIconGlyph.WIFI,
-                title = "协议与连接模式切换",
+                title = "连接方式",
                 badgeText = model.hotspotSummary ?: "即时生效",
                 palette = palette,
             ),
         )
         modeCard.addView(space(dp(10)))
 
-        val protocolRow = row()
-        val protocolItems = listOf(
-            TvProjectionProtocol.AUTO to "双模并发",
-            TvProjectionProtocol.APPLE_CARPLAY to "Apple CarPlay",
-            TvProjectionProtocol.ICCOA_CARLINK to "安卓 CarLink",
-        )
-        protocolItems.forEachIndexed { idx, (proto, titleText) ->
-            val selected = model.projectionProtocol == proto
-            val btn = TvPlayButton(context).apply {
-                tag = "proto_${proto.key}"
-                text = titleText
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
-                minHeight = dp(40)
-                minimumHeight = dp(40)
-                style(
-                    if (selected) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
-                    palette,
-                    overlay = false,
-                    glyph = if (proto == TvProjectionProtocol.APPLE_CARPLAY) TvIconGlyph.SHIELD_MFI else TvIconGlyph.PHONE,
-                )
-                setOnClickListener { callbacks.onChooseProjectionProtocol(proto) }
-            }
-            protocolRow.addView(
-                btn,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (idx < protocolItems.lastIndex) marginEnd = dp(8)
-                },
-            )
-        }
-        modeCard.addView(protocolRow)
-        modeCard.addView(space(dp(8)))
-
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
             tag = "mode_wireless"
             text = "无线投屏连接"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            minHeight = dp(44)
-            minimumHeight = dp(44)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            minHeight = dp(40)
+            minimumHeight = dp(40)
             style(
                 if (model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
                 glyph = TvIconGlyph.WIFI,
             )
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             setOnClickListener { callbacks.onChooseTransportMode(true) }
         }
         val usbBtn = TvPlayButton(context).apply {
             tag = "mode_usb"
             text = "USB 有线直连"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            minHeight = dp(44)
-            minimumHeight = dp(44)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            minHeight = dp(40)
+            minimumHeight = dp(40)
             style(
                 if (!model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
                 glyph = TvIconGlyph.USB,
             )
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             setOnClickListener { callbacks.onChooseTransportMode(false) }
         }
         transportRow.addView(
@@ -591,29 +562,31 @@ class WorkbenchHeroStage(
             val directBtn = TvPlayButton(context).apply {
                 tag = "mode_direct"
                 text = "Wi-Fi Direct 直连"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                minHeight = dp(42)
-                minimumHeight = dp(42)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                minHeight = dp(40)
+                minimumHeight = dp(40)
                 style(
                     if (isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = TvIconGlyph.RADAR,
                 )
+                setPadding(dp(10), dp(8), dp(10), dp(8))
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
             }
             val lanBtn = TvPlayButton(context).apply {
                 tag = "mode_lan"
                 text = "家庭局域网 / 网线"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                minHeight = dp(42)
-                minimumHeight = dp(42)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                minHeight = dp(40)
+                minimumHeight = dp(40)
                 style(
                     if (!isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = TvIconGlyph.LAN,
                 )
+                setPadding(dp(10), dp(8), dp(10), dp(8))
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.LAN_WIFI) }
             }
             switchRow.addView(

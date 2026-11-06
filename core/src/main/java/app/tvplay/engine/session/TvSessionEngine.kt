@@ -758,6 +758,7 @@ class TvSessionEngine(
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: UsbTunnelVpnService? = null
     @Volatile private var vpnBound = false
+    @Volatile private var activeHotspotInfo: WirelessHotspotInfo? = null
     @Volatile private var carLinkSession: CarLinkControlSession? = null
     @Volatile private var carLinkBleAdvertiser: CarLinkBleAdvertiser? = null
     private val wirelessHandoffRequested = AtomicBoolean(false)
@@ -911,7 +912,11 @@ class TvSessionEngine(
             startCarLinkSubsystem()
         }
         if (!config.projectionProtocol.enablesCarPlay) {
-            onStatus(CarPlayStatus.RunningWireless)
+            if (config.transport == TvTransportMode.WIRELESS) {
+                startStandaloneCarLinkWireless()
+            } else {
+                onStatus(CarPlayStatus.RunningControl)
+            }
             return
         }
         if (!hasRequiredUsbService()) return
@@ -920,6 +925,44 @@ class TvSessionEngine(
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
         }
         startMfi()
+    }
+
+    private fun startStandaloneCarLinkWireless() {
+        val generation = synchronized(wirelessResourceLock) {
+            phase = Phase.WIRELESS
+            wirelessFailureReported.set(false)
+            val next = wirelessGeneration.incrementAndGet()
+            onStatus(CarPlayStatus.StartingHotspot, next)
+            next
+        }
+        runCatching {
+            executor.execute {
+                try {
+                    acquireWifiPerformanceLock()
+                    val hotspotInfo = startWirelessHotspot(generation)
+                    activeHotspotInfo = hotspotInfo
+                    val hostAddr = hotspotInfo.hostAddress ?: hotspotInfo.hostAddresses.firstOrNull()
+                    if (hostAddr != null) {
+                        wirelessPublishedAddress = hostAddr
+                    }
+                    onStatus(
+                        CarPlayStatus.HotspotReady(
+                            ssid = hotspotInfo.ssid,
+                            band = hotspotInfo.bandLabel,
+                            channel = hotspotInfo.channel,
+                            bssid = hotspotInfo.bssid ?: airPlayConfig.deviceId,
+                            address = hostAddr?.hostAddress ?: "",
+                            backend = hotspotInfo.backend.label,
+                        ),
+                        generation,
+                    )
+                    onStatus(CarPlayStatus.RunningWireless, generation)
+                } catch (e: Exception) {
+                    debugLog("CarLink standalone wireless hotspot note: ${e.message}")
+                    onStatus(CarPlayStatus.RunningWireless, generation)
+                }
+            }
+        }
     }
 
     private fun startCarLinkSubsystem() {
@@ -969,16 +1012,24 @@ class TvSessionEngine(
                 carName = config.label,
                 modelIdHex8 = config.carLinkModelId,
                 vendorDataHex4 = config.carLinkVendorData,
+                pinCodeProvider = { config.carLinkPinCode },
+                isSessionActiveProvider = { session.isActive() },
                 serverInfoProvider = {
-                    val ssid = config.lanWifiSsid.ifBlank { config.label }
-                    val psk = config.lanWifiPassphrase
-                    val hostAddr = wirelessPublishedAddress?.hostAddress ?: ""
+                    val liveHotspot = activeHotspotInfo
+                    val ssid = liveHotspot?.ssid?.takeIf { it.isNotBlank() }
+                        ?: config.lanWifiSsid.ifBlank { config.label }
+                    val psk = liveHotspot?.passphrase?.takeIf { it.isNotBlank() }
+                        ?: config.lanWifiPassphrase
+                    val hostAddr = wirelessPublishedAddress?.hostAddress
+                        ?: liveHotspot?.hostAddress?.hostAddress
+                        ?: ""
+                    val freq = liveHotspot?.frequencyMHz ?: 5180
                     CarLinkBleSpec.ServerConnectionInfo(
                         name = config.label,
                         ssid = ssid,
                         psk = psk,
-                        mac = hostAddr.ifBlank { airPlayConfig.btMac },
-                        freq = 5180,
+                        mac = hostAddr.ifBlank { liveHotspot?.bssid ?: airPlayConfig.btMac },
+                        freq = freq,
                         port = 0,
                         type = if (config.wirelessMode == TvWirelessMode.WIFI_DIRECT) 1 else 2,
                     )
@@ -2699,7 +2750,7 @@ class TvSessionEngine(
             10_000L
         }
         return try {
-            manager.start(timeoutMillis)
+            manager.start(timeoutMillis).also { activeHotspotInfo = it }
         } catch (failure: Exception) {
             if (hotspot === manager) hotspot = null
             closeBestEffort(hotspotMode.name) { manager.close() }

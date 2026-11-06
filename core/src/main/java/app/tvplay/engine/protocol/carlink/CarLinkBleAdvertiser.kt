@@ -183,6 +183,8 @@ class CarLinkBleAdvertiser(
     private val carName: String,
     private val modelIdHex8: String = "00010001",
     private val vendorDataHex4: String = "0000",
+    private val pinCodeProvider: () -> String = { "864209" },
+    private val isSessionActiveProvider: () -> Boolean = { false },
     private val serverInfoProvider: () -> CarLinkBleSpec.ServerConnectionInfo?,
     private val onClientConnected: (BluetoothDevice, CarLinkBleSpec.ClientInfo) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
@@ -199,10 +201,24 @@ class CarLinkBleAdvertiser(
     private val rotateTask = object : Runnable {
         override fun run() {
             if (closed.get()) return
-            serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
-            restartAdvertisingInternal()
+            if (!isSessionActiveProvider()) {
+                serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
+                restartAdvertisingInternal()
+            }
             handler.postDelayed(this, CarLinkBleSpec.ROTATION_INTERVAL_MS)
         }
+    }
+
+    /**
+     * Immediately stops and restarts BLE advertising with an incremented `serialNumber`
+     * so Xiaomi CarWith / OPPO Car+ / vivo Jovi InCar re-triggers the pairing prompt.
+     */
+    fun refreshPairingAdvertisement() {
+        if (closed.get() || isSessionActiveProvider()) return
+        serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
+        handler.removeCallbacks(rotateTask)
+        restartAdvertisingInternal()
+        handler.postDelayed(rotateTask, CarLinkBleSpec.ROTATION_INTERVAL_MS)
     }
 
     fun start(): Boolean {

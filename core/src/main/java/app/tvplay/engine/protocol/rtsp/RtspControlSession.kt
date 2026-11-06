@@ -146,7 +146,7 @@ interface AirPlaySessionListener {
     fun onDeviceInfo(session: RtspControlSession, info: AirPlayDeviceInfo) {}
     fun onHostUiRequested(session: RtspControlSession) {}
     fun onCommand(session: RtspControlSession, type: String, params: Map<String, Any?>) {}
-    val wantsTrace: Boolean get() = true
+    val wantsTrace: Boolean get() = false
     fun onDebugLog(message: String) {}
 }
 
@@ -289,7 +289,14 @@ class RtspControlSession(
             "CSeq: $eventCseq\r\n\r\n"
         trace { "airplay event tx headers=$head bodyHex=${body.toHexString()}" }
         return try {
-            val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
+            val wire = ByteArray(head.length + body.size)
+            for (index in 0 until head.length) {
+                wire[index] = head[index].code.toByte()
+            }
+            if (body.isNotEmpty()) {
+                body.copyInto(wire, head.length)
+            }
+            val bytes = cipher.encrypt(wire)
             try {
                 val output = socket.getOutputStream()
                 output.write(bytes)
@@ -331,17 +338,14 @@ class RtspControlSession(
 
     /** [contacts] carry Android pointer ids; an empty list releases every finger. */
     fun sendTouch(contacts: List<ViewportTouchContact>): Boolean {
-        val scaled = touchSlots.assign(contacts).map {
-            it.copy(x = it.x * config.main.widthPixels, y = it.y * config.main.heightPixels)
-        }
-        val report = AirPlayHid.touchReport(scaled)
-        val sent = sendHidReport(AirPlayHid.TOUCH_HID_UID, report)
+        val report = touchSlots.encodeReport(contacts, config.main.widthPixels, config.main.heightPixels)
+        val sent = sendHidReport(AirPlayHid.TOUCH_HID_UUID, report)
         if (sent && firstTouchSendLogged.compareAndSet(false, true)) {
-            val first = scaled.firstOrNull()
+            val first = contacts.firstOrNull()
             Log.i(
                 TAG,
-                "airplay touch report sent contacts=${scaled.size} first=" +
-                    "(${first?.x},${first?.y},down=${first?.down}) report=${report.toHexString()}",
+                "airplay touch report sent contacts=${contacts.size} first=" +
+                    "(${first?.let { it.x * config.main.widthPixels }},${first?.let { it.y * config.main.heightPixels }},down=${first?.down}) report=${report.toHexString()}",
             )
         } else if (!sent && touchSendFailureLogged.compareAndSet(false, true)) {
             Log.w(TAG, "airplay touch dropped: event channel is not ready")
@@ -350,21 +354,21 @@ class RtspControlSession(
     }
 
     fun sendKnob(state: AirPlayKnobState, momentary: Boolean = true) {
-        sendHidReport(AirPlayHid.KNOB_HID_UID, AirPlayHid.knobReport(state))
-        if (momentary) sendHidReport(AirPlayHid.KNOB_HID_UID, AirPlayHid.knobReport(AirPlayKnobState()))
+        sendHidReport(AirPlayHid.KNOB_HID_UUID, AirPlayHid.knobReport(state))
+        if (momentary) sendHidReport(AirPlayHid.KNOB_HID_UUID, ZERO_KNOB_REPORT)
     }
 
     fun sendKnobSelect(down: Boolean): Boolean =
-        sendHidReport(AirPlayHid.KNOB_HID_UID, AirPlayHid.knobReport(AirPlayKnobState(select = down)))
+        sendHidReport(AirPlayHid.KNOB_HID_UUID, AirPlayHid.knobReport(AirPlayKnobState(select = down)))
 
     fun sendMedia(index: Int) {
-        sendHidReport(AirPlayHid.MEDIA_HID_UID, AirPlayHid.mediaReport(index))
-        sendHidReport(AirPlayHid.MEDIA_HID_UID, AirPlayHid.mediaReport(0))
+        sendHidReport(AirPlayHid.MEDIA_HID_UUID, AirPlayHid.mediaReport(index))
+        sendHidReport(AirPlayHid.MEDIA_HID_UUID, ZERO_SINGLE_BYTE_REPORT)
     }
 
     fun sendTelephony(index: Int) {
-        sendHidReport(AirPlayHid.TELEPHONY_HID_UID, AirPlayHid.telephonyReport(index))
-        sendHidReport(AirPlayHid.TELEPHONY_HID_UID, AirPlayHid.telephonyReport(0))
+        sendHidReport(AirPlayHid.TELEPHONY_HID_UUID, AirPlayHid.telephonyReport(index))
+        sendHidReport(AirPlayHid.TELEPHONY_HID_UUID, ZERO_SINGLE_BYTE_REPORT)
     }
 
     fun invokeSiri() {
@@ -445,11 +449,11 @@ class RtspControlSession(
         return sent
     }
 
-    private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
+    private fun sendHidReport(uuid: String, report: ByteArray): Boolean =
         sendCommand(
             linkedMapOf(
                 "type" to "hidSendReport",
-                "uuid" to uid.toString(16),
+                "uuid" to uuid,
                 "hidReport" to report,
             ),
         )
@@ -468,10 +472,9 @@ class RtspControlSession(
                     closeReason = "peer EOF"
                     break
                 }
-                var plaintext = buffer.copyOf(count)
                 val activeCipher = cipher
-                if (activeCipher != null) {
-                    encBuf += plaintext
+                val plaintext = if (activeCipher != null) {
+                    encBuf = appendBytes(encBuf, buffer, count)
                     val decrypted = try {
                         activeCipher.decrypt(encBuf)
                     } catch (error: Exception) {
@@ -480,9 +483,11 @@ class RtspControlSession(
                         break
                     }
                     encBuf = decrypted.rest
-                    plaintext = decrypted.data
+                    decrypted.data
+                } else {
+                    buffer.copyOf(count)
                 }
-                accumulated += plaintext
+                accumulated = if (accumulated.isEmpty()) plaintext else accumulated + plaintext
                 val parsed = RtspMessageCodec.parseMessages(accumulated)
                 accumulated = parsed.rest
                 for (request in parsed.messages) {
@@ -846,9 +851,11 @@ class RtspControlSession(
 
     private fun runKeepAlive(socket: DatagramSocket) {
         val buffer = ByteArray(512)
+        val packet = DatagramPacket(buffer, buffer.size)
         while (!closed.get() && !socket.isClosed) {
+            packet.setData(buffer, 0, buffer.size)
             try {
-                socket.receive(DatagramPacket(buffer, buffer.size))
+                socket.receive(packet)
             } catch (_: Exception) {
                 if (closed.get() || socket.isClosed) return
             }
@@ -941,7 +948,7 @@ class RtspControlSession(
                 val count = input.read(buffer)
                 if (count < 0) break
                 val cipher = synchronized(eventWriteLock) { eventCipher } ?: break
-                encrypted += buffer.copyOf(count)
+                encrypted = appendBytes(encrypted, buffer, count)
                 val decrypted = try {
                     cipher.decrypt(encrypted)
                 } catch (error: Exception) {
@@ -949,7 +956,7 @@ class RtspControlSession(
                     break
                 }
                 encrypted = decrypted.rest
-                plaintext += decrypted.data
+                plaintext = if (plaintext.isEmpty()) decrypted.data else plaintext + decrypted.data
                 val parsed = RtspMessageCodec.parseMessages(plaintext)
                 plaintext = parsed.rest
                 for (message in parsed.messages) {
@@ -1007,6 +1014,17 @@ class RtspControlSession(
         const val READ_CHUNK_BYTES = 16 * 1024
         const val EVENT_READY_POLL_MILLIS = 25L
         const val NANOS_PER_MILLISECOND = 1_000_000L
+        private val ZERO_KNOB_REPORT = ByteArray(4)
+        private val ZERO_SINGLE_BYTE_REPORT = ByteArray(1)
+
+        private fun appendBytes(existing: ByteArray, chunk: ByteArray, count: Int): ByteArray {
+            if (count <= 0) return existing
+            if (existing.isEmpty()) return chunk.copyOf(count)
+            val combined = ByteArray(existing.size + count)
+            existing.copyInto(combined, 0)
+            chunk.copyInto(combined, existing.size, 0, count)
+            return combined
+        }
     }
 }
 

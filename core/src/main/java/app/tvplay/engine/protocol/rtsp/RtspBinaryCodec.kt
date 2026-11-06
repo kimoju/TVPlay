@@ -1,6 +1,5 @@
 package app.tvplay.engine.protocol.rtsp
 
-import app.tvplay.engine.auth.concatBytes
 import app.tvplay.engine.av.DisplayInsets
 import app.tvplay.engine.av.DisplayMetricMath
 import app.tvplay.engine.av.TvDisplaySpec
@@ -122,7 +121,14 @@ object RtspMessageCodec {
             for ((name, value) in headers) append(name).append(": ").append(value).append("\r\n")
             append("\r\n")
         }
-        return head.toByteArray(Charsets.US_ASCII) + body
+        val wire = ByteArray(head.length + body.size)
+        for (index in 0 until head.length) {
+            wire[index] = head[index].code.toByte()
+        }
+        if (body.isNotEmpty()) {
+            body.copyInto(wire, head.length)
+        }
+        return wire
     }
 
     private fun indexOf(source: ByteArray, target: ByteArray, start: Int): Int? {
@@ -154,7 +160,9 @@ object BplistCodec {
 
     fun decode(bytes: ByteArray): Any? {
         require(bytes.size >= 40) { "bplist: too short" }
-        require(bytes.copyOfRange(0, magic.size).contentEquals(magic)) { "bplist: bad magic" }
+        for (i in magic.indices) {
+            require(bytes[i] == magic[i]) { "bplist: bad magic" }
+        }
 
         val trailer = bytes.size - 32
         val offsetSize = bytes[trailer + 6].toInt() and 0xff
@@ -186,9 +194,9 @@ object BplistCodec {
 
         fun add(value: Any?): Int {
             val index = nodes.size
-            nodes.add(Leaf(ByteArray(0)))
+            nodes.add(PLACEHOLDER_LEAF)
             when (value) {
-                is Boolean -> nodes[index] = Leaf(byteArrayOf(if (value) 0x09 else 0x08))
+                is Boolean -> nodes[index] = if (value) TRUE_LEAF else FALSE_LEAF
                 is BigInteger -> {
                     require(value.signum() >= 0) { "bplist: negative integers are not supported" }
                     require(value.bitLength() <= 64) { "bplist: integer exceeds 64 bits" }
@@ -199,24 +207,34 @@ object BplistCodec {
                     nodes[index] = if (number >= 0) {
                         Leaf(encodeInt(number))
                     } else {
-                        Leaf(byteArrayOf(0x23) + bigEndian(number.toDouble().toRawBits(), 8))
+                        Leaf(encodeReal64(number.toDouble().toRawBits()))
                     }
                 }
                 is Float, is Double -> {
                     val number = (value as Number).toDouble()
-                    nodes[index] = Leaf(byteArrayOf(0x23) + bigEndian(number.toRawBits(), 8))
+                    nodes[index] = Leaf(encodeReal64(number.toRawBits()))
                 }
                 is String -> nodes[index] = Leaf(encodeString(value))
-                is ByteArray -> nodes[index] = Leaf(marker(0x4, value.size) + value)
+                is ByteArray -> nodes[index] = DataLeaf(value)
                 is List<*> -> {
-                    val refs = value.map { add(it) }.toIntArray()
-                    nodes[index] = Container(marker(0xa, value.size), refs)
+                    val refs = IntArray(value.size)
+                    for (i in value.indices) {
+                        refs[i] = add(value[i])
+                    }
+                    nodes[index] = Container(0xa, value.size, refs)
                 }
                 is Map<*, *> -> {
-                    val entries = value.entries.toList()
-                    val keyRefs = entries.map { add(it.key.toString()) }.toIntArray()
-                    val valueRefs = entries.map { add(it.value) }.toIntArray()
-                    nodes[index] = Container(marker(0xd, entries.size), keyRefs + valueRefs)
+                    val count = value.size
+                    val refs = IntArray(count * 2)
+                    var keyIdx = 0
+                    for (key in value.keys) {
+                        refs[keyIdx++] = add(key.toString())
+                    }
+                    var valIdx = count
+                    for (entryValue in value.values) {
+                        refs[valIdx++] = add(entryValue)
+                    }
+                    nodes[index] = Container(0xd, count, refs)
                 }
                 else -> throw IllegalArgumentException("bplist: unsupported value $value")
             }
@@ -230,18 +248,11 @@ object BplistCodec {
             else -> 1
         }
 
-        val parts = ArrayList<ByteArray>(nodes.size + 2)
-        parts.add(magic)
         var cursor = magic.size
-        val offsets = ArrayList<Int>(nodes.size)
-        for (node in nodes) {
-            offsets.add(cursor)
-            val serialized = when (node) {
-                is Leaf -> node.body
-                is Container -> node.head + refBytes(node.refs, refSize)
-            }
-            parts.add(serialized)
-            cursor += serialized.size
+        val offsets = IntArray(nodes.size)
+        for (i in nodes.indices) {
+            offsets[i] = cursor
+            cursor += nodes[i].serializedSize(refSize)
         }
 
         val offsetTableOffset = cursor
@@ -250,16 +261,23 @@ object BplistCodec {
             cursor > 0xff -> 2
             else -> 1
         }
-        for (offset in offsets) parts.add(bigEndian(offset.toLong(), offsetSize))
-
-        val trailer = ByteArray(32)
-        trailer[6] = offsetSize.toByte()
-        trailer[7] = refSize.toByte()
-        writeBigEndian(trailer, 8, nodes.size.toLong(), 8)
-        writeBigEndian(trailer, 16, topIndex.toLong(), 8)
-        writeBigEndian(trailer, 24, offsetTableOffset.toLong(), 8)
-        parts.add(trailer)
-        return concatBytes(*parts.toTypedArray())
+        val totalSize = offsetTableOffset + offsets.size * offsetSize + 32
+        val output = ByteArray(totalSize)
+        magic.copyInto(output, 0)
+        var writeCursor = magic.size
+        for (i in nodes.indices) {
+            writeCursor = nodes[i].writeTo(output, writeCursor, refSize)
+        }
+        for (offset in offsets) {
+            writeBigEndian(output, writeCursor, offset.toLong(), offsetSize)
+            writeCursor += offsetSize
+        }
+        output[writeCursor + 6] = offsetSize.toByte()
+        output[writeCursor + 7] = refSize.toByte()
+        writeBigEndian(output, writeCursor + 8, nodes.size.toLong(), 8)
+        writeBigEndian(output, writeCursor + 16, topIndex.toLong(), 8)
+        writeBigEndian(output, writeCursor + 24, offsetTableOffset.toLong(), 8)
+        return output
     }
 
     private fun readObject(
@@ -362,73 +380,93 @@ object BplistCodec {
     }
 
     private fun encodeString(value: String): ByteArray {
-        val ascii = value.all { it.code <= 0x7f }
-        return if (ascii) {
-            marker(0x5, value.length) + value.toByteArray(Charsets.US_ASCII)
-        } else {
-            marker(0x6, value.length) + value.toByteArray(Charsets.UTF_16BE)
+        var ascii = true
+        for (index in 0 until value.length) {
+            if (value[index].code > 0x7f) {
+                ascii = false
+                break
+            }
         }
+        val mSize = markerSize(value.length)
+        return if (ascii) {
+            val out = ByteArray(mSize + value.length)
+            var pos = writeMarker(out, 0, 0x5, value.length)
+            for (index in 0 until value.length) {
+                out[pos++] = value[index].code.toByte()
+            }
+            out
+        } else {
+            val out = ByteArray(mSize + value.length * 2)
+            var pos = writeMarker(out, 0, 0x6, value.length)
+            for (index in 0 until value.length) {
+                val ch = value[index].code
+                out[pos++] = (ch ushr 8).toByte()
+                out[pos++] = ch.toByte()
+            }
+            out
+        }
+    }
+
+    private fun encodeReal64(rawBits: Long): ByteArray {
+        val out = ByteArray(9)
+        out[0] = 0x23
+        writeBigEndian(out, 1, rawBits, 8)
+        return out
     }
 
     private fun encodeInt(number: Long): ByteArray {
-        val size = when {
-            number > 0xffffffffL -> 8
-            number > 0xffffL -> 4
-            number > 0xffL -> 2
-            else -> 1
+        val size: Int
+        val log: Int
+        when {
+            number > 0xffffffffL -> { size = 8; log = 3 }
+            number > 0xffffL -> { size = 4; log = 2 }
+            number > 0xffL -> { size = 2; log = 1 }
+            else -> { size = 1; log = 0 }
         }
-        val log = when (size) {
-            8 -> 3
-            4 -> 2
-            2 -> 1
-            else -> 0
-        }
-        return byteArrayOf((0x10 or log).toByte()) + bigEndian(number, size)
+        val out = ByteArray(1 + size)
+        out[0] = (0x10 or log).toByte()
+        writeBigEndian(out, 1, number, size)
+        return out
     }
 
     private fun encodeUnsignedInt(number: BigInteger): ByteArray {
-        val size = when {
-            number.bitLength() > 32 -> 8
-            number.bitLength() > 16 -> 4
-            number.bitLength() > 8 -> 2
-            else -> 1
+        val size: Int
+        val log: Int
+        when {
+            number.bitLength() > 32 -> { size = 8; log = 3 }
+            number.bitLength() > 16 -> { size = 4; log = 2 }
+            number.bitLength() > 8 -> { size = 2; log = 1 }
+            else -> { size = 1; log = 0 }
         }
-        val log = when (size) {
-            8 -> 3
-            4 -> 2
-            2 -> 1
-            else -> 0
-        }
-        val raw = number.toByteArray()
-        return byteArrayOf((0x10 or log).toByte()) + raw.copyOfRange(raw.size - size, raw.size)
+        val out = ByteArray(1 + size)
+        out[0] = (0x10 or log).toByte()
+        writeBigEndian(out, 1, number.toLong(), size)
+        return out
     }
 
-    private fun marker(type: Int, count: Int): ByteArray {
-        if (count < 0x0f) return byteArrayOf(((type shl 4) or count).toByte())
-        val size = when {
-            count > 0xffff -> 4
-            count > 0xff -> 2
-            else -> 1
-        }
-        val log = when (size) {
-            4 -> 2
-            2 -> 1
-            else -> 0
-        }
-        return byteArrayOf(((type shl 4) or 0x0f).toByte(), (0x10 or log).toByte()) +
-            bigEndian(count.toLong(), size)
+    private fun markerSize(count: Int): Int = when {
+        count < 0x0f -> 1
+        count > 0xffff -> 6
+        count > 0xff -> 4
+        else -> 3
     }
 
-    private fun refBytes(refs: IntArray, refSize: Int): ByteArray {
-        val output = ByteArray(refs.size * refSize)
-        for (index in refs.indices) writeBigEndian(output, index * refSize, refs[index].toLong(), refSize)
-        return output
-    }
-
-    private fun bigEndian(value: Long, size: Int): ByteArray {
-        val output = ByteArray(size)
-        writeBigEndian(output, 0, value, size)
-        return output
+    private fun writeMarker(target: ByteArray, offset: Int, type: Int, count: Int): Int {
+        if (count < 0x0f) {
+            target[offset] = ((type shl 4) or count).toByte()
+            return offset + 1
+        }
+        val size: Int
+        val log: Int
+        when {
+            count > 0xffff -> { size = 4; log = 2 }
+            count > 0xff -> { size = 2; log = 1 }
+            else -> { size = 1; log = 0 }
+        }
+        target[offset] = ((type shl 4) or 0x0f).toByte()
+        target[offset + 1] = (0x10 or log).toByte()
+        writeBigEndian(target, offset + 2, count.toLong(), size)
+        return offset + 2 + size
     }
 
     private fun writeBigEndian(target: ByteArray, offset: Int, value: Long, size: Int) {
@@ -463,9 +501,43 @@ object BplistCodec {
 
     private class Limits(var reads: Long, var payload: Long)
 
-    private sealed class Node
-    private class Leaf(val body: ByteArray) : Node()
-    private class Container(val head: ByteArray, val refs: IntArray) : Node()
+    private sealed class Node {
+        abstract fun serializedSize(refSize: Int): Int
+        abstract fun writeTo(target: ByteArray, offset: Int, refSize: Int): Int
+    }
+
+    private class Leaf(val body: ByteArray) : Node() {
+        override fun serializedSize(refSize: Int): Int = body.size
+        override fun writeTo(target: ByteArray, offset: Int, refSize: Int): Int {
+            body.copyInto(target, offset)
+            return offset + body.size
+        }
+    }
+
+    private class DataLeaf(val payload: ByteArray) : Node() {
+        override fun serializedSize(refSize: Int): Int = markerSize(payload.size) + payload.size
+        override fun writeTo(target: ByteArray, offset: Int, refSize: Int): Int {
+            val next = writeMarker(target, offset, 0x4, payload.size)
+            payload.copyInto(target, next)
+            return next + payload.size
+        }
+    }
+
+    private class Container(val type: Int, val count: Int, val refs: IntArray) : Node() {
+        override fun serializedSize(refSize: Int): Int = markerSize(count) + refs.size * refSize
+        override fun writeTo(target: ByteArray, offset: Int, refSize: Int): Int {
+            var pos = writeMarker(target, offset, type, count)
+            for (ref in refs) {
+                writeBigEndian(target, pos, ref.toLong(), refSize)
+                pos += refSize
+            }
+            return pos
+        }
+    }
+
+    private val PLACEHOLDER_LEAF = Leaf(ByteArray(0))
+    private val FALSE_LEAF = Leaf(byteArrayOf(0x08))
+    private val TRUE_LEAF = Leaf(byteArrayOf(0x09))
 
     private const val APPLE_EPOCH_SECONDS = 978_307_200.0
     private const val MAX_DEPTH = 32
@@ -560,24 +632,25 @@ class NtpClock : Closeable {
         writeU16Be(packet, 2, 7)
         val t1 = syncedNtp()
         synchronized(clockLock) { pendingT1 = t1 }
-        ntpBytes(t1).copyInto(packet, NTP_TRANSMIT_OFFSET)
+        writeNtp(t1, packet, NTP_TRANSMIT_OFFSET)
         currentSocket()?.send(DatagramPacket(packet, packet.size, destination))
     }
 
     private fun runReceiver() {
         val buffer = ByteArray(RECEIVE_BUFFER_BYTES)
+        val packet = DatagramPacket(buffer, buffer.size)
         while (running.get()) {
             val sock = currentSocket() ?: return
-            val packet = DatagramPacket(buffer, buffer.size)
+            packet.setData(buffer, 0, buffer.size)
             try {
                 sock.receive(packet)
             } catch (_: Exception) {
                 if (running.get()) continue else return
             }
-            val message = packet.data.copyOf(packet.length)
+            val length = packet.length
             val address = packet.address
-            if (message.size >= NTP_PACKET_BYTES && address != null) {
-                handleMessage(message, InetSocketAddress(address, packet.port))
+            if (length >= NTP_PACKET_BYTES && address != null) {
+                handleMessage(buffer, InetSocketAddress(address, packet.port))
             }
         }
     }
@@ -597,8 +670,8 @@ class NtpClock : Closeable {
         response[1] = PT_RESPONSE.toByte()
         writeU16Be(response, 2, 7)
         request.copyInto(response, NTP_ORIGINATE_OFFSET, NTP_TRANSMIT_OFFSET, NTP_PACKET_BYTES)
-        ntpBytes(syncedNtp()).copyInto(response, NTP_RECEIVE_OFFSET)
-        ntpBytes(syncedNtp()).copyInto(response, NTP_TRANSMIT_OFFSET)
+        writeNtp(syncedNtp(), response, NTP_RECEIVE_OFFSET)
+        writeNtp(syncedNtp(), response, NTP_TRANSMIT_OFFSET)
         currentSocket()?.send(DatagramPacket(response, response.size, source))
     }
 
@@ -693,11 +766,10 @@ private fun ntpFromNanos(ns: Long): BigInteger {
     return seconds.shiftLeft(32).or(nanos.shiftLeft(32).divide(NANOS_PER_SECOND))
 }
 
-private fun ntpBytes(value: BigInteger): ByteArray {
-    val bytes = value.and(BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE)).toByteArray()
-    return ByteArray(8).also { target ->
-        val source = if (bytes.size > 8) bytes.copyOfRange(bytes.size - 8, bytes.size) else bytes
-        source.copyInto(target, target.size - source.size)
+private fun writeNtp(value: BigInteger, target: ByteArray, offset: Int) {
+    val raw = value.toLong()
+    for (index in 7 downTo 0) {
+        target[offset + index] = ((raw ushr ((7 - index) * 8)) and 0xffL).toByte()
     }
 }
 

@@ -23,8 +23,13 @@ object AirPlayHid {
     const val MEDIA_HID_UID = 0x2a2a2a2c
     const val TELEPHONY_HID_UID = 0x2a2a2a2d
 
+    const val TOUCH_HID_UUID = "2a2a2a2a"
+    const val KNOB_HID_UUID = "2a2a2a2b"
+    const val MEDIA_HID_UUID = "2a2a2a2c"
+    const val TELEPHONY_HID_UUID = "2a2a2a2d"
+
     internal const val TOUCH_CONTACTS = 2
-    private const val BYTES_PER_FINGER = 6
+    internal const val BYTES_PER_FINGER = 6
 
     fun touchHidDevice(xMax: Int, yMax: Int, displayUuid: String): Map<String, Any?> =
         hidDeviceEntry(TOUCH_HID_UID, "TVPlay Touchscreen", multitouchDescriptor(xMax, yMax), displayUuid)
@@ -133,7 +138,7 @@ object AirPlayHid {
 
     private fun clampAxis(value: Int): Byte = value.coerceIn(-127, 127).toByte()
 
-    private fun writeU16Le(target: ByteArray, offset: Int, value: Int) {
+    internal fun writeU16Le(target: ByteArray, offset: Int, value: Int) {
         target[offset] = (value and 0xff).toByte()
         target[offset + 1] = ((value ushr 8) and 0xff).toByte()
     }
@@ -148,8 +153,10 @@ object AirPlayHid {
 class AirPlayTouchSlots(private val slots: Int = AirPlayHid.TOUCH_CONTACTS) {
     private val pointers = arrayOfNulls<Int>(slots)
     private val held = arrayOfNulls<ViewportTouchContact>(slots)
+    private val slotScratch = arrayOfNulls<ViewportTouchContact>(slots)
 
     /** The contacts to report, each with its slot as id; empty slots are left out. */
+    @Synchronized
     fun assign(contacts: List<ViewportTouchContact>): List<ViewportTouchContact> {
         val report = arrayOfNulls<ViewportTouchContact>(slots)
         for (contact in contacts) {
@@ -160,7 +167,7 @@ class AirPlayTouchSlots(private val slots: Int = AirPlayHid.TOUCH_CONTACTS) {
             report[slot] = contact.copy(id = slot)
         }
         for (slot in 0 until slots) {
-            if (report[slot] == null) report[slot] = held[slot]?.copy(down = false)
+            if (report[slot] == null) report[slot] = held[slot]?.copy(id = slot, down = false)
             val sent = report[slot]
             if (sent?.down == true) {
                 held[slot] = sent
@@ -170,6 +177,49 @@ class AirPlayTouchSlots(private val slots: Int = AirPlayHid.TOUCH_CONTACTS) {
             }
         }
         return report.filterNotNull()
+    }
+
+    /**
+     * Assigns touch slots, scales coordinates by `[widthPixels, heightPixels]`, and encodes the
+     * 12-byte HID touch report directly without intermediate list or contact-copy allocations.
+     */
+    @Synchronized
+    fun encodeReport(
+        contacts: List<ViewportTouchContact>,
+        widthPixels: Int,
+        heightPixels: Int,
+    ): ByteArray {
+        slotScratch.fill(null)
+        for (contact in contacts) {
+            val slot = pointers.indexOf(contact.id).takeIf { it >= 0 }
+                ?: pointers.indexOf(null).takeIf { it >= 0 && contact.down }
+                ?: continue
+            pointers[slot] = contact.id
+            slotScratch[slot] = contact
+        }
+        val report = ByteArray(AirPlayHid.BYTES_PER_FINGER * slots)
+        for (slot in 0 until slots) {
+            val offset = slot * AirPlayHid.BYTES_PER_FINGER
+            report[offset] = slot.toByte()
+            val incoming = slotScratch[slot]
+            val active = incoming ?: held[slot]
+            val down = incoming?.down == true
+            if (active != null) {
+                report[offset + 1] = if (down) 0x01 else 0x00
+                val x = Math.round((active.x * widthPixels).coerceAtLeast(0.0)).toInt()
+                val y = Math.round((active.y * heightPixels).coerceAtLeast(0.0)).toInt()
+                AirPlayHid.writeU16Le(report, offset + 2, x)
+                AirPlayHid.writeU16Le(report, offset + 4, y)
+            }
+            if (down) {
+                held[slot] = incoming
+            } else {
+                held[slot] = null
+                pointers[slot] = null
+            }
+            slotScratch[slot] = null
+        }
+        return report
     }
 }
 

@@ -557,4 +557,44 @@ class RtspProtocolTest {
             }
         }
     }
+
+    @Test
+    fun bplistSinglePassEncoderAndZeroAllocTouchAndMicHelpersRoundTrip() {
+        val rawBytes = ByteArray(48) { (it * 7).toByte() }
+        val payload = mapOf(
+            "type" to 110L,
+            "uuid" to "E8D38910-B123-4567-89AB-CDEF01234567",
+            "unicodeTitle" to "CarPlay 投屏 60fps",
+            "shk" to rawBytes,
+            "nested" to listOf(true, false, -42L, 3.141592653589793, ByteArray(20) { it.toByte() }),
+        )
+        val encoded = BplistCodec.encode(payload)
+        @Suppress("UNCHECKED_CAST")
+        val decoded = BplistCodec.decode(encoded) as Map<String, Any?>
+        assertEquals(110L, decoded["type"])
+        assertEquals("E8D38910-B123-4567-89AB-CDEF01234567", decoded["uuid"])
+        assertEquals("CarPlay 投屏 60fps", decoded["unicodeTitle"])
+        org.junit.Assert.assertArrayEquals(rawBytes, decoded["shk"] as ByteArray)
+
+        val slots = AirPlayTouchSlots()
+        val contacts = listOf(
+            app.tvplay.engine.av.ViewportTouchContact(id = 7, x = 0.5, y = 0.5, down = true),
+        )
+        val reportFromSlots = slots.encodeReport(contacts, widthPixels = 1920, heightPixels = 1080)
+        val slotsCopy = AirPlayTouchSlots()
+        val reportDirect = AirPlayHid.touchReport(
+            slotsCopy.assign(contacts).map { it.copy(x = it.x * 1920, y = it.y * 1080) },
+        )
+        org.junit.Assert.assertArrayEquals(reportDirect, reportFromSlots)
+
+        val pcmSample = byteArrayOf(0x12, 0x34, 0x56, 0x78)
+        val copyTransformed = MicrophonePacketizer.toWirePcm(pcmSample)
+        MicrophonePacketizer.toWirePcmInPlace(pcmSample)
+        org.junit.Assert.assertArrayEquals(copyTransformed, pcmSample)
+
+        val counters = MicrophoneCounters(sequence = 10, timestamp = 320, nonce = 1L)
+        val key = ByteArray(32) { (it + 1).toByte() }
+        val sealedMic = MicrophonePacketizer.sealPacket(key, payloadType = 96, counters = counters, body = pcmSample, samples = 2)
+        assertEquals(MicrophonePacketizer.SEAL_OVERHEAD + pcmSample.size, sealedMic.size)
+    }
 }

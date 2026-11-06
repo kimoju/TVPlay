@@ -69,4 +69,25 @@ class EngineNetworkTest {
         assertFalse("11:22:33:44:55:66" in summary)
         assertTrue("family=IPv4" in summary)
     }
+
+    @Test
+    fun ethernetIpv6CodecFastHelpersMatchFullFrameOperations() {
+        val dstMac = byteArrayOf(0x02, 0x11, 0x22, 0x33, 0x44, 0x55)
+        val srcMac = byteArrayOf(0x02, 0x66, 0x77, 0x88.toByte(), 0x99.toByte(), 0xAA.toByte())
+        val ipv6Payload = ByteArray(64) { it.toByte() }.also {
+            it[0] = 0x60 // IPv6 version 6
+            it[6] = 58   // ICMPv6
+            it[40] = 135.toByte() // Neighbor Solicitation (not NA 136)
+        }
+        val frame = EthernetIpv6Codec.build(srcMac, dstMac, ipv6Payload)
+        assertTrue(EthernetIpv6Codec.isIpv6Frame(frame))
+        assertTrue(EthernetIpv6Codec.macEquals(frame, 6, srcMac))
+        assertFalse(EthernetIpv6Codec.macEquals(frame, 6, dstMac))
+
+        val oversizedBuffer = ByteArray(128)
+        ipv6Payload.copyInto(oversizedBuffer, 0)
+        assertFalse(EthernetIpv6Codec.isNeighborAdvertisement(oversizedBuffer, ipv6Payload.size))
+        val sliceFrame = EthernetIpv6Codec.build(srcMac, dstMac, oversizedBuffer, 0, ipv6Payload.size)
+        org.junit.Assert.assertArrayEquals(frame, sliceFrame)
+    }
 }

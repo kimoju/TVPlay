@@ -657,6 +657,7 @@ internal class VoiceMicRecorder(
         val frame = ByteArray(config.frameBytes)
         val readBuffer = ByteArray(maxOf(frame.size, MIN_READ_BYTES))
         val counters = MicrophoneCounters()
+        val datagram = DatagramPacket(ByteArray(0), 0, config.host, config.port)
         val routeInfo = { routeType(recorder) }
         val ownSession = recorder.audioSessionId
         val silence = audioManager?.let { manager -> { silenceDetail(manager, ownSession) } }
@@ -710,7 +711,7 @@ internal class VoiceMicRecorder(
                     offset += copied
                     if (filled == frame.size) {
                         stats.level(frame)
-                        sendFrame(socket, counters, frame)
+                        sendFrame(socket, datagram, counters, frame)
                         filled = 0
                     }
                 }
@@ -737,18 +738,32 @@ internal class VoiceMicRecorder(
         false
     }
 
-    private fun sendFrame(socket: DatagramSocket, counters: MicrophoneCounters, frame: ByteArray) {
-        val bodies = if (config.codec == AudioCodecKind.OPUS) {
-            opusEncoder?.encode(frame).orEmpty()
+    private fun sendFrame(
+        socket: DatagramSocket,
+        datagram: DatagramPacket,
+        counters: MicrophoneCounters,
+        frame: ByteArray,
+    ) {
+        if (config.codec == AudioCodecKind.OPUS) {
+            val bodies = opusEncoder?.encode(frame).orEmpty()
+            stats.encoded(bodies.size, if (bodies.isEmpty()) 1 else bodies.count { it.isEmpty() })
+            for (body in bodies) {
+                sendPacket(
+                    socket = socket,
+                    datagram = datagram,
+                    counters = counters,
+                    body = body,
+                    samples = config.rtpSamplesPerPacket,
+                )
+            }
         } else {
-            listOf(MicrophonePacketizer.toWirePcm(frame))
-        }
-        stats.encoded(bodies.size, if (bodies.isEmpty()) 1 else bodies.count { it.isEmpty() })
-        bodies.forEach { body ->
+            MicrophonePacketizer.toWirePcmInPlace(frame)
+            stats.encoded(1, if (frame.isEmpty()) 1 else 0)
             sendPacket(
                 socket = socket,
+                datagram = datagram,
                 counters = counters,
-                body = body,
+                body = frame,
                 samples = config.rtpSamplesPerPacket,
             )
         }
@@ -756,6 +771,7 @@ internal class VoiceMicRecorder(
 
     private fun sendPacket(
         socket: DatagramSocket,
+        datagram: DatagramPacket,
         counters: MicrophoneCounters,
         body: ByteArray,
         samples: Int,
@@ -768,7 +784,8 @@ internal class VoiceMicRecorder(
             samples = samples,
         )
         try {
-            socket.send(DatagramPacket(packet, packet.size, config.host, config.port))
+            datagram.setData(packet, 0, packet.size)
+            socket.send(datagram)
             stats.sent()
         } catch (error: Exception) {
             stats.sendFailed()

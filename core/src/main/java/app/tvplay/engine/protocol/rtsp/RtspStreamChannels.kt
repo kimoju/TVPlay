@@ -1630,7 +1630,9 @@ class MicrophoneCounters(
     var sequence: Int = 0,
     var timestamp: Int = 0,
     var nonce: Long = 0,
-)
+) {
+    internal val nonceBuffer = ByteArray(12)
+}
 
 /**
  * Seals one PCM microphone frame in the wired CarPlay RTP layout.
@@ -1648,44 +1650,49 @@ object MicrophonePacketizer {
         body: ByteArray,
         samples: Int,
     ): ByteArray {
-        val header = ByteArray(RTP_HEADER_LEN)
-        header[0] = 0x80.toByte()
-        header[1] = (payloadType and 0x7f).toByte()
-        putU16Be(header, 2, counters.sequence)
-        putU32Be(header, 4, counters.timestamp)
+        val packet = ByteArray(RTP_HEADER_LEN + body.size + TAG_LEN + NONCE_LEN)
+        packet[0] = 0x80.toByte()
+        packet[1] = (payloadType and 0x7f).toByte()
+        putU16Be(packet, 2, counters.sequence)
+        putU32Be(packet, 4, counters.timestamp)
 
-        val nonce = ByteArray(12)
-        putU64Le(nonce, 4, counters.nonce)
-        val sealed = AirPlayCrypto.chachaSeal(
+        val nonce = counters.nonceBuffer
+        AirPlayCrypto.writeNonce64(counters.nonce, nonce)
+        val written = AirPlayCrypto.chachaSealInto(
             key = key,
             nonce = nonce,
             plaintext = body,
-            aad = header.copyOfRange(4, RTP_HEADER_LEN),
+            plaintextOffset = 0,
+            plaintextLength = body.size,
+            aad = packet,
+            aadOffset = 4,
+            aadLength = RTP_HEADER_LEN - 4,
+            output = packet,
+            outputOffset = RTP_HEADER_LEN,
         )
-
-        val packet = ByteArray(RTP_HEADER_LEN + sealed.size + NONCE_LEN)
-        header.copyInto(packet, 0)
-        sealed.copyInto(packet, RTP_HEADER_LEN)
-        putU64Le(packet, RTP_HEADER_LEN + sealed.size, counters.nonce)
+        putU64Le(packet, RTP_HEADER_LEN + written, counters.nonce)
 
         counters.sequence = (counters.sequence + 1) and 0xffff
         counters.timestamp += samples
         counters.nonce++
-        return packet
+        val totalSize = RTP_HEADER_LEN + written + NONCE_LEN
+        return if (totalSize == packet.size) packet else packet.copyOf(totalSize)
+    }
+
+    /** Byte-swaps 16-bit PCM samples in place from little-endian to big-endian. */
+    fun toWirePcmInPlace(pcm: ByteArray): ByteArray {
+        var index = 0
+        while (index + 1 < pcm.size) {
+            val first = pcm[index]
+            pcm[index] = pcm[index + 1]
+            pcm[index + 1] = first
+            index += 2
+        }
+        return pcm
     }
 
     /** Captured Android PCM is little-endian; CarPlay's wired microphone payload is big-endian. */
-    fun toWirePcm(pcmLittleEndian: ByteArray): ByteArray {
-        val output = pcmLittleEndian.copyOf()
-        var index = 0
-        while (index + 1 < output.size) {
-            val first = output[index]
-            output[index] = output[index + 1]
-            output[index + 1] = first
-            index += 2
-        }
-        return output
-    }
+    fun toWirePcm(pcmLittleEndian: ByteArray): ByteArray = toWirePcmInPlace(pcmLittleEndian.copyOf())
 
     private fun putU16Be(target: ByteArray, offset: Int, value: Int) {
         target[offset] = (value ushr 8).toByte()
@@ -2088,9 +2095,16 @@ class IapTunnel(
                     announcedData = true
                     listener.onDebug("AirPlay iAP tunnel received data")
                 }
-                ciphertext += buffer.copyOf(read)
+                ciphertext = if (ciphertext.isEmpty()) {
+                    buffer.copyOf(read)
+                } else {
+                    val combined = ByteArray(ciphertext.size + read)
+                    ciphertext.copyInto(combined, 0)
+                    buffer.copyInto(combined, ciphertext.size, 0, read)
+                    combined
+                }
                 val decrypted = decryptFrames(ciphertext)
-                plaintext += decrypted.first
+                plaintext = if (plaintext.isEmpty()) decrypted.first else plaintext + decrypted.first
                 ciphertext = decrypted.second
                 plaintext = parsePackages(plaintext)
             }

@@ -73,7 +73,7 @@ class TvAvRenderPipeline(
     // Surface capture, worker publication, retirement and detach snapshots share one ownership boundary.
     // Native codec work and waits never run under this lock.
     private val videoOwnershipLock = Any()
-    private var videoClosed = false
+    @Volatile private var videoClosed = false
     private val videoReleasedListeners = ArrayList<() -> Unit>()
     // Closed decoders whose workers may still hold a codec on a surface until they exit; a surface
     // detach also waits for them.
@@ -348,7 +348,12 @@ class TvAvRenderPipeline(
     }
 
     override fun onVideoFrame(type: Int, naluBytes: ByteArray) {
-        if (type == MAIN_SCREEN_TYPE) mainVideoReceived = true
+        if (type == MAIN_SCREEN_TYPE && !mainVideoReceived) mainVideoReceived = true
+        if (videoClosed) return
+        videoDecoders[type]?.let { decoder ->
+            decoder.submit(naluBytes)
+            return
+        }
         synchronized(videoOwnershipLock) {
             if (videoClosed) return
             videoDecoder(type).submit(naluBytes)
@@ -356,7 +361,12 @@ class TvAvRenderPipeline(
     }
 
     override fun onVideoFrame(type: Int, naluBytes: ByteArray, senderNanos: Long, arrivalNanos: Long) {
-        if (type == MAIN_SCREEN_TYPE) mainVideoReceived = true
+        if (type == MAIN_SCREEN_TYPE && !mainVideoReceived) mainVideoReceived = true
+        if (videoClosed) return
+        videoDecoders[type]?.let { decoder ->
+            decoder.submit(naluBytes, senderNanos, arrivalNanos)
+            return
+        }
         synchronized(videoOwnershipLock) {
             if (videoClosed) return
             videoDecoder(type).submit(naluBytes, senderNanos, arrivalNanos)
@@ -549,8 +559,15 @@ class TvAvRenderPipeline(
         },
     ).also { if (startImmediately) it.start() }
 
-    @Synchronized
     private fun audioRenderer(id: AudioStreamId, format: AudioFormat): PcmAudioRenderer {
+        audioRenderers[id]?.let { existing ->
+            if (existing.format == format) return existing
+        }
+        return createOrReplaceAudioRenderer(id, format)
+    }
+
+    @Synchronized
+    private fun createOrReplaceAudioRenderer(id: AudioStreamId, format: AudioFormat): PcmAudioRenderer {
         val existing = audioRenderers[id]
         if (existing?.format == format) return existing
         existing?.close()

@@ -221,6 +221,49 @@ object AirPlayCrypto {
         }
 
     /**
+     * Encrypts a slice `[plaintextOffset, plaintextOffset + plaintextLength)` with AAD slice
+     * `[aadOffset, aadOffset + aadLength)` directly into `output[outputOffset..]`, avoiding intermediate
+     * byte-array allocations on hot control/event/microphone packet paths.
+     */
+    fun chachaSealInto(
+        key: ByteArray,
+        nonce: ByteArray,
+        plaintext: ByteArray,
+        plaintextOffset: Int,
+        plaintextLength: Int,
+        aad: ByteArray,
+        aadOffset: Int,
+        aadLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+    ): Int = platformChachaInto(
+        Cipher.ENCRYPT_MODE,
+        key,
+        nonce,
+        plaintext,
+        plaintextOffset,
+        plaintextLength,
+        aad,
+        aadOffset,
+        aadLength,
+        output,
+        outputOffset,
+    ) ?: chachaSealBouncyCastleInto(
+        key,
+        nonce,
+        plaintext,
+        plaintextOffset,
+        plaintextLength,
+        aad,
+        aadOffset,
+        aadLength,
+        output,
+        outputOffset,
+    ).also {
+        platformState.get()?.implementation = "BouncyCastle"
+    }
+
+    /**
      * Decrypts a slice `[ciphertextOffset, ciphertextOffset + ciphertextLength)` with AAD slice
      * `[aadOffset, aadOffset + aadLength)` directly into `output[outputOffset..]`, avoiding intermediate
      * byte-array allocations on hot audio/control packet paths.
@@ -362,6 +405,27 @@ object AirPlayCrypto {
         val finalized = cipher.doFinal(output, processed)
         val outputLength = processed + finalized
         return if (outputLength == output.size) output else output.copyOf(outputLength)
+    }
+
+    internal fun chachaSealBouncyCastleInto(
+        key: ByteArray,
+        nonce: ByteArray,
+        plaintext: ByteArray,
+        plaintextOffset: Int,
+        plaintextLength: Int,
+        aad: ByteArray,
+        aadOffset: Int,
+        aadLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+    ): Int {
+        val state = bcState.get()!!
+        val cipher = state.cipher
+        cipher.init(true, AEADParameters(state.keyParam(key), MAC_BITS, nonce))
+        if (aadLength > 0) cipher.processAADBytes(aad, aadOffset, aadLength)
+        val processed = cipher.processBytes(plaintext, plaintextOffset, plaintextLength, output, outputOffset)
+        val finalized = cipher.doFinal(output, outputOffset + processed)
+        return processed + finalized
     }
 
     internal fun chachaOpenBouncyCastleInto(
@@ -912,6 +976,7 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
     private var readCounter = 0L
     private var writeCounter = 0L
     private val readNonce = ByteArray(12)
+    private val writeNonce = ByteArray(12)
 
     internal fun currentWriteCounter(): Long = writeCounter
 
@@ -930,7 +995,7 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
             scanOffset = frameEnd
         }
         if (scanOffset == 0) {
-            return Decrypted(ByteArray(0), buffer.copyOf())
+            return Decrypted(EMPTY_BYTES, buffer.copyOf())
         }
         val plaintext = ByteArray(totalPlainBytes)
         var offset = 0
@@ -956,22 +1021,37 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
             offset = frameEnd
         }
         val data = if (plainOffset == plaintext.size) plaintext else plaintext.copyOf(plainOffset)
-        return Decrypted(data, buffer.copyOfRange(offset, buffer.size))
+        val rest = if (offset == buffer.size) EMPTY_BYTES else buffer.copyOfRange(offset, buffer.size)
+        return Decrypted(data, rest)
     }
 
     fun encrypt(plaintext: ByteArray): ByteArray {
-        val output = ArrayList<ByteArray>()
+        val frames = if (plaintext.isEmpty()) 1 else (plaintext.size + MAX_PAYLOAD - 1) / MAX_PAYLOAD
+        val output = ByteArray(plaintext.size + frames * (HEADER_SIZE + TAG_SIZE))
         var offset = 0
+        var outOffset = 0
         do {
-            val chunk = plaintext.copyOfRange(offset, minOf(offset + MAX_PAYLOAD, plaintext.size))
-            val header = byteArrayOf(chunk.size.toByte(), (chunk.size ushr 8).toByte())
-            val ciphertextAndTag = AirPlayCrypto.chachaSeal(writeKey, AirPlayCrypto.nonce64(writeCounter), chunk, header)
-            output.add(header)
-            output.add(ciphertextAndTag)
+            val chunkSize = minOf(MAX_PAYLOAD, plaintext.size - offset)
+            output[outOffset] = chunkSize.toByte()
+            output[outOffset + 1] = (chunkSize ushr 8).toByte()
+            AirPlayCrypto.writeNonce64(writeCounter, writeNonce)
+            val written = AirPlayCrypto.chachaSealInto(
+                key = writeKey,
+                nonce = writeNonce,
+                plaintext = plaintext,
+                plaintextOffset = offset,
+                plaintextLength = chunkSize,
+                aad = output,
+                aadOffset = outOffset,
+                aadLength = HEADER_SIZE,
+                output = output,
+                outputOffset = outOffset + HEADER_SIZE,
+            )
             writeCounter++
-            offset += MAX_PAYLOAD
+            offset += chunkSize
+            outOffset += HEADER_SIZE + written
         } while (offset < plaintext.size)
-        return concatBytes(*output.toTypedArray())
+        return if (outOffset == output.size) output else output.copyOf(outOffset)
     }
 
     private fun readU16Le(source: ByteArray, offset: Int): Int =
@@ -981,5 +1061,6 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
         const val HEADER_SIZE = 2
         const val TAG_SIZE = 16
         const val MAX_PAYLOAD = 0x4000
+        private val EMPTY_BYTES = ByteArray(0)
     }
 }

@@ -1794,21 +1794,28 @@ class Ipv6NcmBridge(
         try {
             while (running.get()) {
                 val frame = ncm.recv(READ_TIMEOUT_MILLIS) ?: continue
-                val ipv6 = EthernetIpv6Codec.parseIpv6View(frame) ?: continue
-                peerMac = ipv6.sourceMac
+                if (!EthernetIpv6Codec.isIpv6Frame(frame)) continue
+                val currentPeer = peerMac
+                val nextPeer = if (currentPeer != null && EthernetIpv6Codec.macEquals(frame, 6, currentPeer)) {
+                    currentPeer
+                } else {
+                    frame.copyOfRange(6, 12).also { peerMac = it }
+                }
+                val payloadOffset = EthernetIpv6Codec.HEADER_BYTES
+                val payloadLength = frame.size - payloadOffset
                 if (!loggedInbound) {
                     loggedInbound = true
                     Log.i(
                         TAG,
-                        "ncm first inbound ipv6 bytes=${ipv6.payloadLength} " +
-                            "peer=${ipv6.sourceMac.macString()}",
+                        "ncm first inbound ipv6 bytes=$payloadLength " +
+                            "peer=${nextPeer.macString()}",
                     )
                 }
                 if (inboundLogBudget > 0) {
                     inboundLogBudget--
-                    Log.i(TAG, "ncm inbound ${frame.summary(ipv6.payloadOffset)}")
+                    Log.i(TAG, "ncm inbound ${frame.summary(payloadOffset)}")
                 }
-                output.write(frame, ipv6.payloadOffset, ipv6.payloadLength)
+                output.write(frame, payloadOffset, payloadLength)
             }
         } catch (error: IOException) {
             if (running.get()) onError(error)
@@ -1833,16 +1840,26 @@ class Ipv6NcmBridge(
                     LockSupport.parkNanos(ZERO_READ_BACKOFF_NANOS)
                     continue
                 }
-                val tunPacket = buffer.copyOf(length)
-                val ipv6 = EthernetIpv6Codec.addNeighborAdvertisementTargetMac(tunPacket, hostMac)
-                if (ipv6.size != tunPacket.size) {
-                    Log.i(TAG, "ncm added target-link-layer option to neighbor advertisement")
+                val isNa = EthernetIpv6Codec.isNeighborAdvertisement(buffer, length)
+                val ipv6Source: ByteArray
+                val ipv6Length: Int
+                if (isNa) {
+                    val tunPacket = buffer.copyOf(length)
+                    val modified = EthernetIpv6Codec.addNeighborAdvertisementTargetMac(tunPacket, hostMac)
+                    if (modified.size != tunPacket.size) {
+                        Log.i(TAG, "ncm added target-link-layer option to neighbor advertisement")
+                    }
+                    ipv6Source = modified
+                    ipv6Length = modified.size
+                } else {
+                    ipv6Source = buffer
+                    ipv6Length = length
                 }
                 if (outboundLogBudget > 0) {
                     outboundLogBudget--
-                    Log.i(TAG, "ncm outbound ${ipv6.summary(0)}")
+                    Log.i(TAG, "ncm outbound ${ipv6Source.summary(0, ipv6Length)}")
                 }
-                val multicastMac = EthernetIpv6Codec.multicastDestinationMac(ipv6)
+                val multicastMac = EthernetIpv6Codec.multicastDestinationMac(ipv6Source, ipv6Length)
                 val mac = multicastMac ?: peerMac
                 if (mac == null) {
                     if (!loggedWaitingForPeer) {
@@ -1858,7 +1875,7 @@ class Ipv6NcmBridge(
                         "ncm first outbound ipv6 bytes=$length destination=${mac.macString()} multicast=${multicastMac != null}",
                     )
                 }
-                val frame = EthernetIpv6Codec.build(hostMac, mac, ipv6)
+                val frame = EthernetIpv6Codec.build(hostMac, mac, ipv6Source, 0, ipv6Length)
                 ncm.send(frame, WRITE_TIMEOUT_MILLIS)
             }
         } catch (error: IOException) {
@@ -1881,8 +1898,8 @@ class Ipv6NcmBridge(
     private fun ByteArray.macString(): String =
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
-    private fun ByteArray.summary(offset: Int): String {
-        val payloadBytes = size - offset
+    private fun ByteArray.summary(offset: Int, limit: Int = size): String {
+        val payloadBytes = limit - offset
         if (payloadBytes < 40) return "truncated bytes=$payloadBytes"
         val source = InetAddress.getByAddress(copyOfRange(offset + 8, offset + 24)).hostAddress
         val destination = InetAddress.getByAddress(copyOfRange(offset + 24, offset + 40)).hostAddress
@@ -1919,7 +1936,7 @@ object EthernetIpv6Codec {
     const val ETHERTYPE_IPV6 = 0x86dd
     const val MAC_BYTES = 6
 
-    private const val HEADER_BYTES = 14
+    internal const val HEADER_BYTES = 14
 
     data class Ipv6Frame(
         val sourceMac: ByteArray,
@@ -1932,6 +1949,16 @@ object EthernetIpv6Codec {
         val payloadOffset: Int,
         val payloadLength: Int,
     )
+
+    internal fun isIpv6Frame(frame: ByteArray): Boolean =
+        frame.size > HEADER_BYTES && readU16(frame, 12) == ETHERTYPE_IPV6
+
+    internal fun macEquals(source: ByteArray, offset: Int, target: ByteArray): Boolean {
+        for (i in 0 until MAC_BYTES) {
+            if (source[offset + i] != target[i]) return false
+        }
+        return true
+    }
 
     /** Returns null for tagged frames, non-IPv6 frames, or truncated input. */
     fun parseIpv6(frame: ByteArray): Ipv6Frame? {
@@ -1953,22 +1980,31 @@ object EthernetIpv6Codec {
         )
     }
 
-    fun build(sourceMac: ByteArray, destinationMac: ByteArray, ipv6: ByteArray): ByteArray {
+    fun build(sourceMac: ByteArray, destinationMac: ByteArray, ipv6: ByteArray): ByteArray =
+        build(sourceMac, destinationMac, ipv6, 0, ipv6.size)
+
+    fun build(
+        sourceMac: ByteArray,
+        destinationMac: ByteArray,
+        ipv6: ByteArray,
+        offset: Int,
+        length: Int,
+    ): ByteArray {
         require(sourceMac.size == MAC_BYTES) { "sourceMac must be $MAC_BYTES bytes" }
         require(destinationMac.size == MAC_BYTES) { "destinationMac must be $MAC_BYTES bytes" }
-        require(ipv6.isNotEmpty()) { "ipv6 payload must not be empty" }
+        require(length > 0 && offset >= 0 && offset + length <= ipv6.size) { "ipv6 payload must not be empty" }
 
-        val frame = ByteArray(HEADER_BYTES + ipv6.size)
+        val frame = ByteArray(HEADER_BYTES + length)
         destinationMac.copyInto(frame, 0)
         sourceMac.copyInto(frame, 6)
         putU16(frame, 12, ETHERTYPE_IPV6)
-        ipv6.copyInto(frame, HEADER_BYTES)
+        ipv6.copyInto(frame, HEADER_BYTES, offset, offset + length)
         return frame
     }
 
     /** Maps an IPv6 multicast destination to its Ethernet 33:33:xx:xx:xx:xx address. */
-    fun multicastDestinationMac(ipv6: ByteArray): ByteArray? {
-        if (ipv6.size < IPV6_HEADER_BYTES || (ipv6[0].toInt() ushr 4 and 0x0f) != 6) return null
+    fun multicastDestinationMac(ipv6: ByteArray, length: Int = ipv6.size): ByteArray? {
+        if (length < IPV6_HEADER_BYTES || (ipv6[0].toInt() ushr 4 and 0x0f) != 6) return null
         if ((ipv6[IPV6_DESTINATION_OFFSET].toInt() and 0xff) != 0xff) return null
         return byteArrayOf(
             0x33,
@@ -1979,6 +2015,12 @@ object EthernetIpv6Codec {
             ipv6[IPV6_DESTINATION_OFFSET + 15],
         )
     }
+
+    internal fun isNeighborAdvertisement(ipv6: ByteArray, length: Int = ipv6.size): Boolean =
+        length >= ICMPV6_NA_MIN_BYTES &&
+            (ipv6[0].toInt() ushr 4 and 0x0f) == 6 &&
+            (ipv6[IPV6_NEXT_HEADER_OFFSET].toInt() and 0xff) == ICMPV6_NEXT_HEADER &&
+            (ipv6[IPV6_HEADER_BYTES].toInt() and 0xff) == ICMPV6_NEIGHBOR_ADVERTISEMENT
 
     /**
      * A TUN interface has no layer-2 address, so Android emits Neighbor Advertisements without a
@@ -2313,7 +2355,7 @@ internal data class UsbMuxFrame(
 
 /** Incremental framing; callers serialize access with their USBMUX state lock. */
 internal class UsbMuxFrameBuffer(private val diagnostic: (String) -> Unit = {}) {
-    private var bytes = ByteArray(0)
+    private var bytes = EMPTY_BYTES
     private var optionalReplyPadding: UsbMuxFrame? = null
     private var paddingReports = 0
     private var lastUsbReadBytes = 0
@@ -2321,7 +2363,8 @@ internal class UsbMuxFrameBuffer(private val diagnostic: (String) -> Unit = {}) 
 
     fun append(transfer: ByteArray) {
         lastUsbReadBytes = transfer.size
-        bytes += transfer
+        if (transfer.isEmpty()) return
+        bytes = if (bytes.isEmpty()) transfer else bytes + transfer
     }
 
     fun takeFrame(): UsbMuxFrame? {
@@ -2387,7 +2430,7 @@ internal class UsbMuxFrameBuffer(private val diagnostic: (String) -> Unit = {}) 
             sequence = ((bytes[12].toInt() and 0xff) shl 8) or (bytes[13].toInt() and 0xff),
             payload = bytes.copyOfRange(HEADER_BYTES, length),
         )
-        bytes = bytes.copyOfRange(length, bytes.size)
+        bytes = if (length == bytes.size) EMPTY_BYTES else bytes.copyOfRange(length, bytes.size)
         optionalReplyPadding = frame.takeIf(::canHaveOptionalReplyPadding)
         return frame
     }
@@ -2434,6 +2477,7 @@ internal class UsbMuxFrameBuffer(private val diagnostic: (String) -> Unit = {}) 
         const val DIAGNOSTIC_TEXT_SUBTYPE = 4
         const val MAX_DIAGNOSTIC_PAYLOAD_BYTES = 1_024
         val CAPTURED_REPLY_MAGIC = 0xfaceface.toInt()
+        private val EMPTY_BYTES = ByteArray(0)
     }
 }
 

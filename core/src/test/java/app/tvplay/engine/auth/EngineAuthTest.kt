@@ -85,6 +85,56 @@ class EngineAuthTest {
         )
         assertEquals(plaintext.size, written)
         assertArrayEquals(plaintext, output.copyOfRange(12, output.size))
+
+        // Verify zero-copy slice encryption (chachaSealInto) with non-zero offsets
+        val paddedPlaintext = ByteArray(6 + plaintext.size + 4)
+        plaintext.copyInto(paddedPlaintext, 6)
+        val sealedBuffer = ByteArray(10 + ciphertext.size + 4)
+        aad.copyInto(sealedBuffer, 2, 0, minOf(aad.size, 8))
+        val sealedBytes = AirPlayCrypto.chachaSealInto(
+            key = key,
+            nonce = nonce,
+            plaintext = paddedPlaintext,
+            plaintextOffset = 6,
+            plaintextLength = plaintext.size,
+            aad = sealedBuffer,
+            aadOffset = 2,
+            aadLength = minOf(aad.size, 8),
+            output = sealedBuffer,
+            outputOffset = 10,
+        )
+        assertEquals(ciphertext.size, sealedBytes)
+        val openedFromSealedInto = ByteArray(plaintext.size)
+        AirPlayCrypto.chachaOpenInto(
+            key = key,
+            nonce = nonce,
+            ciphertextAndTag = sealedBuffer,
+            ciphertextOffset = 10,
+            ciphertextLength = ciphertext.size,
+            aad = sealedBuffer,
+            aadOffset = 2,
+            aadLength = minOf(aad.size, 8),
+            output = openedFromSealedInto,
+            outputOffset = 0,
+        )
+        assertArrayEquals(plaintext, openedFromSealedInto)
+    }
+
+    @Test
+    fun controlCipherSingleAllocationEncryptAndDecryptMultiFrameRoundTrip() {
+        val writeKey = ByteArray(32) { (it * 5 + 3).toByte() }
+        val readKey = ByteArray(32) { (it * 7 + 9).toByte() }
+        val sender = ControlCipher(readKey = readKey, writeKey = writeKey)
+        val receiver = ControlCipher(readKey = writeKey, writeKey = readKey)
+
+        // Multi-frame payload (> 0x4000 bytes) spanning 2 AEAD frames
+        val largePlaintext = ByteArray(18_500) { ((it * 13) and 0xff).toByte() }
+        val encrypted = sender.encrypt(largePlaintext)
+        assertEquals(2 * (2 + 16) + largePlaintext.size, encrypted.size)
+
+        val decrypted = receiver.decrypt(encrypted)
+        assertArrayEquals(largePlaintext, decrypted.data)
+        assertEquals(0, decrypted.rest.size)
     }
 
     @Test

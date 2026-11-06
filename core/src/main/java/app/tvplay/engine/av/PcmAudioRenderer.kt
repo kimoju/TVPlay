@@ -1238,6 +1238,7 @@ internal class PcmAudioRenderer(
 
     /** For the packets queued since [sinceNs], the frames each adds to the queue times how long it has waited. */
     private fun queuedFrameNsSince(sinceNs: Long, nowNs: Long): Double {
+        if (queue.size <= 1) return 0.0
         val clockRate = format.rtpClockRate.coerceAtLeast(1)
         var frameNs = 0.0
         var previousSample: Int? = null

@@ -50,6 +50,7 @@ class WorkbenchHeroStage(
     var onLaunchProjection: ((Boolean) -> Unit)? = null
     var onSelectTransportMode: ((Boolean) -> Unit)? = null
     var onSelectWirelessMode: ((TvWirelessMode) -> Unit)? = null
+    var onSelectProjectionProtocol: ((TvProjectionProtocol) -> Unit)? = null
     var onOpenBluetoothSettings: (() -> Unit)? = null
 
     fun updateStatus(
@@ -132,6 +133,7 @@ class WorkbenchHeroStage(
                 override fun onChooseProjectionProtocol(protocol: TvProjectionProtocol) {
                     if (settings.connection.projectionProtocol != protocol) {
                         settings.connection.projectionProtocol = protocol
+                        onSelectProjectionProtocol?.invoke(protocol)
                         updateStatus(hasActiveSession, pendingReconnect, onDisconnectSession)
                     }
                 }
@@ -411,15 +413,59 @@ class WorkbenchHeroStage(
             heroCard.addView(warnBox)
         }
 
-        heroCard.addView(space(dp(16)))
+        heroCard.addView(space(dp(14)))
+
+        val heroProtoRow = row()
+        val heroProtoItems = listOf(
+            TvProjectionProtocol.AUTO to "双模同时待命",
+            TvProjectionProtocol.APPLE_CARPLAY to "苹果 CarPlay",
+            TvProjectionProtocol.ICCOA_CARLINK to "安卓 CarLink",
+        )
+        heroProtoItems.forEachIndexed { idx, (proto, titleText) ->
+            val selected = model.projectionProtocol == proto
+            val btn = TvPlayButton(context).apply {
+                tag = "hero_proto_${proto.key}"
+                text = titleText
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                minHeight = dp(42)
+                minimumHeight = dp(42)
+                style(
+                    if (selected) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                    palette,
+                    overlay = false,
+                    glyph = if (proto == TvProjectionProtocol.APPLE_CARPLAY) TvIconGlyph.SHIELD_MFI else TvIconGlyph.PHONE,
+                )
+                setOnClickListener { callbacks.onChooseProjectionProtocol(proto) }
+            }
+            heroProtoRow.addView(
+                btn,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (idx < heroProtoItems.lastIndex) marginEnd = dp(8)
+                },
+            )
+        }
+        heroCard.addView(heroProtoRow)
+        heroCard.addView(space(dp(10)))
 
         val primaryButton = TvPlayButton(context, TvPlayButtonKind.PRIMARY, TvIconGlyph.PLAY).apply {
             tag = "primary_launch"
             text = when {
-                model.sessionActive -> "进入全屏 CarPlay 画面"
+                model.sessionActive -> "进入全屏投屏画面"
                 model.sessionRunning -> "打开全屏投屏等待画面"
-                model.wirelessEnabled -> "立即启动无线 CarPlay 投屏"
-                else -> "立即启动 USB 有线 CarPlay 投屏"
+                model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ->
+                    if (model.wirelessEnabled) {
+                        "立即启动无线安卓 CarLink 投屏 (PIN: ${model.carLinkPinCode})"
+                    } else {
+                        "立即启动 USB 有线安卓 CarLink 投屏"
+                    }
+                model.projectionProtocol == TvProjectionProtocol.AUTO ->
+                    if (model.wirelessEnabled) {
+                        "立即启动无线双模投屏 (CarPlay + 安卓 CarLink)"
+                    } else {
+                        "立即启动 USB 有线双模投屏 (CarPlay + CarLink)"
+                    }
+                model.wirelessEnabled -> "立即启动无线 Apple CarPlay 投屏"
+                else -> "立即启动 USB 有线 Apple CarPlay 投屏"
             }
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             minHeight = dp(52)
@@ -502,7 +548,7 @@ class WorkbenchHeroStage(
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
             tag = "mode_wireless"
-            text = "无线 CarPlay"
+            text = "无线投屏连接"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             minHeight = dp(44)
             minimumHeight = dp(44)

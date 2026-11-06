@@ -49,6 +49,7 @@ import app.tvplay.config.MfiAssetInstaller
 import app.tvplay.config.TvDeviceCapabilities
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvPreferencesStore
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.isNonPhoneBluetoothAccessory
 import java.util.concurrent.Executors
 import app.tvplay.config.VideoSurfaceType
@@ -1349,32 +1350,50 @@ class TvStageActivity : Activity() {
     private fun openConnectionModePicker() {
         val currentWireless = TvPreferencesStore.loadWirelessEnabled(this)
         val currentMode = TvPreferencesStore.loadWirelessHotspotMode(this)
+        val currentProto = TvPreferencesStore.loadProjectionProtocol(this)
+        val currentPin = TvPreferencesStore.loadCarLinkPinCode(this)
         val currentIndex = when {
-            !currentWireless -> 2
-            currentMode == TvWirelessMode.LAN_WIFI -> 1
+            !currentWireless -> 4
+            currentMode == TvWirelessMode.LAN_WIFI -> 3
+            currentProto == TvProjectionProtocol.ICCOA_CARLINK -> 1
+            currentProto == TvProjectionProtocol.APPLE_CARPLAY -> 2
             else -> 0
         }
         val palette = TvColorScheme.resolve(this)
         val optionItems = listOf(
             TvModalDialog.OptionItem(
-                title = "无线 · Wi-Fi Direct 5GHz 直连（推荐）",
-                subtitle = "免填路由器密码，电视与 iPhone 自动建立 5GHz 点对点直连",
+                title = "双模并发 · Wi-Fi Direct 5GHz 直连（推荐）",
+                subtitle = "同时支持 iPhone CarPlay 与安卓 CarLink (连接码: $currentPin)",
                 badgeText = if (currentIndex == 0) "当前模式" else "点击切换",
                 selected = currentIndex == 0,
                 icon = TvIconGlyph.WIFI,
             ),
             TvModalDialog.OptionItem(
-                title = "无线 · 家庭局域网模式",
-                subtitle = "电视与 iPhone 连接同一台家庭路由器（Wi-Fi 或网线）",
+                title = "安卓 CarLink 专属模式（小米 CarWith / vivo / OPPO）",
+                subtitle = "BLE 0xFCFB 广播发现 · 手机端输入 6 位连接码：$currentPin",
                 badgeText = if (currentIndex == 1) "当前模式" else "点击切换",
                 selected = currentIndex == 1,
+                icon = TvIconGlyph.PHONE,
+            ),
+            TvModalDialog.OptionItem(
+                title = "Apple CarPlay 专属模式（iPhone 无线 5GHz 直连）",
+                subtitle = "免填路由器密码，电视与 iPhone 自动建立 5GHz 点对点直连",
+                badgeText = if (currentIndex == 2) "当前模式" else "点击切换",
+                selected = currentIndex == 2,
+                icon = TvIconGlyph.SHIELD_MFI,
+            ),
+            TvModalDialog.OptionItem(
+                title = "无线 · 家庭局域网模式（CarPlay + 安卓 CarLink）",
+                subtitle = "电视与 iPhone / 安卓手机连接同一台家庭路由器（Wi-Fi 或网线）",
+                badgeText = if (currentIndex == 3) "当前模式" else "点击切换",
+                selected = currentIndex == 3,
                 icon = TvIconGlyph.LAN,
             ),
             TvModalDialog.OptionItem(
-                title = "USB 有线连接模式",
-                subtitle = "使用 Lightning / USB-C 数据线直连电视 USB 接口",
-                badgeText = if (currentIndex == 2) "当前模式" else "点击切换",
-                selected = currentIndex == 2,
+                title = "USB 有线连接模式（CarPlay + 安卓 CarLink AOA2）",
+                subtitle = "使用数据线直连电视 USB 接口（安卓连接码：$currentPin）",
+                badgeText = if (currentIndex == 4) "当前模式" else "点击切换",
+                selected = currentIndex == 4,
                 icon = TvIconGlyph.USB,
             ),
         )
@@ -1388,6 +1407,7 @@ class TvStageActivity : Activity() {
             intent?.removeExtra("wireless")
             when (which) {
                 0 -> {
+                    TvPreferencesStore.saveProjectionProtocol(this, TvProjectionProtocol.AUTO)
                     TvPreferencesStore.saveWirelessEnabled(this, true)
                     TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
                     permissionsPromptedThisSession = false
@@ -1395,6 +1415,24 @@ class TvStageActivity : Activity() {
                     reconnectNow()
                 }
                 1 -> {
+                    TvPreferencesStore.saveProjectionProtocol(this, TvProjectionProtocol.ICCOA_CARLINK)
+                    TvPreferencesStore.saveWirelessEnabled(this, true)
+                    permissionsPromptedThisSession = false
+                    reconnectAttempts = 0
+                    reconnectNow()
+                }
+                2 -> {
+                    TvPreferencesStore.saveProjectionProtocol(this, TvProjectionProtocol.APPLE_CARPLAY)
+                    TvPreferencesStore.saveWirelessEnabled(this, true)
+                    TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
+                    permissionsPromptedThisSession = false
+                    reconnectAttempts = 0
+                    reconnectNow()
+                }
+                3 -> {
+                    if (currentProto == TvProjectionProtocol.APPLE_CARPLAY) {
+                        TvPreferencesStore.saveProjectionProtocol(this, TvProjectionProtocol.AUTO)
+                    }
                     TvPreferencesStore.saveWirelessEnabled(this, true)
                     TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.LAN_WIFI)
                     permissionsPromptedThisSession = false
@@ -1411,7 +1449,10 @@ class TvStageActivity : Activity() {
                         reconnectNow()
                     }
                 }
-                2 -> {
+                4 -> {
+                    if (currentProto == TvProjectionProtocol.APPLE_CARPLAY) {
+                        TvPreferencesStore.saveProjectionProtocol(this, TvProjectionProtocol.AUTO)
+                    }
                     TvPreferencesStore.saveWirelessEnabled(this, false)
                     permissionsPromptedThisSession = false
                     vpnPromptedThisSession = false
@@ -1422,10 +1463,10 @@ class TvStageActivity : Activity() {
         }
         val handle = TvModalDialog.create(
             context = this,
-            title = "切换 CarPlay 连接模式",
-            subtitle = "使用遥控器上下键选择目标模式并按确认键立即重连",
+            title = "切换投屏协议与连接模式",
+            subtitle = "支持苹果 CarPlay、安卓 ICCOA CarLink（小米 / vivo / OPPO）及双模并发",
             icon = TvIconGlyph.RADAR,
-            badgeText = "3 种链路",
+            badgeText = "5 种模式",
             bodyView = listView,
             actions = listOf(
                 TvModalDialog.ActionSpec(

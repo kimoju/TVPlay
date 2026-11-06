@@ -156,7 +156,13 @@ object StageWaitingOverlay {
         }
 
         val statusView = TextView(context).apply {
-            text = context.getString(R.string.starting_carplay)
+            text = when (protocol) {
+                TvProjectionProtocol.ICCOA_CARLINK ->
+                    "正在启动安卓 CarLink 投屏服务 · 连接码：$carLinkPin"
+                TvProjectionProtocol.AUTO ->
+                    "正在启动 CarPlay + 安卓 CarLink 双模服务 · PIN：$carLinkPin"
+                else -> context.getString(R.string.starting_carplay)
+            }
             setTextColor(waitingColors.primaryText)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
@@ -554,6 +560,19 @@ object StageWaitingOverlay {
             }
             if (status.startupFailure == WirelessStartupFailure.HOTSPOT_CONFIGURATION && status.message.isNotBlank()) {
                 return status.message
+            }
+        }
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(context) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
+        val carLinkPin = runCatching { TvPreferencesStore.loadCarLinkPinCode(context) }
+            .getOrDefault("864209")
+        if (status is CarPlayStatus.WaitingForPairedIphone) {
+            when (protocol) {
+                TvProjectionProtocol.ICCOA_CARLINK ->
+                    return "安卓 CarLink 广播就绪 (BLE 0xFCFB) · 手机连接码：$carLinkPin"
+                TvProjectionProtocol.AUTO ->
+                    return "等待 iPhone 蓝牙连接或安卓 CarLink 接入 · 连接码：$carLinkPin"
+                else -> {}
             }
         }
         val message = describeStatus(status, context.resources, wirelessEnabled, wirelessHotspotMode)

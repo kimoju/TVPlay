@@ -371,7 +371,7 @@ class WorkbenchSettingsTabs(
         }
         addView(
             cycleCard(
-                title = "CarPlay 连接模式",
+                title = "投屏连接模式",
                 subtitle = "按 OK 弹出模式列表，或按左右键切换 Wi-Fi Direct、家庭局域网与 USB",
                 options = transportOptions,
                 current = currentTransportKey,

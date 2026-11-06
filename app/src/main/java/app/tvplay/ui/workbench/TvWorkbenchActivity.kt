@@ -267,6 +267,13 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 refreshWorkbenchStatus()
                 settingsPane.refresh()
             }
+            onSelectProjectionProtocol = { _ ->
+                if (CarPlayBackgroundSession.hasSession()) {
+                    PendingReconnect.mark()
+                }
+                refreshWorkbenchStatus()
+                settingsPane.refresh()
+            }
             onOpenBluetoothSettings = {
                 openSystemBluetoothSettings()
             }
@@ -402,7 +409,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                         val single = phoneCandidates.single()
                         settings.connection.savePairedPhone(single.address, single.name)
                     }
-                    else -> {
+                    !settings.connection.projectionProtocol.enablesCarLink -> {
                         showChooseIphoneDialog(launchAfterSelect = true)
                         return
                     }
@@ -613,16 +620,15 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                             )
                         },
                     )
-                } else if (launchAfterSelect) {
-                    add(
-                        TvModalDialog.ActionSpec(
-                            label = "直接进入等待画面",
-                            kind = TvPlayButtonKind.SECONDARY,
-                        ) {
-                            openStageActivity(wireless = true)
-                        },
-                    )
                 }
+                add(
+                    TvModalDialog.ActionSpec(
+                        label = "直接进入等待画面（安卓 CarLink 免配对）",
+                        kind = TvPlayButtonKind.SECONDARY,
+                    ) {
+                        openStageActivity(wireless = true)
+                    },
+                )
                 add(
                     TvModalDialog.ActionSpec(
                         label = "开启蓝牙可见并等待连接（推荐）",

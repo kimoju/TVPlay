@@ -102,10 +102,18 @@ class TvUiTest {
 
         // Switch transport mode back to Wireless via hero stage pill
         val wirelessModeBtn = collectAllViews(stagePane.root).filterIsInstance<TextView>().first {
-            it.text.toString().endsWith("无线 CarPlay")
+            it.tag == "mode_wireless"
         }
         wirelessModeBtn.performClick()
         assertTrue(repo.connection.wirelessEnabled)
+
+        // Switch protocol to Android CarLink directly from the top Hero Stage card
+        val carLinkHeroBtn = collectAllViews(stagePane.root).filterIsInstance<TextView>().first {
+            it.tag == "hero_proto_carlink"
+        }
+        carLinkHeroBtn.performClick()
+        assertEquals(app.tvplay.engine.session.TvProjectionProtocol.ICCOA_CARLINK, repo.connection.projectionProtocol)
+        assertTrue((stagePane.primaryLaunchButton as TextView).text.toString().contains("安卓 CarLink"))
 
         // Switch wireless sub-mode between LAN Wi-Fi and Wi-Fi Direct
         val lanWifiBtn = collectAllViews(stagePane.root).filterIsInstance<TextView>().first {

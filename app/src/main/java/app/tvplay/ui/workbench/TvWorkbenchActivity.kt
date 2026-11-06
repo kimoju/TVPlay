@@ -238,17 +238,19 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 launchProjectionStage(wireless)
             }
             onSelectTransportMode = { wireless ->
+                val changed = settings.connection.wirelessEnabled != wireless
                 settings.connection.wirelessEnabled = wireless
-                if (CarPlayBackgroundSession.hasSession()) {
+                if (changed && CarPlayBackgroundSession.hasSession()) {
                     PendingReconnect.mark()
                 }
                 refreshWorkbenchStatus()
                 settingsPane.refresh()
             }
             onSelectWirelessMode = { mode ->
+                val changed = !settings.connection.wirelessEnabled || settings.connection.wirelessHotspotMode != mode
                 settings.connection.wirelessEnabled = true
                 settings.connection.wirelessHotspotMode = mode
-                if (CarPlayBackgroundSession.hasSession()) {
+                if (changed && CarPlayBackgroundSession.hasSession()) {
                     PendingReconnect.mark()
                 }
                 refreshWorkbenchStatus()
@@ -316,8 +318,13 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         wireless: Boolean = settings.connection.wirelessEnabled,
         skipPermissionPrompt: Boolean = false,
     ) {
+        val modeChanged = settings.connection.wirelessEnabled != wireless
         pendingWirelessLaunch = wireless
         settings.connection.wirelessEnabled = wireless
+        if (!modeChanged && CarPlayBackgroundSession.hasSession() && !PendingReconnect.isPending()) {
+            openStageActivity(wireless)
+            return
+        }
 
         if (!skipPermissionPrompt) {
             val missingPermissions = buildList {

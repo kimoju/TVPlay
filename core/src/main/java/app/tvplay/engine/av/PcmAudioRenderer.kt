@@ -678,8 +678,8 @@ internal class PcmAudioRenderer(
 ) : Closeable {
     private data class AudioPacket(val rtp: ByteArray, val sample: Int, val arrivedNs: Long)
 
-    private var trackAttributes: AudioAttributes? = null
-    private var mappedChannel: AudioChannel? = null
+    @Volatile private var trackAttributes: AudioAttributes? = null
+    @Volatile private var mappedChannel: AudioChannel? = null
     private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
     /** Music with sustained decoder backpressure must not keep playing minutes-old packets. */
     private val mediaLagGuard = if (format.audioType == "media") MediaPacketLagGuard(format.rtpClockRate) else null
@@ -688,7 +688,7 @@ internal class PcmAudioRenderer(
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
-    private var track: AudioTrack? = null
+    @Volatile private var track: AudioTrack? = null
     private var pcm = ByteArray(64 * 1024)
     private var playbackStarted = false
     private var prebufferBytes = 0
@@ -810,14 +810,23 @@ internal class PcmAudioRenderer(
             diagnosticStage = "focus"
             requestAudioFocus()
             while (running) {
-                diagnosticStage = "packet"
-                queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
-                diagnosticStage = "decoder-output"
-                codec?.let(::drainCodec)
-                diagnosticStage = "buffer-maintenance"
-                maintainPlaybackBuffer()
-                diagnosticStage = "stats"
-                logStatsIfDue()
+                try {
+                    diagnosticStage = "packet"
+                    queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
+                    diagnosticStage = "decoder-output"
+                    codec?.let(::drainCodec)
+                    diagnosticStage = "buffer-maintenance"
+                    maintainPlaybackBuffer()
+                    diagnosticStage = "stats"
+                    logStatsIfDue()
+                } catch (interrupted: InterruptedException) {
+                    throw interrupted
+                } catch (error: Exception) {
+                    if (!running) break
+                    Log.w(TAG, "audio renderer recovering after $diagnosticStage failure", error)
+                    reportFailure(error)
+                    recoverCodecAndTrackIfNeeded()
+                }
             }
         } catch (_: InterruptedException) {
             // Worker shut down.
@@ -832,6 +841,33 @@ internal class PcmAudioRenderer(
         } finally {
             runCatching { logStatsIfDue(force = true) }
             release()
+        }
+    }
+
+    private fun recoverCodecAndTrackIfNeeded() {
+        val currentCodec = codec
+        if (currentCodec != null) {
+            this.codec = null
+            runCatching { currentCodec.stop() }
+            runCatching { currentCodec.release() }
+        }
+        runCatching {
+            when (format.codec) {
+                AudioCodecKind.AAC_LC -> configureCodec(MediaFormat.MIMETYPE_AUDIO_AAC)
+                AudioCodecKind.OPUS -> configureCodec(MediaFormat.MIMETYPE_AUDIO_OPUS)
+                AudioCodecKind.LPCM -> Unit
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "audio codec recreation failed", error)
+        }
+        val currentTrack = track
+        if (currentTrack == null || currentTrack.state != AudioTrack.STATE_INITIALIZED) {
+            this.track = null
+            runCatching { currentTrack?.release() }
+            playbackStarted = false
+            prebufferBytes = 0
+            runCatching { createTrack() }
+                .onFailure { error -> Log.w(TAG, "audio track recreation failed", error) }
         }
     }
 

@@ -43,6 +43,9 @@ object CarPlayBackgroundSession {
     @Volatile
     var active = false
 
+    @Volatile
+    var firstFrameRendered = false
+
     private var stopAction: (((() -> Unit)) -> Unit)? = null
     private var stopping = false
     private var ownerRef: java.lang.ref.WeakReference<Any>? = null
@@ -135,6 +138,7 @@ object CarPlayBackgroundSession {
             ownerRef = null
         }
         active = false
+        firstFrameRendered = false
         width = 0
         height = 0
         display = null

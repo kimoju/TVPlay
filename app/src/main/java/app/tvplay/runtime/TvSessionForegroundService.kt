@@ -10,8 +10,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import app.tvplay.R
 import app.tvplay.ui.stage.CarPlayScreen
 
@@ -23,14 +25,20 @@ typealias TvPlaySessionService = TvSessionForegroundService
  * with a quick disconnect action.
  */
 class TvSessionForegroundService : Service() {
+    private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var wifiPerformanceLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            releaseKeepAliveLocks()
             CarPlayBackgroundSession.stop()
             stopSelf()
             return START_NOT_STICKY
         }
+        acquireKeepAliveLocks()
         val status = intent?.getStringExtra("status") ?: getString(R.string.waiting_for_iphone)
         val notification = buildNotification(status)
         val startedForeground = if (Build.VERSION.SDK_INT >= 29) {
@@ -69,14 +77,74 @@ class TvSessionForegroundService : Service() {
             }.getOrDefault(false)
         }
         if (!startedForeground) {
+            releaseKeepAliveLocks()
             stopSelf()
         }
         return START_NOT_STICKY
     }
 
+    override fun onDestroy() {
+        releaseKeepAliveLocks()
+        super.onDestroy()
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
+        releaseKeepAliveLocks()
         CarPlayBackgroundSession.stop()
         stopSelf()
+    }
+
+    @Synchronized
+    private fun acquireKeepAliveLocks() {
+        if (cpuWakeLock == null) {
+            cpuWakeLock = runCatching {
+                getSystemService(PowerManager::class.java)
+                    ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "tvplay:session-wakelock")
+                    ?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+            }.getOrNull()
+        }
+        val wifiManager = runCatching { applicationContext.getSystemService(WifiManager::class.java) }.getOrNull()
+        if (wifiPerformanceLock == null && wifiManager != null) {
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiPerformanceLock = runCatching {
+                wifiManager.createWifiLock(mode, "tvplay:session-wifilock").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.getOrNull()
+        }
+        if (multicastLock == null && wifiManager != null) {
+            multicastLock = runCatching {
+                wifiManager.createMulticastLock("tvplay:session-multicast").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.getOrNull()
+        }
+    }
+
+    @Synchronized
+    private fun releaseKeepAliveLocks() {
+        cpuWakeLock?.let { lock ->
+            cpuWakeLock = null
+            runCatching { if (lock.isHeld) lock.release() }
+        }
+        wifiPerformanceLock?.let { lock ->
+            wifiPerformanceLock = null
+            runCatching { if (lock.isHeld) lock.release() }
+        }
+        multicastLock?.let { lock ->
+            multicastLock = null
+            runCatching { if (lock.isHeld) lock.release() }
+        }
     }
 
     private fun buildNotification(status: String): Notification {

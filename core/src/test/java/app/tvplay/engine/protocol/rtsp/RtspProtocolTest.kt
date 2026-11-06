@@ -596,5 +596,57 @@ class RtspProtocolTest {
         val key = ByteArray(32) { (it + 1).toByte() }
         val sealedMic = MicrophonePacketizer.sealPacket(key, payloadType = 96, counters = counters, body = pcmSample, samples = 2)
         assertEquals(MicrophonePacketizer.SEAL_OVERHEAD + pcmSample.size, sealedMic.size)
+
+        // Verify null value encoding in BplistCodec
+        val nullPayload = mapOf("optional" to null, "streamConnectionID" to 99L)
+        @Suppress("UNCHECKED_CAST")
+        val decodedNullPayload = BplistCodec.decode(BplistCodec.encode(nullPayload)) as Map<String, Any?>
+        assertEquals(null, decodedNullPayload["optional"])
+        assertEquals(99L, decodedNullPayload["streamConnectionID"])
+
+        // Verify 16-byte integer (0x14) decoding in BplistCodec (used by iOS for unsigned 64-bit >= 2^63)
+        // Construct minimal bplist00 with a single 0x14 16-byte integer root object:
+        // "bplist00" (8 bytes) + 0x14 + 8 zero high bytes + 8 low bytes (0x8000000000000005L) + offset table (1 byte = 8) + trailer (32 bytes)
+        val bplist16Int = ByteArray(8 + 17 + 1 + 32)
+        "bplist00".toByteArray(Charsets.US_ASCII).copyInto(bplist16Int, 0)
+        bplist16Int[8] = 0x14
+        // Upper 8 bytes = 0, lower 8 bytes = 0x8000000000000005L
+        bplist16Int[17] = 0x80.toByte()
+        bplist16Int[24] = 0x05.toByte()
+        // Offset table at index 25: offset of object 0 is 8
+        bplist16Int[25] = 8
+        // Trailer starts at index 26: [26+6]=offsetIntSize(1), [26+7]=objectRefSize(1), [26+15]=numObjects(1), [26+23]=topObject(0), [26+31]=offsetTableOffset(25)
+        bplist16Int[26 + 6] = 1
+        bplist16Int[26 + 7] = 1
+        bplist16Int[26 + 15] = 1
+        bplist16Int[26 + 23] = 0
+        bplist16Int[26 + 31] = 25
+        val decoded16Int = BplistCodec.decode(bplist16Int) as Long
+        assertEquals(Long.MIN_VALUE + 5L, decoded16Int)
+
+        // Verify ScreenCodec.lengthPrefixedToAnnexB converts subsequent NALs even when first AVCC NAL has length 1 (0x00000001)
+        val multiNalWith1ByteFirst = byteArrayOf(
+            0x00, 0x00, 0x00, 0x01, 0x09, // First NAL: length 1, AUD (0x09)
+            0x00, 0x00, 0x00, 0x02, 0x65, 0x41, // Second NAL: length 2, IDR (0x65 0x41)
+        )
+        val convertedAnnexB = ScreenCodec.lengthPrefixedToAnnexB(multiNalWith1ByteFirst)
+        org.junit.Assert.assertArrayEquals(
+            byteArrayOf(
+                0x00, 0x00, 0x00, 0x01, 0x09,
+                0x00, 0x00, 0x00, 0x01, 0x65, 0x41,
+            ),
+            convertedAnnexB,
+        )
+
+        // Verify NtpClock.listen() is idempotent across repeated SETUP calls
+        val ntp = NtpClock()
+        try {
+            val portA = ntp.listen()
+            val portB = ntp.listen()
+            assertTrue(portA > 0)
+            assertEquals(portA, portB)
+        } finally {
+            ntp.close()
+        }
     }
 }

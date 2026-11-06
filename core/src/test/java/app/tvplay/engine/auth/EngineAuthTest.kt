@@ -135,6 +135,24 @@ class EngineAuthTest {
         val decrypted = receiver.decrypt(encrypted)
         assertArrayEquals(largePlaintext, decrypted.data)
         assertEquals(0, decrypted.rest.size)
+
+        // Verify same-thread repeated (key, nonce) seal does not throw IllegalArgumentException
+        val retryKey = ByteArray(32) { (it * 11 + 7).toByte() }
+        val retryNonce = AirPlayCrypto.nonce64(42L)
+        val retryPlain = "retry-after-rollback".asciiBytes()
+        val retryAad = "aad".asciiBytes()
+        val firstSeal = AirPlayCrypto.chachaSeal(retryKey, retryNonce, retryPlain, retryAad)
+        val secondSeal = AirPlayCrypto.chachaSeal(retryKey, retryNonce, retryPlain, retryAad)
+        assertArrayEquals(firstSeal, secondSeal)
+
+        // Verify ControlCipher.decrypt rolls back readCounter if a frame fails authentication
+        val nextPlain = "after-corrupt-attempt".asciiBytes()
+        val nextEncrypted = sender.encrypt(nextPlain)
+        val corrupted = nextEncrypted.copyOf().also { it[it.lastIndex] = (it[it.lastIndex].toInt() xor 0xff).toByte() }
+        val corruptFailed = runCatching { receiver.decrypt(corrupted) }.isFailure
+        assertTrue(corruptFailed)
+        val recovered = receiver.decrypt(nextEncrypted)
+        assertArrayEquals(nextPlain, recovered.data)
     }
 
     @Test

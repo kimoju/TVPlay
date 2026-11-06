@@ -311,25 +311,38 @@ class BonjourServiceAdvertiser(
         if (dnsSnapshot.isNotEmpty()) {
             Thread(
                 {
-                    dnsSnapshot.forEach { dns ->
-                        runCatching {
-                            val infos = dns.list("$CARPLAY_CONTROL_SERVICE_TYPE.local.", 1_200L)
-                            for (info in infos) {
-                                if (closed) break
-                                val address = info.inetAddresses.firstOrNull {
-                                    (it is Inet4Address) == (dns.inetAddress is Inet4Address)
-                                }?.let(::applyLocalScope) ?: continue
-                                if (info.port !in 1..65535) continue
-                                val key = "${info.name}|${address is Inet4Address}"
-                                val endpoint = CarPlayBonjourEndpoint(
-                                    info.name,
-                                    address.hostAddress ?: continue,
-                                    info.port,
-                                    info.getPropertyString("id"),
-                                )
-                                discoveredInterfaceEndpoints[key] = endpoint to address
-                                if (seenServices.add(key)) {
-                                    interfaceServices.offer(endpoint to address)
+                    val delaysMillis = longArrayOf(0L, 1_500L, 3_200L)
+                    for (delay in delaysMillis) {
+                        if (closed) break
+                        if (delay > 0L) {
+                            try {
+                                Thread.sleep(delay)
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            }
+                        }
+                        if (closed) break
+                        dnsSnapshot.forEach { dns ->
+                            runCatching {
+                                val infos = dns.list("$CARPLAY_CONTROL_SERVICE_TYPE.local.", 1_200L)
+                                for (info in infos) {
+                                    if (closed) break
+                                    val address = info.inetAddresses.firstOrNull {
+                                        (it is Inet4Address) == (dns.inetAddress is Inet4Address)
+                                    }?.let(::applyLocalScope) ?: continue
+                                    if (info.port !in 1..65535) continue
+                                    val key = "${info.name}|${address is Inet4Address}"
+                                    val endpoint = CarPlayBonjourEndpoint(
+                                        info.name,
+                                        address.hostAddress ?: continue,
+                                        info.port,
+                                        info.getPropertyString("id"),
+                                    )
+                                    discoveredInterfaceEndpoints[key] = endpoint to address
+                                    if (seenServices.add(key)) {
+                                        interfaceServices.offer(endpoint to address)
+                                    }
                                 }
                             }
                         }

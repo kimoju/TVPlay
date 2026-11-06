@@ -194,6 +194,7 @@ class RtspControlSession(
     private val closed = AtomicBoolean(false)
     val isClosed: Boolean get() = closed.get()
     private val notified = AtomicBoolean(false)
+    private val sessionActiveNotified = AtomicBoolean(false)
     private var eventServer: ServerSocket? = null
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
@@ -223,9 +224,16 @@ class RtspControlSession(
 
     internal fun logDebug(message: String) = debugLog(message)
 
+    internal fun notifySessionActive() {
+        if (!closed.get() && sessionActiveNotified.compareAndSet(false, true)) {
+            listener.onSessionActive(this)
+        }
+    }
+
     internal fun videoFrameRendered() {
         if (closed.get()) return
         mainFrameRendered = true
+        notifySessionActive()
         listener.onVideoFrameRendered(this)
     }
 
@@ -329,9 +337,6 @@ class RtspControlSession(
                 eventCipher = null
             }
             safeClose(socket)
-            if (activeStreams.isEmpty() && !mainFrameRendered) {
-                close()
-            }
             false
         }
     }
@@ -556,7 +561,7 @@ class RtspControlSession(
             "SETUP" -> return handleSetup(request)
             "SET_PARAMETER" -> return RtspMessageCodec.Response(status = 200)
             "RECORD" -> {
-                listener.onSessionActive(this)
+                notifySessionActive()
                 return RtspMessageCodec.Response(status = 200)
             }
             "TEARDOWN" -> return handleTeardown(request)
@@ -729,6 +734,7 @@ class RtspControlSession(
                     if (port != null) {
                         activeStreams.add(type)
                         mainScreenToken = Any()
+                        notifySessionActive()
                         result.add(linkedMapOf("type" to type, "dataPort" to port))
                     }
                 }
@@ -895,16 +901,13 @@ class RtspControlSession(
                 val socket = server.acceptFrom(expected) {
                     debugLog("airplay event rejected sender outside the control session")
                 }
-                socket.keepAlive = true
+                configureTcpLiveness(socket) { debugLog(it) }
                 socket.tcpNoDelay = true
                 debugLog("airplay event connection accepted from ${socket.remoteSocketAddress} noDelay=${socket.tcpNoDelay}")
                 val shared = pairVerify.shared
                 if (shared == null) {
                     Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
                     safeClose(socket)
-                    if (activeStreams.isEmpty() && !mainFrameRendered) {
-                        close()
-                    }
                     return
                 }
                 val writeKey = AirPlayCrypto.hkdfSha512(
@@ -930,9 +933,6 @@ class RtspControlSession(
         } catch (error: Exception) {
             if (!closed.get()) {
                 Log.e(TAG, "airplay event accept failed", error)
-                if (activeStreams.isEmpty() && !mainFrameRendered) {
-                    close()
-                }
             }
         }
     }
@@ -1059,7 +1059,7 @@ internal fun safeClose(closeable: Closeable?) {
     }
 }
 
-private fun configureTcpLiveness(socket: Socket, diagnostic: (String) -> Unit) {
+internal fun configureTcpLiveness(socket: Socket, diagnostic: (String) -> Unit) {
     socket.keepAlive = true
     if (Build.VERSION.SDK_INT < 26) {
         diagnostic("TCP peer health tuning unavailable: API ${Build.VERSION.SDK_INT}")

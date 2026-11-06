@@ -848,10 +848,13 @@ class TvSessionEngine(
             if (
                 config.transport == TvTransportMode.WIRELESS &&
                 !closed &&
-                activeSession === session &&
+                (activeSession == null || activeSession === session) &&
                 isBluetoothHandoffCommand(type) &&
                 wirelessHandoffRequested.compareAndSet(false, true)
             ) {
+                if (activeSession == null && !session.isClosed) {
+                    activeSession = session
+                }
                 debugLog(
                     "wireless CarPlay Bluetooth handoff requested; " +
                         "waiting for tunnel iAP2 readiness",
@@ -1820,12 +1823,20 @@ class TvSessionEngine(
 
             override fun onSessionEnded(session: AirPlaySession) {
                 if (isStaleWirelessRun(generation)) return
+                val wasActive = activeSession === session
                 wirelessConnectionProof.end(generation, session)
                 sessionListener.onSessionEnded(session)
+                if (wasActive && !isStaleWirelessRun(generation) && wirelessActiveReported.get()) {
+                    onStatus(CarPlayStatus.ControlEnded, generation)
+                }
             }
 
             override fun onVideoFrameRendered(session: AirPlaySession) {
-                if (isStaleWirelessRun(generation) || activeSession !== session) return
+                if (isStaleWirelessRun(generation) || session.isClosed) return
+                if (activeSession == null) {
+                    onSessionActive(session)
+                }
+                if (activeSession !== session) return
                 if (!watchdog.sessionEstablished()) return
                 watchdog.disarm()
                 wirelessConnectionProof.rendered(generation, session)

@@ -553,7 +553,9 @@ internal class VoiceMicRecorder(
         val nextSocket = try {
             DatagramSocket(null).apply {
                 reuseAddress = true
-                bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+                runCatching { bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+                    .recoverCatching { bind(InetSocketAddress(0)) }
+                    .getOrThrow()
             }
         } catch (error: Exception) {
             Log.e(TAG, "microphone socket creation failed", error)

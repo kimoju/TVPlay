@@ -343,7 +343,7 @@ class Iap2LinkEngine(
         if ((header.control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) != 0 && payload != null) {
             handleExtendedAcknowledgement(payload)
         }
-        if (hasData && payload != null) {
+        if (hasData) {
             handleData(Packet(header.sequence, header.sessionId, payload), nowMillis)
         }
         if (peerSynchronization.maxAcknowledgements > 0 &&
@@ -401,7 +401,7 @@ class Iap2LinkEngine(
         for (packet in unacknowledged) {
             if (!missing.any { u8(it) == packet.sequence }) continue
             packet.retransmissions += 1
-            if (packet.retransmissions == peerSynchronization.maxRetransmissions) {
+            if (packet.retransmissions > peerSynchronization.maxRetransmissions) {
                 die("iAP2 packet ${packet.sequence} was not acknowledged")
                 return
             }
@@ -492,7 +492,7 @@ class Iap2LinkEngine(
         val secondDeadline = unacknowledged.filter { it !== next }.minOfOrNull { it.deadlineMillis }
         next.deadlineMillis = nowMillis + peerSynchronization.retransmissionTimeoutMillis
         next.retransmissions += 1
-        if (next.retransmissions == peerSynchronization.maxRetransmissions) {
+        if (next.retransmissions > peerSynchronization.maxRetransmissions) {
             die("iAP2 packet ${next.sequence} was not acknowledged")
             return
         }

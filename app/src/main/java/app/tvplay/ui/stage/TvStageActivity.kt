@@ -340,7 +340,7 @@ class TvStageActivity : Activity() {
         pictureBinding = null
         activeSurface = null
         CarPlayScreen.destroyed(this)
-        if (isFinishing && !isProjectionVisible) {
+        if (isFinishing && !isProjectionVisible && !streamingActive && !hasLiveAirPlaySession) {
             stopActiveSession()
         }
         super.onDestroy()
@@ -958,7 +958,7 @@ class TvStageActivity : Activity() {
         activeAirPlaySession = liveSession
         val hasStream = liveSession != null || CarPlayBackgroundSession.active
         streamingActive = hasStream
-        firstFrameRendered = hasStream
+        firstFrameRendered = hasStream && (CarPlayBackgroundSession.firstFrameRendered || liveSession?.hasRenderedMainFrame == true)
         registerBackgroundSession(
             controller = snapshot.controller,
             pipeline = snapshot.sink,
@@ -986,6 +986,7 @@ class TvStageActivity : Activity() {
                     reconnectAttempts = 0
                     cancelScheduledReconnect()
                     firstFrameRendered = true
+                    CarPlayBackgroundSession.firstFrameRendered = true
                     streamingActive = true
                     activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
                     LastConnectionProblem.clear(this)
@@ -1702,7 +1703,8 @@ class TvStageActivity : Activity() {
     }
 
     private fun returnToWorkbench() {
-        if (!isProjectionVisible) {
+        val preserveActiveSession = isProjectionVisible || streamingActive || hasLiveAirPlaySession
+        if (!preserveActiveSession) {
             cancelScheduledReconnect()
             stopActiveSession()
             TvSessionForegroundService.stop(this)
@@ -1713,7 +1715,7 @@ class TvStageActivity : Activity() {
                 putExtra("page", "home")
             },
         )
-        if (!isProjectionVisible) {
+        if (!preserveActiveSession) {
             finish()
         }
     }

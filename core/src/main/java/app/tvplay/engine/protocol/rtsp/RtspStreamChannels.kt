@@ -70,7 +70,9 @@ class ScreenStream(
         this.listener = listener
         val bound = ServerSocket()
         bound.reuseAddress = true
-        bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+        runCatching { bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+            .recoverCatching { bound.bind(InetSocketAddress(0)) }
+            .getOrThrow()
         server = bound
         thread = Thread({ accept(bound) }, "airplay-screen").apply { isDaemon = true; start() }
         return bound.localPort
@@ -217,7 +219,7 @@ object ScreenCodec {
      * input keeps its original bytes for the normal decoder error path.
      */
     fun lengthPrefixedToAnnexB(payload: ByteArray): ByteArray {
-        if (payload.size < 4 || payload.startsWithStartCode()) return payload
+        if (payload.size < 4) return payload
 
         var offset = 0
         while (offset + 4 <= payload.size) {
@@ -477,7 +479,9 @@ class AudioStream(
     private fun bindAnyPort(): DatagramSocket {
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+        runCatching { socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+            .recoverCatching { socket.bind(InetSocketAddress(0)) }
+            .getOrThrow()
         return socket
     }
 
@@ -1282,9 +1286,8 @@ class CarPlayMediaEngine(
                                 TAG,
                                 "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
                             )
-                            if (!session.hasActiveMediaStreams()) {
-                                session.close()
-                            }
+                            streams.remove(StreamKey(session, STREAM_TYPE_DATA), tunnel)
+                            session.onStreamClosedByPeer(STREAM_TYPE_DATA)
                         }
                     },
                 )
@@ -1318,9 +1321,8 @@ class CarPlayMediaEngine(
         if (!attached) {
             Log.w(TAG, "iAP tunnel relay attachment was rejected after SETUP")
             pending.bridge.close()
-            if (!session.hasActiveMediaStreams()) {
-                session.close()
-            }
+            streams.remove(StreamKey(session, STREAM_TYPE_DATA), pending.bridge)
+            session.onStreamClosedByPeer(STREAM_TYPE_DATA)
         }
     }
 
@@ -1649,7 +1651,7 @@ object MicrophonePacketizer {
         counters: MicrophoneCounters,
         body: ByteArray,
         samples: Int,
-    ): ByteArray {
+    ): ByteArray = synchronized(counters) {
         val packet = ByteArray(RTP_HEADER_LEN + body.size + TAG_LEN + NONCE_LEN)
         packet[0] = 0x80.toByte()
         packet[1] = (payloadType and 0x7f).toByte()
@@ -1676,7 +1678,7 @@ object MicrophonePacketizer {
         counters.timestamp += samples
         counters.nonce++
         val totalSize = RTP_HEADER_LEN + written + NONCE_LEN
-        return if (totalSize == packet.size) packet else packet.copyOf(totalSize)
+        if (totalSize == packet.size) packet else packet.copyOf(totalSize)
     }
 
     /** Byte-swaps 16-bit PCM samples in place from little-endian to big-endian. */
@@ -2224,11 +2226,9 @@ class AirPlayIapTunnelStream(
                         "${cause?.javaClass?.simpleName ?: "peer EOF"}: " +
                         "${cause?.message ?: "no detail"}",
                 )
-                val shouldCloseSession = markFailed(cause)
+                markFailed(cause)
                 tunnel.close()
-                if (shouldCloseSession && !session.hasActiveMediaStreams()) {
-                    session.close()
-                }
+                session.onStreamClosedByPeer(130)
             }
         },
     )

@@ -597,22 +597,23 @@ object MediaCodecSupport {
      */
     fun toAnnexBInPlace(lengthPrefixed: ByteArray): Boolean {
         if (lengthPrefixed.size < 4) return false
-        if (lengthPrefixed[0] == 0.toByte() &&
-            lengthPrefixed[1] == 0.toByte() &&
-            lengthPrefixed[2] == 0.toByte() &&
-            lengthPrefixed[3] == 1.toByte()
-        ) {
-            return true
-        }
 
         var inputOffset = 0
         while (inputOffset + 4 <= lengthPrefixed.size) {
             val length = readU32Be(lengthPrefixed, inputOffset)
             inputOffset += 4
-            if (length <= 0 || length > lengthPrefixed.size - inputOffset) return false
+            if (length <= 0 || length > lengthPrefixed.size - inputOffset) {
+                inputOffset = -1
+                break
+            }
             inputOffset += length
         }
-        if (inputOffset != lengthPrefixed.size) return false
+        if (inputOffset != lengthPrefixed.size) {
+            return lengthPrefixed[0] == 0.toByte() &&
+                lengthPrefixed[1] == 0.toByte() &&
+                lengthPrefixed[2] == 0.toByte() &&
+                lengthPrefixed[3] == 1.toByte()
+        }
 
         var offset = 0
         while (offset + 4 <= lengthPrefixed.size) {
@@ -1319,11 +1320,11 @@ class HardwareVideoDecoder internal constructor(
         try {
             while (running) {
                 val job = queue.poll(5)
-                outputFailure?.let { failure ->
-                    outputFailure = null
-                    onJobFailure("output", failure)
-                }
                 try {
+                    outputFailure?.let { failure ->
+                        outputFailure = null
+                        onJobFailure("output", failure)
+                    }
                     when (job) {
                         is VideoJob.Config -> configureDecoder(job)
                         is VideoJob.Frame -> {
@@ -1385,11 +1386,12 @@ class HardwareVideoDecoder internal constructor(
     private fun onJobFailure(stage: String, error: Exception) {
         if (running) Log.e(TAG, "video decoder job failed: $stage", error)
         if (running) reportFailure("stage=$stage", error)
-        if (error is IllegalStateException) {
+        val surfaceValid = outputSurface?.isValid == true
+        if (surfaceValid && error is IllegalStateException) {
             dropMtkTuning("codec failed during $stage")
             dropMtkCodec2LowLatency("codec failed during $stage")
         }
-        if (configuredRate > 0 && !renderedFrameLogged && error is MediaCodec.CodecException) {
+        if (surfaceValid && configuredRate > 0 && !renderedFrameLogged && error is MediaCodec.CodecException) {
             dropOperatingRate("codec failed before its first frame")
         }
         releaseDecoder()
@@ -1457,7 +1459,7 @@ class HardwareVideoDecoder internal constructor(
         duplicateConfigLogged = false
         releaseDecoder()
         referenceChain.reset()
-        val surface = outputSurface ?: return
+        val surface = outputSurface?.takeIf { it.isValid } ?: return
         val codec = config.codec
         val codecData = config.codecData
         val mime = if (codec == VideoCodec.H265) MediaFormat.MIMETYPE_VIDEO_HEVC
@@ -1490,12 +1492,14 @@ class HardwareVideoDecoder internal constructor(
             requestedLowLatency,
             requestedMtkMode,
         )) {
+            if (!surface.isValid) return
             configured = tryConfigure(mime, csd, surface, attempt, atOnce)
             if (configured != null) {
                 used = attempt
                 break
             }
         }
+        if (!surface.isValid) return
         if (configured == null) {
             queue.discardCurrentChain()
             report("decoder configuration failed mime=$mime size=${width}x$height")
@@ -1750,6 +1754,10 @@ class HardwareVideoDecoder internal constructor(
 
     private fun changeSurface(surface: Surface?): Unit = synchronized(outputLock) {
         if (outputSurface === surface) return
+        if (surface != null && !surface.isValid) {
+            Log.w(TAG, "video decoder ignoring invalid output surface")
+            return
+        }
         outputSurface = surface
         if (surface == null) {
             releaseDecoder()
@@ -1770,7 +1778,9 @@ class HardwareVideoDecoder internal constructor(
         releaseDecoder()
         queue.discardCurrentChain()
         referenceChain.reset()
+        lastKeyFrameRequestNs = 0L
         lastConfig?.let(::configureDecoder)
+        requestKeyFrameIfDue()
     }
 
     private val workerBufferInfo = MediaCodec.BufferInfo()
@@ -1809,11 +1819,15 @@ class HardwareVideoDecoder internal constructor(
             )
         }
         val index = DecoderInputPump.acquire(
-            running = { running },
+            running = { running && outputFailure == null },
             drain = { if (outputThread == null) drainOutput(codec) },
             dequeue = { codec.dequeueInputBuffer(INPUT_TIMEOUT_US) },
         )
         if (index < 0) {
+            outputFailure?.let { failure ->
+                outputFailure = null
+                throw failure
+            }
             dropMtkTuning("video decoder input stalled")
             dropMtkCodec2LowLatency("video decoder input stalled")
             recover("video decoder input stalled")
@@ -1911,7 +1925,7 @@ class HardwareVideoDecoder internal constructor(
                 val paced = shown && delay != null && slot >= 0 && queuedPaced[slot]
                 val localNs = info.presentationTimeUs * 1000
                 val pauseHeld = paced && queuedBeforePause[slot]
-                val targetNs = if (paced && delay != null) {
+                val targetNs = if (paced) {
                     if (!heldOverGap && !pauseHeld) delay.onFrame(now - localNs)
                     stats.onPacingDelay(delay.nanos)
                     localNs + delay.nanos

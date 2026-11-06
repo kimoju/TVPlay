@@ -196,6 +196,7 @@ object BplistCodec {
             val index = nodes.size
             nodes.add(PLACEHOLDER_LEAF)
             when (value) {
+                null -> nodes[index] = NULL_LEAF
                 is Boolean -> nodes[index] = if (value) TRUE_LEAF else FALSE_LEAF
                 is BigInteger -> {
                     require(value.signum() >= 0) { "bplist: negative integers are not supported" }
@@ -317,9 +318,14 @@ object BplistCodec {
                 else -> throw IllegalArgumentException("bplist: unsupported primitive 0x0$nibble")
             }
             0x1 -> {
-                require(nibble <= 3) { "bplist: integer wider than 8 bytes" }
+                require(nibble <= 4) { "bplist: integer wider than 16 bytes" }
                 val size = 1 shl nibble
-                readBigEndianLong(bytes, position.toLong(), size)
+                if (size == 16) {
+                    require(position + 16 <= bytes.size) { "bplist: value runs past the data" }
+                    readBigEndianLong(bytes, (position + 8).toLong(), 8)
+                } else {
+                    readBigEndianLong(bytes, position.toLong(), size)
+                }
             }
             0x2 -> {
                 val size = 1 shl nibble
@@ -536,6 +542,7 @@ object BplistCodec {
     }
 
     private val PLACEHOLDER_LEAF = Leaf(ByteArray(0))
+    private val NULL_LEAF = Leaf(byteArrayOf(0x00))
     private val FALSE_LEAF = Leaf(byteArrayOf(0x08))
     private val TRUE_LEAF = Leaf(byteArrayOf(0x09))
 
@@ -577,19 +584,29 @@ class NtpClock : Closeable {
     private var synced = false
 
     fun listen(): Int {
-        check(!running.getAndSet(true)) { "NtpClock is already running" }
-        val bound = DatagramSocket(null)
-        bound.reuseAddress = true
-        bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
-        synchronized(socketLock) { socket = bound }
-        receiver = Thread(::runReceiver, "airplay-ntp-rx").apply { isDaemon = true; start() }
-        return bound.localPort
+        synchronized(socketLock) {
+            socket?.takeIf { !it.isClosed }?.let { return it.localPort }
+        }
+        if (!running.getAndSet(true)) {
+            val bound = DatagramSocket(null)
+            bound.reuseAddress = true
+            runCatching { bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+                .recoverCatching { bound.bind(InetSocketAddress(0)) }
+                .getOrThrow()
+            synchronized(socketLock) { socket = bound }
+            receiver = Thread(::runReceiver, "airplay-ntp-rx").apply { isDaemon = true; start() }
+            return bound.localPort
+        }
+        return synchronized(socketLock) { socket?.localPort ?: 0 }
     }
 
     fun start(peerAddress: InetAddress, port: Int) {
         require(port > 0) { "timing port must be positive" }
         peer = InetSocketAddress(peerAddress, port)
-        sender = Thread(::runSender, "airplay-ntp-tx").apply { isDaemon = true; start() }
+        synchronized(socketLock) {
+            if (sender?.isAlive == true) return
+            sender = Thread(::runSender, "airplay-ntp-tx").apply { isDaemon = true; start() }
+        }
     }
 
     /** Now in the phone's synchronized clock domain, as an unsigned NTP64 value. */
@@ -691,18 +708,18 @@ class NtpClock : Closeable {
         val rtt = t4.subtract(t1).subtract(t3.subtract(t2)).toDouble() / TWO32_DOUBLE
         if (rtt < 0.0) return
 
-        if (rtt < pickRtt) {
-            pickRtt = rtt
-            pickOffset = offset
-        }
-        if (--pickCount > 0) return
-
-        val selectedRtt = pickRtt
-        val selectedOffset = pickOffset
-        pickCount = PICK_COUNT
-        pickRtt = Double.POSITIVE_INFINITY
-
         synchronized(clockLock) {
+            if (rtt < pickRtt) {
+                pickRtt = rtt
+                pickOffset = offset
+            }
+            if (--pickCount > 0) return
+
+            val selectedRtt = pickRtt
+            val selectedOffset = pickOffset
+            pickCount = PICK_COUNT
+            pickRtt = Double.POSITIVE_INFINITY
+
             val useSample = delays.all { selectedRtt <= it }
             delays[delayIndex] = selectedRtt
             delayIndex = (delayIndex + 1) % DELAY_WINDOW

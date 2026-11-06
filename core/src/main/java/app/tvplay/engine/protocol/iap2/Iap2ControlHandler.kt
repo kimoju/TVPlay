@@ -164,6 +164,7 @@ sealed class Iap2IdentificationException(message: String, cause: Throwable? = nu
 }
 
 /** Bounded diagnostic values from IdentificationRejected parameter 6 or 7, not negotiated features. */
+@ConsistentCopyVisibility
 data class Iap2RejectedMessageList internal constructor(
     val messageIds: List<Int>,
     val payloadCount: Int,
@@ -1135,6 +1136,6 @@ internal class WirelessControlDeadline(timeoutMillis: Long, private val nowNanos
 
     private companion object {
         const val NANOS_PER_MILLISECOND = 1_000_000L
-        const val MAX_POLL_MILLIS = 5 * 60 * 1_000L
+        const val MAX_POLL_MILLIS = 5_000L
     }
 }

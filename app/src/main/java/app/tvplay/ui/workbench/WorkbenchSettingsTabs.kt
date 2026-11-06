@@ -17,7 +17,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -71,8 +70,8 @@ class WorkbenchSettingsTabs(
 
     val root: LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        clipChildren = false
-        clipToPadding = false
+        clipChildren = true
+        clipToPadding = true
         background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
@@ -81,16 +80,16 @@ class WorkbenchSettingsTabs(
             ),
         ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 26f * density
+            cornerRadius = 22f * density
             setStroke((1f * density).toInt().coerceAtLeast(1), palette.outline)
         }
-        setPadding(dp(22), dp(18), dp(22), dp(18))
+        setPadding(dp(18), dp(14), dp(18), dp(14))
     }
 
     private val tabStripRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(5), dp(5), dp(5), dp(5))
+        setPadding(dp(4), dp(4), dp(4), dp(4))
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = 999f * density
@@ -101,8 +100,8 @@ class WorkbenchSettingsTabs(
 
     private val tabButtons = LinkedHashMap<SettingsCategory, TextView>()
     private val contentContainer = FrameLayout(context).apply {
-        clipChildren = false
-        clipToPadding = false
+        clipChildren = true
+        clipToPadding = true
     }
     private var selectedCategory: SettingsCategory = SettingsCategory.CONNECTION
     private var isRebuilding: Boolean = false
@@ -127,21 +126,23 @@ class WorkbenchSettingsTabs(
             glyph = TvIconGlyph.SLIDERS,
             palette = palette,
             active = true,
-            sizeDp = 34,
-            iconDp = 17,
+            sizeDp = 30,
+            iconDp = 15,
         )
         val headerTitle = TextView(context).apply {
             text = "接收端参数控制台"
             setTextColor(palette.textPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
         val headerHint = TextView(context).apply {
-            text = "方向键导航  ·  OK 切换"
+            text = "方向键导航 · OK 切换"
             setTextColor(palette.textSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(12), dp(5), dp(12), dp(5))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = 999f * density
@@ -152,34 +153,27 @@ class WorkbenchSettingsTabs(
         }
         headerRow.addView(
             headerBadge,
-            LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
+            LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(10) },
         )
         headerRow.addView(headerTitle, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         headerRow.addView(headerHint, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         root.addView(headerRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        val tabScroll = HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            clipChildren = false
-            clipToPadding = false
-        }
         SettingsCategory.entries.forEachIndexed { index, category ->
             val tab = createTabChip(category)
             tabButtons[category] = tab
             tabStripRow.addView(
                 tab,
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    if (index > 0) marginStart = dp(6)
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    if (index > 0) marginStart = dp(4)
                 },
             )
         }
-        tabScroll.addView(tabStripRow, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         root.addView(
-            tabScroll,
+            tabStripRow,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = dp(14)
-                bottomMargin = dp(12)
+                topMargin = dp(10)
+                bottomMargin = dp(8)
             },
         )
 
@@ -210,8 +204,8 @@ class WorkbenchSettingsTabs(
             val scroll = ScrollView(context).apply {
                 isVerticalScrollBarEnabled = true
                 isFillViewport = true
-                clipToPadding = false
-                clipChildren = false
+                clipToPadding = true
+                clipChildren = true
             }
             val page = when (category) {
                 SettingsCategory.CONNECTION -> buildConnectionPage()
@@ -246,11 +240,13 @@ class WorkbenchSettingsTabs(
     private fun createTabChip(category: SettingsCategory): TextView =
         TextView(context).apply {
             text = category.title
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            gravity = Gravity.CENTER_VERTICAL
-            compoundDrawablePadding = dp(8)
-            setPadding(dp(16), dp(9), dp(18), dp(9))
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            compoundDrawablePadding = dp(5)
+            setPadding(dp(8), dp(7), dp(8), dp(7))
             isFocusable = true
             isFocusableInTouchMode = false
             isClickable = true
@@ -287,7 +283,7 @@ class WorkbenchSettingsTabs(
         }
         val strokeWidth = if (focused) dp(2) else if (selected) dp(1) else 0
         view.setTextColor(textColor)
-        val icon = TvVectorIcons.drawable(context, categoryGlyph(category), iconTint, sizeDp = 15, strokeDp = 2f)
+        val icon = TvVectorIcons.drawable(context, categoryGlyph(category), iconTint, sizeDp = 13, strokeDp = 2f)
         view.setCompoundDrawablesRelative(icon, null, null, null)
         view.background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
@@ -304,14 +300,14 @@ class WorkbenchSettingsTabs(
 
     private fun buildConnectionPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(2), dp(2), dp(4), dp(16))
+        setPadding(dp(2), dp(2), dp(4), dp(12))
 
         addView(sectionHeader("投屏协议引擎（Apple CarPlay / 安卓 CarLink）"))
         val protocolOptions = TvProjectionProtocol.entries.map { it to it.displayName }
         addView(
             cycleCard(
                 title = "协议引擎模式",
-                subtitle = "支持双模并发（同时监听 iPhone CarPlay 与小米/vivo/OPPO CarLink）或指定单一协议",
+                subtitle = "支持 iPhone CarPlay 与小米 / vivo / OPPO 双模并发或指定单一协议",
                 options = protocolOptions,
                 current = settings.connection.projectionProtocol,
                 icon = TvIconGlyph.SPARKLES,
@@ -328,7 +324,7 @@ class WorkbenchSettingsTabs(
             addView(
                 actionCard(
                     title = "ICCOA CarLink 6 位连接码 (PIN)",
-                    subtitle = "当前连接码：$currentPin（小米 CarWith / vivo Jovi InCar / OPPO Car+ 首次配对或 AOA2 有线鉴权使用）",
+                    subtitle = "当前连接码：$currentPin（小米 CarWith / vivo / OPPO 首次连接鉴权使用）",
                     buttonLabel = "刷新 PIN 码",
                     icon = TvIconGlyph.SHIELD_MFI,
                     onClick = {
@@ -1043,7 +1039,7 @@ class WorkbenchSettingsTabs(
             gravity = Gravity.CENTER_VERTICAL
             isClickable = false
             isFocusable = false
-            setPadding(dp(4), dp(14), dp(4), dp(7))
+            setPadding(dp(4), dp(8), dp(4), dp(5))
             addView(
                 View(context).apply {
                     background = GradientDrawable().apply {
@@ -1052,22 +1048,22 @@ class WorkbenchSettingsTabs(
                         setColor(palette.accent)
                     }
                 },
-                LinearLayout.LayoutParams(dp(4), dp(14)).apply { marginEnd = dp(9) },
+                LinearLayout.LayoutParams(dp(4), dp(13)).apply { marginEnd = dp(8) },
             )
             addView(
                 TextView(context).apply {
                     text = title
                     setTextColor(palette.accent)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                    letterSpacing = 0.04f
+                    letterSpacing = 0.03f
                 },
             )
         }
 
     private fun cardLayoutParams(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            bottomMargin = dp(9)
+            bottomMargin = dp(7)
         }
 
     private fun createRowIconBadge(glyph: TvIconGlyph): Pair<FrameLayout, (Boolean) -> Unit> {
@@ -1079,12 +1075,12 @@ class WorkbenchSettingsTabs(
             isClickable = false
             isFocusable = false
         }
-        well.addView(image, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+        well.addView(image, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
         fun updateState(focusedOrActive: Boolean) {
             val tint = if (focusedOrActive) palette.focusRing else palette.accent
             well.background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = 11f * density
+                cornerRadius = 10f * density
                 setColor(
                     if (focusedOrActive) {
                         ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x38 else 0x22)
@@ -1097,7 +1093,7 @@ class WorkbenchSettingsTabs(
                     if (focusedOrActive) ColorUtils.setAlphaComponent(palette.focusRing, 0x88) else palette.iconWellOutline,
                 )
             }
-            image.setImageDrawable(TvVectorIconDrawable(glyph, tint, dp(18), 2f * density))
+            image.setImageDrawable(TvVectorIconDrawable(glyph, tint, dp(16), 2f * density))
         }
         updateState(false)
         return well to ::updateState
@@ -1113,9 +1109,9 @@ class WorkbenchSettingsTabs(
         var current = checked
         val (iconWell, updateIconState) = createRowIconBadge(icon)
         val stateBadge = TextView(context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(9), dp(3), dp(9), dp(3))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
         }
         fun updateStateBadge(on: Boolean) {
             stateBadge.text = if (on) "已开启" else "已关闭"
@@ -1147,7 +1143,7 @@ class WorkbenchSettingsTabs(
             isFocusable = false
             addView(
                 stateBadge,
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(10) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(8) },
             )
             addView(switchView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
@@ -1165,11 +1161,11 @@ class WorkbenchSettingsTabs(
             tag = "card:$title"
             addView(
                 iconWell,
-                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
             )
             addView(
                 cardTitleColumn(title, subtitle),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) },
             )
             addView(rightCluster, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
@@ -1188,9 +1184,12 @@ class WorkbenchSettingsTabs(
         val (iconWell, updateIconState) = createRowIconBadge(icon)
         val valueBadge = TextView(context).apply {
             text = options.getOrNull(index)?.second.orEmpty()
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(14), dp(7), dp(14), dp(7))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(185)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
         }
         fun styleValueBadge(focused: Boolean) {
             valueBadge.setTextColor(if (focused) palette.onAccent else palette.textPrimary)
@@ -1248,11 +1247,11 @@ class WorkbenchSettingsTabs(
             tag = "card:$title"
             addView(
                 iconWell,
-                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
             )
             addView(
                 cardTitleColumn(title, subtitle),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) },
             )
             addView(valueBadge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
@@ -1268,11 +1267,12 @@ class WorkbenchSettingsTabs(
         val (iconWell, updateIconState) = createRowIconBadge(icon)
         val pill = TvPlayButton(context, TvPlayButtonKind.SECONDARY).apply {
             text = buttonLabel
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             isFocusable = false
             isClickable = false
-            minHeight = dp(36)
-            minimumHeight = dp(36)
-            setPadding(dp(16), dp(7), dp(16), dp(7))
+            minHeight = dp(34)
+            minimumHeight = dp(34)
+            setPadding(dp(14), dp(6), dp(14), dp(6))
         }
         return focusableCard(
             onClick = onClick,
@@ -1288,11 +1288,11 @@ class WorkbenchSettingsTabs(
             tag = "card:$title"
             addView(
                 iconWell,
-                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
             )
             addView(
                 cardTitleColumn(title, subtitle),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) },
             )
             addView(pill, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
@@ -1313,7 +1313,7 @@ class WorkbenchSettingsTabs(
             orientation = LinearLayout.VERTICAL
             isClickable = false
             isFocusable = false
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setPadding(dp(14), dp(11), dp(14), dp(11))
             background = cardBackground(focused = false)
         }
         val topHeader = LinearLayout(context).apply {
@@ -1323,7 +1323,7 @@ class WorkbenchSettingsTabs(
             isFocusable = false
             addView(
                 iconWell,
-                LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(14) },
+                LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) },
             )
             addView(
                 cardTitleColumn(title, subtitle),
@@ -1343,7 +1343,7 @@ class WorkbenchSettingsTabs(
 
         fun inputBoxBackground(focused: Boolean) = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 12f * density
+            cornerRadius = 11f * density
             setColor(if (focused) palette.surfaceCardElevated else palette.subtleSurface)
             setStroke(
                 if (focused) dp(2) else dp(1),
@@ -1359,7 +1359,7 @@ class WorkbenchSettingsTabs(
             this.hint = hint
             setTextColor(palette.textPrimary)
             setHintTextColor(palette.textSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
@@ -1369,7 +1369,7 @@ class WorkbenchSettingsTabs(
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             }
             background = inputBoxBackground(focused = false)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener {
                 isFocusableInTouchMode = true
                 requestFocus()
@@ -1408,7 +1408,7 @@ class WorkbenchSettingsTabs(
         }
         card.addView(
             editText,
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) },
         )
         return card
     }
@@ -1422,7 +1422,7 @@ class WorkbenchSettingsTabs(
                 TextView(context).apply {
                     text = title
                     setTextColor(palette.textPrimary)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.8f)
                     typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
@@ -1432,10 +1432,12 @@ class WorkbenchSettingsTabs(
                 TextView(context).apply {
                     text = subtitle
                     setTextColor(palette.textSecondary)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    setLineSpacing(0f, 1.18f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setLineSpacing(0f, 1.15f)
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
                 },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(3) },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(2) },
             )
         }
 
@@ -1447,7 +1449,7 @@ class WorkbenchSettingsTabs(
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(13), dp(16), dp(13))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
             isFocusable = true
             isFocusableInTouchMode = false
             isClickable = true
@@ -1484,7 +1486,7 @@ class WorkbenchSettingsTabs(
             },
         ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 18f * density
+            cornerRadius = 15f * density
             setStroke(
                 if (focused) dp(2) else dp(1),
                 if (focused) palette.focusRing else palette.outline,

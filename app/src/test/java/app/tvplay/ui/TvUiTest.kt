@@ -733,4 +733,73 @@ class TvUiTest {
 
         workbenchController.pause().stop().destroy()
     }
+
+    @Test
+    @Config(sdk = [34], qualifiers = "w960dp-h540dp-land-xhdpi")
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun render1080pWorkbenchScreenshotsAndVerifyZeroOverflow() {
+        CarPlayBackgroundSession.clear()
+        PendingReconnect.clear()
+        val workbenchController = Robolectric.buildActivity(TvWorkbenchActivity::class.java).setup()
+        val workbench = workbenchController.get()
+        val stagePaneField = TvWorkbenchActivity::class.java.getDeclaredField("stagePane").apply {
+            isAccessible = true
+        }
+        val settingsPaneField = TvWorkbenchActivity::class.java.getDeclaredField("settingsPane").apply {
+            isAccessible = true
+        }
+        val stagePane = stagePaneField.get(workbench) as WorkbenchHeroStage
+        val settingsPane = settingsPaneField.get(workbench) as WorkbenchSettingsTabs
+        val rootView = workbench.findViewById<View>(android.R.id.content)
+
+        fun renderAndSave(path: String) {
+            rootView.measure(
+                View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+            )
+            rootView.layout(0, 0, 1920, 1080)
+            val bmp = android.graphics.Bitmap.createBitmap(1920, 1080, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            rootView.draw(canvas)
+            val outFile = java.io.File(path)
+            if (outFile.parentFile?.exists() == true) {
+                outFile.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            }
+        }
+
+        // 1. Render Dual-Mode (AUTO)
+        renderAndSave("/home/x/.gemini/antigravity/brain/65862cf3-f984-485e-8a85-70fb11104183/tvplay_home_auto.png")
+
+        val tabStripField = WorkbenchSettingsTabs::class.java.getDeclaredField("tabStripRow").apply {
+            isAccessible = true
+        }
+        val tabStripRow = tabStripField.get(settingsPane) as ViewGroup
+        assertTrue(
+            "Tab strip right (${tabStripRow.right}) must fit within settingsPane (${settingsPane.root.width - settingsPane.root.paddingRight})",
+            tabStripRow.right <= settingsPane.root.width - settingsPane.root.paddingRight,
+        )
+
+        val stageScroll = stagePane.root.getChildAt(0) as android.widget.ScrollView
+        val stageColumn = stageScroll.getChildAt(0) as ViewGroup
+        assertTrue(
+            "Left stage column height (${stageColumn.height}) must fit inside 1080p stagePane height (${stagePane.root.height}) without clipping",
+            stageColumn.height <= stagePane.root.height,
+        )
+
+        // 2. Switch to ICCOA CarLink and render
+        val carLinkHeroBtn = collectAllViews(stagePane.root).filterIsInstance<TextView>().first {
+            it.tag == "hero_proto_carlink"
+        }
+        carLinkHeroBtn.performClick()
+        renderAndSave("/home/x/.gemini/antigravity/brain/65862cf3-f984-485e-8a85-70fb11104183/tvplay_home_carlink.png")
+
+        val stageScrollAfter = stagePane.root.getChildAt(0) as android.widget.ScrollView
+        val stageColumnAfter = stageScrollAfter.getChildAt(0) as ViewGroup
+        assertTrue(
+            "Left stage column height after CarLink switch (${stageColumnAfter.height}) must fit inside 1080p stagePane height (${stagePane.root.height})",
+            stageColumnAfter.height <= stagePane.root.height,
+        )
+
+        workbenchController.pause().stop().destroy()
+    }
 }

@@ -132,9 +132,9 @@ object StageWaitingOverlay {
         }
 
         val emblemContainer = FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(68), dp(68)).apply {
-                topMargin = dp(16)
-                bottomMargin = dp(14)
+            layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+                topMargin = dp(10)
+                bottomMargin = dp(8)
             }
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -144,14 +144,14 @@ object StageWaitingOverlay {
                 ),
             ).apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(22).toFloat()
+                cornerRadius = dp(16).toFloat()
                 setStroke(dp(1), ColorUtils.setAlphaComponent(0xFF38BDF8.toInt(), 0x80))
             }
             addView(
                 ImageView(context).apply {
                     setImageResource(R.drawable.ic_carplay)
                 },
-                FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER),
+                FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER),
             )
         }
 
@@ -164,7 +164,7 @@ object StageWaitingOverlay {
                 else -> context.getString(R.string.starting_carplay)
             }
             setTextColor(waitingColors.primaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             gravity = Gravity.CENTER
         }
@@ -178,13 +178,13 @@ object StageWaitingOverlay {
                 existingWifiSsid = existingWifiSsid,
             )
             setTextColor(waitingColors.secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            setLineSpacing(0f, 1.35f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
+            setLineSpacing(0f, 1.28f)
             gravity = Gravity.START
-            setPadding(dp(20), dp(14), dp(20), dp(14))
+            setPadding(dp(16), dp(11), dp(16), dp(11))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(18).toFloat()
+                cornerRadius = dp(16).toFloat()
                 setColor(ColorUtils.setAlphaComponent(waitingColors.buttonFill, 0x78))
                 setStroke(dp(1), ColorUtils.setAlphaComponent(waitingColors.buttonBorder, 0x80))
             }
@@ -359,13 +359,13 @@ object StageWaitingOverlay {
         val stageCard = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            clipChildren = false
-            clipToPadding = false
-            setPadding(dp(36), dp(28), dp(36), dp(28))
+            clipChildren = true
+            clipToPadding = true
+            setPadding(dp(28), dp(18), dp(28), dp(18))
             background = if (waitingColors.background == Color.BLACK) {
-                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(28).toFloat(), activeGlow = false)
+                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(24).toFloat(), activeGlow = false)
             } else {
-                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(28).toFloat(), activeGlow = true)
+                HeroBentoCardDrawable(darkScheme, cornerRadiusPx = dp(24).toFloat(), activeGlow = true)
             }
             addView(topBadgeRow)
             addView(emblemContainer)
@@ -373,19 +373,19 @@ object StageWaitingOverlay {
             addView(
                 instructionsView,
                 LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(16)
+                    topMargin = dp(10)
                 },
             )
             addView(
                 helpView,
                 LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(14)
+                    topMargin = dp(8)
                 },
             )
             addView(
                 reconnectBanner,
                 LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(14)
+                    topMargin = dp(8)
                 },
             )
             addView(
@@ -394,7 +394,7 @@ object StageWaitingOverlay {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply {
-                    topMargin = dp(22)
+                    topMargin = dp(14)
                 },
             )
         }

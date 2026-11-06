@@ -44,7 +44,10 @@ class WorkbenchHeroStage(
     private val context: Context,
     private val settings: TvSettingsRepository = TvSettingsRepository(context),
 ) {
-    val root: FrameLayout = FrameLayout(context)
+    val root: FrameLayout = FrameLayout(context).apply {
+        clipChildren = true
+        clipToPadding = true
+    }
     var primaryLaunchButton: View = View(context)
         private set
     var onLaunchProjection: ((Boolean) -> Unit)? = null
@@ -64,28 +67,28 @@ class WorkbenchHeroStage(
         val carLinkPinCode = settings.connection.carLinkPinCode
         val modeLabel = when {
             !wirelessEnabled -> "USB 有线低延迟直连"
-            wirelessMode == TvWirelessMode.LAN_WIFI -> "无线 · 家庭局域网互联"
-            else -> "无线 · Wi-Fi Direct 5GHz 直连"
+            wirelessMode == TvWirelessMode.LAN_WIFI -> "家庭局域网互联"
+            else -> "5GHz P2P 直连"
         }
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
         val pairedAddress = settings.connection.pairedPhoneAddress
         val pairedSummary = when {
             pairedAddress != null -> settings.connection.pairedPhoneName
-            projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK -> "小米 CarWith / vivo / OPPO"
-            projectionProtocol == TvProjectionProtocol.ANDROID_AUTO -> "Android Auto 手机"
-            projectionProtocol == TvProjectionProtocol.HUAWEI_HICAR -> "华为 HarmonyOS 手机"
-            projectionProtocol == TvProjectionProtocol.AUTO -> "iPhone / 小米 / vivo / OPPO"
-            else -> "自动识别已配对 iPhone"
+            projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK -> "小米/vivo/OPPO"
+            projectionProtocol == TvProjectionProtocol.ANDROID_AUTO -> "Android Auto"
+            projectionProtocol == TvProjectionProtocol.HUAWEI_HICAR -> "华为鸿蒙手机"
+            projectionProtocol == TvProjectionProtocol.AUTO -> "iPhone / 安卓"
+            else -> "已配对 iPhone"
         }
         val hotspotSummary = when {
-            !wirelessEnabled -> "即插即用 · 免蓝牙配对 · 硬件解码直通"
+            !wirelessEnabled -> "免蓝牙配对 · 硬件解码直通"
             wirelessMode == TvWirelessMode.LAN_WIFI -> {
                 val ssid = settings.connection.existingWifiSsid
-                if (ssid.isNotBlank()) "当前路由器：$ssid" else "自动桥接电视当前 Wi-Fi 或千兆有线网卡"
+                if (ssid.isNotBlank()) "路由器：$ssid" else "同路由器 Wi-Fi / 有线网卡"
             }
             else -> {
                 val ch = settings.connection.wifiP2pPreferredChannel
-                "5GHz 专用点对点通道 · 信道：${if (ch == 0) "自动优选" else ch.toString()}"
+                "5GHz 点对点 · 信道：${if (ch == 0) "自动" else ch.toString()}"
             }
         }
         val lastProblem = if (pendingReconnect) {
@@ -94,7 +97,7 @@ class WorkbenchHeroStage(
             LastConnectionProblem.homeLine(context)
         }
         val installedVersion = runCatching { TvLanOtaManager.currentAppVersion(context).versionName }.getOrDefault("1.1.1")
-        val videoSpecSummary = "${settings.display.fps} FPS · ${if (settings.display.hevcEnabled) "HEVC" else "H.264"}"
+        val videoSpecSummary = "${settings.display.fps}帧 · ${if (settings.display.hevcEnabled) "HEVC" else "H.264"}"
 
         val view = build(
             model = StageModel(
@@ -201,20 +204,22 @@ class WorkbenchHeroStage(
         val scroll = ScrollView(context).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
+            clipChildren = true
+            clipToPadding = true
         }
         val column = column().apply {
-            setPadding(dp(2), dp(2), dp(6), dp(12))
+            setPadding(dp(1), dp(1), dp(2), dp(2))
         }
 
         // =========================================================================
         // 1. HERO STAGE COCKPIT CARD
         // =========================================================================
         val heroCard = column().apply {
-            setPadding(dp(22), dp(20), dp(22), dp(20))
+            setPadding(dp(18), dp(12), dp(18), dp(12))
             background = HeroBentoCardDrawable(
                 palette = palette,
                 highlighted = model.sessionActive,
-                cornerRadiusPx = dp(24).toFloat(),
+                cornerRadiusPx = dp(20).toFloat(),
                 strokeWidthPx = dp(if (model.sessionActive) 2 else 1).toFloat(),
             )
         }
@@ -237,7 +242,7 @@ class WorkbenchHeroStage(
         }
         val statusPill = row().apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), dp(5), dp(12), dp(5))
+            setPadding(dp(10), dp(4), dp(11), dp(4))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(999).toFloat()
@@ -246,8 +251,8 @@ class WorkbenchHeroStage(
             }
         }
         val statusDot = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
-                marginEnd = dp(8)
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply {
+                marginEnd = dp(7)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -258,7 +263,7 @@ class WorkbenchHeroStage(
         statusPill.addView(
             label(
                 statusText,
-                12f,
+                11.5f,
                 if (model.sessionActive) palette.success else palette.primaryText,
                 bold = true,
             ),
@@ -269,16 +274,16 @@ class WorkbenchHeroStage(
         val versionPill = TextView(context).apply {
             text = "v${model.versionName}"
             setTextColor(palette.secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            compoundDrawablePadding = dp(5)
+            compoundDrawablePadding = dp(4)
             setCompoundDrawablesRelativeWithIntrinsicBounds(
-                TvVectorIcons.drawable(context, TvIconGlyph.SHIELD_MFI, palette.accent, sizeDp = 13),
+                TvVectorIcons.drawable(context, TvIconGlyph.SHIELD_MFI, palette.accent, sizeDp = 12),
                 null,
                 null,
                 null,
             )
-            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setPadding(dp(9), dp(3), dp(9), dp(3))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(999).toFloat()
@@ -288,13 +293,13 @@ class WorkbenchHeroStage(
         }
         topStatusRow.addView(versionPill)
         heroCard.addView(topStatusRow)
-        heroCard.addView(space(dp(16)))
+        heroCard.addView(space(dp(10)))
 
         // Emblem + Headline Title
         val titleRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
         val iconBadge = FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply {
-                marginEnd = dp(16)
+            layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply {
+                marginEnd = dp(12)
             }
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -304,7 +309,7 @@ class WorkbenchHeroStage(
                 ),
             ).apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(16).toFloat()
+                cornerRadius = dp(14).toFloat()
                 setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x77))
             }
             addView(
@@ -312,15 +317,15 @@ class WorkbenchHeroStage(
                     setImageResource(R.drawable.ic_carplay)
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER),
+                FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER),
             )
         }
         val titleCol = column().apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val heroTitleText = when (model.projectionProtocol) {
-            TvProjectionProtocol.AUTO -> "CarPlay & CarLink 双模接收端"
-            TvProjectionProtocol.APPLE_CARPLAY -> "Apple CarPlay 接收端"
+            TvProjectionProtocol.AUTO -> "CarPlay & CarLink 双模投屏"
+            TvProjectionProtocol.APPLE_CARPLAY -> "Apple CarPlay 车载投屏"
             TvProjectionProtocol.ICCOA_CARLINK -> "ICCOA CarLink 安卓车联"
             TvProjectionProtocol.ANDROID_AUTO -> "Google Android Auto 接收端"
             TvProjectionProtocol.HUAWEI_HICAR -> "华为 HiCar 智行接收端"
@@ -328,19 +333,22 @@ class WorkbenchHeroStage(
         titleCol.addView(
             label(
                 heroTitleText,
-                22f,
+                18.5f,
                 palette.primaryText,
                 bold = true,
-            ),
+            ).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
         )
-        titleCol.addView(space(dp(3)))
+        titleCol.addView(space(dp(2)))
         val subtitleLine = if (model.wirelessEnabled) {
             "${model.wirelessModeLabel} · 蓝牙：${model.bluetoothDeviceName}"
         } else {
             "${model.wirelessModeLabel} · 插入数据线自动唤醒"
         }
         titleCol.addView(
-            label(subtitleLine, 13f, palette.secondaryText).apply {
+            label(subtitleLine, 12f, palette.secondaryText).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -350,7 +358,7 @@ class WorkbenchHeroStage(
         heroCard.addView(titleRow)
 
         // 3-Column Bento Telemetry Grid
-        heroCard.addView(space(dp(14)))
+        heroCard.addView(space(dp(10)))
         val telemetryGrid = row()
         val transportTileGlyph = when {
             !model.wirelessEnabled -> TvIconGlyph.USB
@@ -371,7 +379,7 @@ class WorkbenchHeroStage(
                 accented = true,
             ),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(8)
+                marginEnd = dp(6)
             },
         )
         telemetryGrid.addView(
@@ -383,7 +391,7 @@ class WorkbenchHeroStage(
                 accented = false,
             ),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(8)
+                marginEnd = dp(6)
             },
         )
         telemetryGrid.addView(
@@ -399,21 +407,21 @@ class WorkbenchHeroStage(
         heroCard.addView(telemetryGrid)
 
         model.lastProblemSummary?.takeIf { it.isNotBlank() }?.let { problem ->
-            heroCard.addView(space(dp(12)))
+            heroCard.addView(space(dp(8)))
             val warnBox = column().apply {
-                setPadding(dp(14), dp(9), dp(14), dp(9))
+                setPadding(dp(12), dp(7), dp(12), dp(7))
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(12).toFloat()
+                    cornerRadius = dp(10).toFloat()
                     setColor(palette.warningSurface)
                     setStroke(dp(1), palette.warningOutline)
                 }
             }
-            warnBox.addView(label("状态提示：$problem", 12.5f, palette.warningText, bold = true))
+            warnBox.addView(label("状态提示：$problem", 11.5f, palette.warningText, bold = true))
             heroCard.addView(warnBox)
         }
 
-        heroCard.addView(space(dp(14)))
+        heroCard.addView(space(dp(10)))
 
         val heroProtoRow = row()
         val heroProtoItems = listOf(
@@ -426,27 +434,28 @@ class WorkbenchHeroStage(
             val btn = TvPlayButton(context).apply {
                 tag = "hero_proto_${proto.key}"
                 text = titleText
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
-                minHeight = dp(40)
-                minimumHeight = dp(40)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+                minHeight = dp(34)
+                minimumHeight = dp(34)
+                compoundDrawablePadding = dp(5)
                 style(
                     if (selected) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = if (proto == TvProjectionProtocol.APPLE_CARPLAY) TvIconGlyph.SHIELD_MFI else TvIconGlyph.PHONE,
                 )
-                setPadding(dp(10), dp(8), dp(10), dp(8))
+                setPadding(dp(8), dp(5), dp(8), dp(5))
                 setOnClickListener { callbacks.onChooseProjectionProtocol(proto) }
             }
             heroProtoRow.addView(
                 btn,
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (idx < heroProtoItems.lastIndex) marginEnd = dp(8)
+                    if (idx < heroProtoItems.lastIndex) marginEnd = dp(6)
                 },
             )
         }
         heroCard.addView(heroProtoRow)
-        heroCard.addView(space(dp(10)))
+        heroCard.addView(space(dp(7)))
 
         val primaryButton = TvPlayButton(context, TvPlayButtonKind.PRIMARY, TvIconGlyph.PLAY).apply {
             tag = "primary_launch"
@@ -468,10 +477,11 @@ class WorkbenchHeroStage(
                 model.wirelessEnabled -> "启动无线 Apple CarPlay 投屏"
                 else -> "启动 USB 有线 Apple CarPlay 投屏"
             }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            minHeight = dp(50)
-            minimumHeight = dp(50)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.8f)
+            minHeight = dp(40)
+            minimumHeight = dp(40)
             style(TvPlayButtonKind.PRIMARY, palette, overlay = false, glyph = TvIconGlyph.PLAY)
+            setPadding(dp(14), dp(7), dp(14), dp(7))
             setOnClickListener { callbacks.onStartOrEnterProjection() }
         }
         primaryLaunchButton = primaryButton
@@ -481,14 +491,15 @@ class WorkbenchHeroStage(
         )
 
         if (model.sessionRunning || model.sessionActive) {
-            heroCard.addView(space(dp(8)))
+            heroCard.addView(space(dp(6)))
             val stopButton = TvPlayButton(context, TvPlayButtonKind.TONAL_DANGER, TvIconGlyph.POWER).apply {
                 tag = "stop_session"
                 text = "断开当前连接并停止后台服务"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                minHeight = dp(44)
-                minimumHeight = dp(44)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                minHeight = dp(38)
+                minimumHeight = dp(38)
                 style(TvPlayButtonKind.TONAL_DANGER, palette, overlay = false, glyph = TvIconGlyph.POWER)
+                setPadding(dp(12), dp(6), dp(12), dp(6))
                 setOnClickListener { callbacks.onStopSession() }
             }
             heroCard.addView(
@@ -498,7 +509,7 @@ class WorkbenchHeroStage(
         }
 
         column.addView(heroCard)
-        column.addView(space(dp(12)))
+        column.addView(space(dp(7)))
 
         // =========================================================================
         // 2. BENTO TRANSPORT MATRIX CARD
@@ -512,42 +523,44 @@ class WorkbenchHeroStage(
                 palette = palette,
             ),
         )
-        modeCard.addView(space(dp(10)))
+        modeCard.addView(space(dp(6)))
 
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
             tag = "mode_wireless"
             text = "无线投屏连接"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            minHeight = dp(40)
-            minimumHeight = dp(40)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+            minHeight = dp(34)
+            minimumHeight = dp(34)
+            compoundDrawablePadding = dp(5)
             style(
                 if (model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
                 glyph = TvIconGlyph.WIFI,
             )
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener { callbacks.onChooseTransportMode(true) }
         }
         val usbBtn = TvPlayButton(context).apply {
             tag = "mode_usb"
             text = "USB 有线直连"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            minHeight = dp(40)
-            minimumHeight = dp(40)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+            minHeight = dp(34)
+            minimumHeight = dp(34)
+            compoundDrawablePadding = dp(5)
             style(
                 if (!model.wirelessEnabled) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                 palette,
                 overlay = false,
                 glyph = TvIconGlyph.USB,
             )
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener { callbacks.onChooseTransportMode(false) }
         }
         transportRow.addView(
             wirelessBtn,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) },
         )
         transportRow.addView(
             usbBtn,
@@ -556,42 +569,44 @@ class WorkbenchHeroStage(
         modeCard.addView(transportRow)
 
         if (model.wirelessEnabled) {
-            modeCard.addView(space(dp(8)))
+            modeCard.addView(space(dp(5)))
             val switchRow = row()
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
             val directBtn = TvPlayButton(context).apply {
                 tag = "mode_direct"
                 text = "Wi-Fi Direct 直连"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                minHeight = dp(40)
-                minimumHeight = dp(40)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                minHeight = dp(34)
+                minimumHeight = dp(34)
+                compoundDrawablePadding = dp(5)
                 style(
                     if (isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = TvIconGlyph.RADAR,
                 )
-                setPadding(dp(10), dp(8), dp(10), dp(8))
+                setPadding(dp(10), dp(5), dp(10), dp(5))
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.WIFI_DIRECT) }
             }
             val lanBtn = TvPlayButton(context).apply {
                 tag = "mode_lan"
                 text = "家庭局域网 / 网线"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                minHeight = dp(40)
-                minimumHeight = dp(40)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                minHeight = dp(34)
+                minimumHeight = dp(34)
+                compoundDrawablePadding = dp(5)
                 style(
                     if (!isDirect) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
                     palette,
                     overlay = false,
                     glyph = TvIconGlyph.LAN,
                 )
-                setPadding(dp(10), dp(8), dp(10), dp(8))
+                setPadding(dp(10), dp(5), dp(10), dp(5))
                 setOnClickListener { callbacks.onChooseWirelessMode(TvWirelessMode.LAN_WIFI) }
             }
             switchRow.addView(
                 directBtn,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) },
             )
             switchRow.addView(
                 lanBtn,
@@ -600,12 +615,13 @@ class WorkbenchHeroStage(
             modeCard.addView(switchRow)
         }
         column.addView(modeCard)
-        column.addView(space(dp(12)))
+        column.addView(space(dp(7)))
 
         // =========================================================================
-        // 3. COMPACT 3-STEP BENTO CONNECTION TIMELINE
+        // 3. COMPACT 3-STEP BENTO CONNECTION TIMELINE (3-Column Horizontal Strip)
         // =========================================================================
         val guideCard = bentoCard(palette)
+        val stepsRow = row()
         if (!model.wirelessEnabled) {
             guideCard.addView(
                 bentoSectionHeader(
@@ -615,33 +631,21 @@ class WorkbenchHeroStage(
                     palette = palette,
                 ),
             )
-            guideCard.addView(space(dp(10)))
-            guideCard.addView(
-                stepTimelineRow(
-                    "01",
-                    "连接数据线",
-                    "使用支持数据传输的 Lightning / USB-C 线连接电视与 iPhone",
-                    palette,
-                ),
-            )
             guideCard.addView(space(dp(6)))
-            guideCard.addView(
-                stepTimelineRow(
-                    "02",
-                    "授权信任设备",
-                    "解锁 iPhone 点击「信任此电脑」，并在电视弹窗允许 USB 访问",
-                    palette,
-                ),
+            val steps = listOf(
+                Triple("01", "连接数据线", "USB 线接入手机"),
+                Triple("02", "授权设备", "点击信任此电脑"),
+                Triple("03", "开启投屏", "进入 60FPS 画面"),
             )
-            guideCard.addView(space(dp(6)))
-            guideCard.addView(
-                stepTimelineRow(
-                    "03",
-                    "开启全屏投屏",
-                    "点击上方启动按钮，无需开启 VPN 即可直接进入 60FPS 画面",
-                    palette,
-                ),
-            )
+            steps.forEachIndexed { idx, (num, titleText, subText) ->
+                stepsRow.addView(
+                    stepTimelineTile(num, titleText, subText, palette),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        if (idx < steps.lastIndex) marginEnd = dp(6)
+                    },
+                )
+            }
+            guideCard.addView(stepsRow)
         } else {
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
             val isAndroidOnly = model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ||
@@ -650,7 +654,7 @@ class WorkbenchHeroStage(
             guideCard.addView(
                 bentoSectionHeader(
                     glyph = TvIconGlyph.BLUETOOTH,
-                    title = if (isAndroidOnly) "无线安卓车联 (CarLink) 连接流程" else "无线 CarPlay / CarLink 连接流程",
+                    title = if (isAndroidOnly) "无线安卓车联流程" else "无线互联流程",
                     badgeText = if (model.projectionProtocol.enablesCarLink) {
                         "PIN: ${model.carLinkPinCode}"
                     } else if (isDirect) {
@@ -661,36 +665,33 @@ class WorkbenchHeroStage(
                     palette = palette,
                 ),
             )
-            guideCard.addView(space(dp(10)))
-            guideCard.addView(
-                stepTimelineRow(
+            guideCard.addView(space(dp(6)))
+            val steps = listOf(
+                Triple(
                     "01",
-                    if (isDirect) "开启手机蓝牙与 Wi-Fi" else "接入同一家庭路由器",
-                    if (isDirect) "保持电视与手机蓝牙、Wi-Fi 开启，BLE 0xFCFB 自动广播发现"
-                    else "电视通过 Wi-Fi 或千兆网线与 iPhone / 安卓手机处于同一局域网",
-                    palette,
+                    if (isDirect) "手机开启蓝牙" else "连同一路由器",
+                    if (isDirect) "BLE 0xFCFB 广播" else "同局域网互联",
                 ),
-            )
-            guideCard.addView(space(dp(6)))
-            guideCard.addView(
-                stepTimelineRow(
+                Triple(
                     "02",
-                    if (isAndroidOnly) "打开小米 CarWith / vivo / OPPO 车联" else "蓝牙配对「${model.bluetoothDeviceName}」或开启安卓车联",
-                    if (isAndroidOnly) "手机设置 → 更多连接 → CarWith / 智能车载，自动弹窗发现「TVPlay」"
-                    else "iPhone 连接蓝牙「${model.bluetoothDeviceName}」；小米 / vivo / OPPO 自动发现连接",
-                    palette,
+                    if (isAndroidOnly) "手机打开车联" else "配对蓝牙/车联",
+                    if (isAndroidOnly) "CarWith / 车载" else "iPhone / 安卓发现",
                 ),
-            )
-            guideCard.addView(space(dp(6)))
-            guideCard.addView(
-                stepTimelineRow(
+                Triple(
                     "03",
-                    if (model.projectionProtocol.enablesCarLink) "输入 6 位连接码 ${model.carLinkPinCode}" else "确认使用 CarPlay 车载",
-                    if (model.projectionProtocol.enablesCarLink) "安卓首次连接输入 PIN 码「${model.carLinkPinCode}」；iPhone 确认启用 CarPlay"
-                    else "点击上方启动按钮，首次连接在 iPhone 弹窗确认启用 CarPlay",
-                    palette,
+                    if (model.projectionProtocol.enablesCarLink) "输入 PIN 码" else "确认 CarPlay",
+                    if (model.projectionProtocol.enablesCarLink) "连接码 ${model.carLinkPinCode}" else "弹窗确认启用",
                 ),
             )
+            steps.forEachIndexed { idx, (num, titleText, subText) ->
+                stepsRow.addView(
+                    stepTimelineTile(num, titleText, subText, palette),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        if (idx < steps.lastIndex) marginEnd = dp(6)
+                    },
+                )
+            }
+            guideCard.addView(stepsRow)
         }
 
         column.addView(guideCard)
@@ -705,10 +706,10 @@ class WorkbenchHeroStage(
         palette: TvColorScheme,
         accented: Boolean,
     ): View = column().apply {
-        setPadding(dp(11), dp(9), dp(11), dp(9))
+        setPadding(dp(9), dp(7), dp(9), dp(7))
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(14).toFloat()
+            cornerRadius = dp(12).toFloat()
             if (accented) {
                 setColor(ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x20 else 0x14))
                 setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x50))
@@ -725,23 +726,23 @@ class WorkbenchHeroStage(
                         context,
                         glyph,
                         if (accented) palette.accent else palette.secondaryText,
-                        sizeDp = 13,
+                        sizeDp = 12,
                     ),
                 )
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             },
-            LinearLayout.LayoutParams(dp(13), dp(13)).apply { marginEnd = dp(5) },
+            LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(4) },
         )
         topRow.addView(
-            label(caption, 11f, palette.secondaryText, bold = false).apply {
+            label(caption, 10.5f, palette.secondaryText, bold = false).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
         )
         addView(topRow)
-        addView(space(dp(3)))
+        addView(space(dp(2)))
         addView(
-            label(value, 12.5f, if (accented) palette.primaryText else palette.primaryText, bold = true).apply {
+            label(value, 11.8f, palette.primaryText, bold = true).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -756,11 +757,14 @@ class WorkbenchHeroStage(
     ): View {
         val headerRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
         headerRow.addView(
-            TvVectorIcons.badgeWell(context, glyph, palette, accented = false, sizeDp = 30),
-            LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(10) },
+            TvVectorIcons.badgeWell(context, glyph, palette, accented = false, sizeDp = 26, iconDp = 14),
+            LinearLayout.LayoutParams(dp(26), dp(26)).apply { marginEnd = dp(8) },
         )
         headerRow.addView(
-            label(title, 15.5f, palette.primaryText, bold = true),
+            label(title, 14f, palette.primaryText, bold = true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
         if (badgeText.isNotBlank()) {
@@ -768,10 +772,10 @@ class WorkbenchHeroStage(
                 TextView(context).apply {
                     text = badgeText
                     setTextColor(palette.secondaryText)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
-                    setPadding(dp(9), dp(3), dp(9), dp(3))
+                    setPadding(dp(8), dp(2), dp(8), dp(2))
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
                         cornerRadius = dp(999).toFloat()
@@ -785,56 +789,54 @@ class WorkbenchHeroStage(
         return headerRow
     }
 
-    private fun stepTimelineRow(
+    private fun stepTimelineTile(
         number: String,
         title: String,
         subtitle: String,
         palette: TvColorScheme,
     ): View {
-        val row = row().apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(9), dp(12), dp(9))
+        val tile = column().apply {
+            setPadding(dp(9), dp(7), dp(9), dp(7))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(13).toFloat()
+                cornerRadius = dp(12).toFloat()
                 setColor(palette.subtleSurface)
                 setStroke(dp(1), palette.outline)
             }
         }
+        val topRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
         val badge = TextView(context).apply {
             text = number
             gravity = Gravity.CENTER
             setTextColor(palette.accent)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
-                marginEnd = dp(11)
+            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                marginEnd = dp(5)
             }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(8).toFloat()
+                cornerRadius = dp(6).toFloat()
                 setColor(ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x22 else 0x16))
                 setStroke(dp(1), ColorUtils.setAlphaComponent(palette.accent, 0x55))
             }
         }
-        val textCol = column().apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        textCol.addView(
-            label(title, 13.5f, palette.primaryText, bold = true).apply {
+        topRow.addView(badge)
+        topRow.addView(
+            label(title, 11.2f, palette.primaryText, bold = true).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
         )
-        textCol.addView(
-            label(subtitle, 11.8f, palette.secondaryText).apply {
+        tile.addView(topRow)
+        tile.addView(space(dp(2)))
+        tile.addView(
+            label(subtitle, 10.5f, palette.secondaryText).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
         )
-        row.addView(badge)
-        row.addView(textCol)
-        return row
+        return tile
     }
 
     private fun column(): LinearLayout = LinearLayout(context).apply {
@@ -846,7 +848,7 @@ class WorkbenchHeroStage(
     }
 
     private fun bentoCard(palette: TvColorScheme): LinearLayout = column().apply {
-        setPadding(dp(18), dp(16), dp(18), dp(16))
+        setPadding(dp(15), dp(9), dp(15), dp(9))
         background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
@@ -855,7 +857,7 @@ class WorkbenchHeroStage(
             ),
         ).apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(20).toFloat()
+            cornerRadius = dp(18).toFloat()
             setStroke(dp(1), palette.outline)
         }
     }

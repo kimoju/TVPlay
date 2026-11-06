@@ -26,11 +26,11 @@ enum class TvProjectionProtocol(
     val displayName: String,
     val shortName: String,
 ) {
-    AUTO("auto", "双模并发 (CarPlay + 安卓 CarLink)", "双模并发"),
-    APPLE_CARPLAY("carplay", "Apple CarPlay (iPhone 专属)", "CarPlay"),
-    ICCOA_CARLINK("carlink", "ICCOA CarLink (小米 / vivo / OPPO)", "CarLink"),
-    ANDROID_AUTO("android_auto", "Google Android Auto (AOA2 / 无线)", "Android Auto"),
-    HUAWEI_HICAR("hicar", "华为 HiCar 智行 (HarmonyOS)", "HiCar");
+    AUTO("auto", "双模并发 (CarPlay + CarLink)", "双模并发"),
+    APPLE_CARPLAY("carplay", "Apple CarPlay (iPhone)", "CarPlay"),
+    ICCOA_CARLINK("carlink", "ICCOA CarLink (安卓车联)", "CarLink"),
+    ANDROID_AUTO("android_auto", "Android Auto (AOA2 / 无线)", "Android Auto"),
+    HUAWEI_HICAR("hicar", "华为 HiCar (HarmonyOS)", "HiCar");
 
     val enablesCarPlay: Boolean
         get() = this == AUTO || this == APPLE_CARPLAY

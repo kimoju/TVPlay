@@ -238,10 +238,12 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val rootRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.FILL
-            clipChildren = false
-            clipToPadding = false
+            clipChildren = true
+            clipToPadding = true
             background = app.tvplay.ui.theme.AmbientMeshBackgroundDrawable(palette)
-            setPadding((24 * density).toInt())
+            val padH = (18 * density).toInt()
+            val padV = (14 * density).toInt()
+            setPadding(padH, padV, padH, padV)
         }
 
         stagePane = WorkbenchHeroStage(this, settings).apply {
@@ -299,13 +301,13 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
         rootRow.addView(
             stagePane.root,
-            LinearLayout.LayoutParams(0, MATCH_PARENT, 0.42f).apply {
-                marginEnd = (20 * density).toInt()
+            LinearLayout.LayoutParams(0, MATCH_PARENT, 0.43f).apply {
+                marginEnd = (14 * density).toInt()
             },
         )
         rootRow.addView(
             settingsPane.root,
-            LinearLayout.LayoutParams(0, MATCH_PARENT, 0.58f),
+            LinearLayout.LayoutParams(0, MATCH_PARENT, 0.57f),
         )
 
         setContentView(rootRow)

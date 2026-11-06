@@ -185,7 +185,7 @@ class RtspControlSession(
     internal var cipher: ControlCipher? = null
     internal var encBuf = ByteArray(0)
     internal var deviceBtMac = ""
-    internal val activeStreams = linkedSetOf<Int>()
+    internal val activeStreams: MutableSet<Int> = java.util.Collections.synchronizedSet(linkedSetOf())
 
     @Volatile private var mainScreenToken: Any? = null
     @Volatile private var mainFrameRendered = false
@@ -206,7 +206,7 @@ class RtspControlSession(
     private val ntp = NtpClock()
     private var keepAliveSocket: DatagramSocket? = null
     private var keepAliveThread: Thread? = null
-    private val eventWriteLock = Any()
+    private val eventWriteLock = Object()
     private val eventThreads = CopyOnWriteArrayList<Thread>()
     private val eventWriteExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
         Thread(task, "airplay-event-tx").apply { isDaemon = true }
@@ -391,27 +391,23 @@ class RtspControlSession(
 
         val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
         while (true) {
-            val sent = synchronized(eventWriteLock) {
-                if (eventSocket == null || eventCipher == null) {
-                    null
-                } else {
-                    sendCommandLocked(command)
+            synchronized(eventWriteLock) {
+                if (eventSocket != null && eventCipher != null) {
+                    return sendCommandLocked(command)
                 }
-            }
-            if (sent != null) return sent
-            if (closed.get()) return false
-
-            val remainingNanos = deadlineNanos - System.nanoTime()
-            if (remainingNanos <= 0) return false
-            val sleepMillis = minOf(
-                EVENT_READY_POLL_MILLIS,
-                (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND,
-            ).coerceAtLeast(1)
-            try {
-                Thread.sleep(sleepMillis)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return false
+                if (closed.get()) return false
+                val remainingNanos = deadlineNanos - System.nanoTime()
+                if (remainingNanos <= 0) return false
+                val waitMillis = minOf(
+                    EVENT_READY_POLL_MILLIS,
+                    (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND,
+                ).coerceAtLeast(1)
+                try {
+                    eventWriteLock.wait(waitMillis)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
             }
         }
     }
@@ -808,16 +804,21 @@ class RtspControlSession(
         }
         val types = teardownStreamTypes(decodedBody)
 
+        val activeBefore = synchronized(activeStreams) { activeStreams.toList() }
         debugLog(
-            "airplay TEARDOWN types=${types ?: "all"} activeBefore=$activeStreams " +
+            "airplay TEARDOWN types=${types ?: "all"} activeBefore=$activeBefore " +
                 "body=${request.body.size} bytes payload=$decodedBody",
         )
         trace { "airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHexString()}" }
 
         if (types == null || STREAM_TYPE_MAIN_SCREEN in types) mainScreenToken = null
         if (types == null) {
-            activeStreams.toList().forEach { media.onTeardown(this, it) }
-            activeStreams.clear()
+            val toTeardown = synchronized(activeStreams) {
+                val copy = activeStreams.toList()
+                activeStreams.clear()
+                copy
+            }
+            toTeardown.forEach { media.onTeardown(this, it) }
         } else {
             types.forEach { type -> if (activeStreams.remove(type)) media.onTeardown(this, type) }
         }
@@ -825,7 +826,7 @@ class RtspControlSession(
     }
 
     fun hasActiveMediaStreams(): Boolean =
-        activeStreams.any { it != STREAM_TYPE_DATA }
+        synchronized(activeStreams) { activeStreams.any { it != STREAM_TYPE_DATA } }
 
     internal fun onStreamClosedByPeer(type: Int) {
         if (type == STREAM_TYPE_MAIN_SCREEN) {
@@ -846,7 +847,9 @@ class RtspControlSession(
         }
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+        runCatching { socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+            .recoverCatching { socket.bind(InetSocketAddress(0)) }
+            .getOrThrow()
         keepAliveSocket = socket
         keepAliveThread = Thread({ runKeepAlive(socket) }, "airplay-keepalive").apply {
             isDaemon = true
@@ -872,7 +875,12 @@ class RtspControlSession(
         eventServer?.let { existing ->
             if (!existing.isClosed) return existing.localPort
         }
-        val server = ServerSocket(0, 50, InetAddress.getByName("::"))
+        val server = ServerSocket().apply {
+            reuseAddress = true
+            runCatching { bind(InetSocketAddress(InetAddress.getByName("::"), 0), 50) }
+                .recoverCatching { bind(InetSocketAddress(0), 50) }
+                .getOrThrow()
+        }
         eventServer = server
         spawnEvent("airplay-event-accept") { acceptEvent(server) }
         return server.localPort
@@ -886,9 +894,14 @@ class RtspControlSession(
         keepAliveThread = null
         safeClose(eventServer)
         eventServer = null
-        safeClose(eventSocket)
-        eventSocket = null
-        eventCipher = null
+        val activeEventSocket = synchronized(eventWriteLock) {
+            val existing = eventSocket
+            eventSocket = null
+            eventCipher = null
+            eventWriteLock.notifyAll()
+            existing
+        }
+        safeClose(activeEventSocket)
         runCatching { eventWriteExecutor.shutdownNow() }
         eventThreads.forEach { it.interrupt() }
         eventThreads.clear()
@@ -927,6 +940,7 @@ class RtspControlSession(
                     eventSocket = socket
                     eventCipher = ControlCipher(readKey, writeKey)
                     sendPendingNightModeLocked()
+                    eventWriteLock.notifyAll()
                 }
                 runEventRead(socket)
             }

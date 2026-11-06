@@ -27,6 +27,19 @@ class EngineAvTest {
         val adtsFromCopy = MediaCodecSupport.adtsFrame(rtpWithAac.copyOfRange(12, rtpWithAac.size), 48_000, 2)
         val adtsFromSlice = MediaCodecSupport.adtsFrame(rtpWithAac, 12, 6, 48_000, 2)
         assertArrayEquals(adtsFromCopy, adtsFromSlice)
+        val adtsHeader = ByteArray(7)
+        MediaCodecSupport.writeAdtsHeader(adtsHeader, 6, 48_000, 2)
+        assertArrayEquals(adtsFromCopy.copyOfRange(0, 7), adtsHeader)
+
+        // Already-Annex-B IDR frame whose bytes 5..8 coincidentally equal remaining length (2) must not be corrupted
+        val annexBWithCoincidentalLengthAtOffset5 = byteArrayOf(
+            0x00, 0x00, 0x00, 0x01, 0x65,
+            0x00, 0x00, 0x00, 0x02,
+            0xaa.toByte(), 0xbb.toByte(),
+        )
+        val expectedUnchanged = annexBWithCoincidentalLengthAtOffset5.copyOf()
+        assertTrue(MediaCodecSupport.toAnnexBInPlace(annexBWithCoincidentalLengthAtOffset5))
+        assertArrayEquals(expectedUnchanged, annexBWithCoincidentalLengthAtOffset5)
     }
 
     @Test
@@ -48,6 +61,17 @@ class EngineAvTest {
         assertEquals(VideoJob.Resync, queue.poll(0))
         val afterResync = queue.poll(0) as? VideoJob.Frame
         assertEquals(50L, afterResync?.receivedNs)
+
+        // offerFirst preempts queued frames and requestResync discards stale frames before Resync
+        queue.offer(VideoJob.Frame(ByteArray(20), receivedNs = 60L))
+        queue.offer(VideoJob.Frame(ByteArray(20), receivedNs = 70L))
+        val detach = SurfaceDetachRequest(Any(), park = false)
+        queue.offerFirst(VideoJob.DetachSurface(detach))
+        val preempted = queue.poll(0)
+        assertTrue(preempted is VideoJob.DetachSurface)
+        queue.requestResync()
+        assertEquals(VideoJob.Resync, queue.poll(0))
+        assertEquals(0, queue.backlogAfterCurrent().pendingFrames)
     }
 
     @Test

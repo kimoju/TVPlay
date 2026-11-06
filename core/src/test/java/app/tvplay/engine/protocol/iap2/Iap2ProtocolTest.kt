@@ -131,5 +131,9 @@ class Iap2ProtocolTest {
         assertEquals("MyHome5G", Iap2WireCodec.readString(wirelessGroup.require(0).payload))
         assertEquals("supersecretpassword", Iap2WireCodec.readString(wirelessGroup.require(1).payload))
         assertEquals(149, Iap2WireCodec.readU8(wirelessGroup.require(2).payload))
+        assertEquals(startSessionFrame.encodedFrame().size, startSessionFrame.encodedSize)
+        val reader = Iap2BodyReader.of(wifiConfigFrame)
+        assertEquals("MyHome5G", reader.string(1))
+        assertEquals(149, reader.optionalU8(4))
     }
 }

@@ -951,8 +951,7 @@ class TvSessionEngine(
         val session = activeSession ?: return false
         return try {
             synchronized(touchLock) {
-                val isMove = contacts.isNotEmpty() && contacts.all { it.down } &&
-                    lastTouch?.filter { it.down }?.map { it.id }?.toSet() == contacts.map { it.id }.toSet()
+                val isMove = isContinuousMove(lastTouch, contacts)
                 lastTouch = contacts
                 val pending = pendingMove
                 if (isMove && pending != null && pending.session === session) {
@@ -978,6 +977,31 @@ class TvSessionEngine(
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun isContinuousMove(
+        previous: List<AirPlayContact>?,
+        current: List<AirPlayContact>,
+    ): Boolean {
+        if (previous == null || current.isEmpty()) return false
+        for (i in current.indices) {
+            if (!current[i].down) return false
+        }
+        var downCount = 0
+        for (i in previous.indices) {
+            val prev = previous[i]
+            if (!prev.down) continue
+            downCount++
+            var matched = false
+            for (j in current.indices) {
+                if (current[j].id == prev.id) {
+                    matched = true
+                    break
+                }
+            }
+            if (!matched) return false
+        }
+        return downCount == current.size
     }
 
     /** Sends a CarPlay knob/touchpad movement or button state through the AirPlay HID channel. */
@@ -1970,6 +1994,16 @@ class TvSessionEngine(
         diagnosticRun.incrementAndGet()
         availabilityPollGeneration.incrementAndGet()
         permissionPollGeneration++
+        val activeCsm = this.csm
+        this.csm = null
+        val activeMux = this.mux
+        this.mux = null
+        if (activeCsm != null || activeMux != null) {
+            executor.execute {
+                if (activeCsm != null) closeBestEffort("wired iAP2 CSM") { activeCsm.close() }
+                if (activeMux != null) closeBestEffort("wired USBMUX") { activeMux.close() }
+            }
+        }
         phase = Phase.IPHONE
         reenumerationAttempts = 0
         iphoneWaitStartedAt = null
@@ -2249,36 +2283,39 @@ class TvSessionEngine(
             )
             onStatus(CarPlayStatus.ConnectingControl)
             val carKitClient = LockdownCarKitClient(mux::connect)
-            try {
-                val relay = carKitClient.openService(pairRecord, config.label, "com.apple.syslog_relay")
-                Thread({
-                    try {
-                        relay.use {
-                            val deadline = System.nanoTime() + 120_000_000_000L
-                            val pending = StringBuilder()
-                            val relevant = Regex(" (accessoryd|ACCCarPlayService|iap2d|CarPlay)([\\[(])", RegexOption.IGNORE_CASE)
-                            while (!closed && System.nanoTime() < deadline) {
-                                val bytes = relay.recv(8192, 1000) ?: continue
-                                if (bytes.isEmpty()) break
-                                pending.append(bytes.toString(Charsets.UTF_8).replace('\u0000', '\n'))
-                                while (true) {
-                                    val end = pending.indexOf("\n")
-                                    if (end < 0) break
-                                    val line = pending.substring(0, end)
-                                    pending.delete(0, end + 1)
-                                    if (relevant.containsMatchIn(line)) debugLog("PHONE ${line.take(2000)}")
+            var syslogRelay: DuplexByteStream? = null
+            if (sessionListener.wantsTrace) {
+                try {
+                    val relay = carKitClient.openService(pairRecord, config.label, "com.apple.syslog_relay")
+                    syslogRelay = relay
+                    Thread({
+                        try {
+                            relay.use {
+                                val deadline = System.nanoTime() + 120_000_000_000L
+                                val pending = StringBuilder()
+                                while (!closed && System.nanoTime() < deadline) {
+                                    val bytes = relay.recv(8192, 1000) ?: continue
+                                    if (bytes.isEmpty()) break
+                                    pending.append(bytes.toString(Charsets.UTF_8).replace('\u0000', '\n'))
+                                    while (true) {
+                                        val end = pending.indexOf("\n")
+                                        if (end < 0) break
+                                        val line = pending.substring(0, end)
+                                        pending.delete(0, end + 1)
+                                        if (SYSLOG_RELEVANT_REGEX.containsMatchIn(line)) debugLog("PHONE ${line.take(2000)}")
+                                    }
+                                    if (pending.length > 65536) pending.clear()
                                 }
-                                if (pending.length > 65536) pending.clear()
                             }
+                            debugLog("phone authentication diagnostic capture ended")
+                        } catch (error: Exception) {
+                            debugLog("phone authentication diagnostic capture ended: ${error.javaClass.simpleName}")
                         }
-                        debugLog("phone authentication diagnostic capture ended")
-                    } catch (error: Exception) {
-                        debugLog("phone authentication diagnostic capture ended: ${error.javaClass.simpleName}")
-                    }
-                }, "carplay-lab-phone-diagnostics").apply { isDaemon = true; start() }
-                debugLog("phone authentication diagnostic capture started")
-            } catch (error: Exception) {
-                debugLog("phone authentication diagnostics unavailable: ${error.message}")
+                    }, "carplay-lab-phone-diagnostics").apply { isDaemon = true; start() }
+                    debugLog("phone authentication diagnostic capture started")
+                } catch (error: Exception) {
+                    debugLog("phone authentication diagnostics unavailable: ${error.message}")
+                }
             }
             val carkit = try {
                 carKitClient.open(pairRecord, config.label)
@@ -2304,11 +2341,9 @@ class TvSessionEngine(
                     val started = System.nanoTime()
                     var result = ConnectionIoDiagnostics.Result.FAILED
                     try {
-                        debugLog("wired link TX begin ${wireSummary(data)}")
-                        for (offset in data.indices step 256) {
-                            carkit.send(data.copyOfRange(offset, minOf(offset + 256, data.size)))
-                        }
-                        debugLog("wired link TX completed bytes=${data.size}")
+                        if (sessionListener.wantsTrace) debugLog("wired link TX begin ${wireSummary(data)}")
+                        carkit.send(data)
+                        if (sessionListener.wantsTrace) debugLog("wired link TX completed bytes=${data.size}")
                         result = ConnectionIoDiagnostics.Result.COMPLETED
                     } finally {
                         io.record(ConnectionIoDiagnostics.Operation.WRITE, result, elapsedMillis(started))
@@ -2324,14 +2359,19 @@ class TvSessionEngine(
                                 bytes.isEmpty() -> ConnectionIoDiagnostics.Result.ENDED
                                 else -> ConnectionIoDiagnostics.Result.COMPLETED
                             }
-                            if (bytes != null) debugLog("wired link RX ${wireSummary(bytes)}")
+                            if (bytes != null && sessionListener.wantsTrace) debugLog("wired link RX ${wireSummary(bytes)}")
                         }
                     } finally {
                         io.record(ConnectionIoDiagnostics.Operation.READ, result, elapsedMillis(started))
                     }
                 }
                 override fun close() {
-                    try { carkit.close() } finally { io.finish() }
+                    try {
+                        carkit.close()
+                    } finally {
+                        runCatching { syslogRelay?.close() }
+                        io.finish()
+                    }
                 }
             }
             val csm = Iap2Session.open(
@@ -3375,7 +3415,7 @@ class TvSessionEngine(
     }
 
     private fun diagnosticFailureClass(error: Throwable): String =
-        error.javaClass.simpleName.take(80).replace(Regex("[^A-Za-z0-9_$]"), "?")
+        error.javaClass.simpleName.take(80).replace(FAILURE_CLASS_SANITIZE_REGEX, "?")
 
     private fun elapsedMillis(startedNanos: Long): Long =
         ((System.nanoTime() - startedNanos) / 1_000_000L).coerceAtLeast(0)
@@ -3506,6 +3546,8 @@ class TvSessionEngine(
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
         private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"
         private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+        private val FAILURE_CLASS_SANITIZE_REGEX = Regex("[^A-Za-z0-9_$]")
+        private val SYSLOG_RELEVANT_REGEX = Regex(" (accessoryd|ACCCarPlayService|iap2d|CarPlay)([\\[(])", RegexOption.IGNORE_CASE)
     }
 }
 

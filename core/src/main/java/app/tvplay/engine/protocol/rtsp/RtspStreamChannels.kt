@@ -96,6 +96,11 @@ class ScreenStream(
                 }
             }
             socket = accepted
+            if (closed.get()) {
+                safeClose(accepted)
+                socket = null
+                return
+            }
             safeClose(bound)
             run(accepted)
         } catch (error: Exception) {
@@ -220,6 +225,9 @@ object ScreenCodec {
      */
     fun lengthPrefixedToAnnexB(payload: ByteArray): ByteArray {
         if (payload.size < 4) return payload
+        if (payload.startsWithStartCode() && (payload.size == 4 || (payload[4].toInt() and 0x1f) !in 9..12)) {
+            return payload
+        }
 
         var offset = 0
         while (offset + 4 <= payload.size) {
@@ -565,7 +573,12 @@ class BufferedAudioStream(
     private var cleanupStarted = false
     @Volatile internal var outputCleanupComplete = false
         private set
-    private val server = ServerSocket(0)
+    private val server = ServerSocket().apply {
+        reuseAddress = true
+        runCatching { bind(InetSocketAddress(InetAddress.getByName("::"), 0)) }
+            .recoverCatching { bind(InetSocketAddress(0)) }
+            .getOrThrow()
+    }
     private val boundPort = server.localPort
     @Volatile private var client: Socket? = null
     private val lock = Object()
@@ -606,6 +619,7 @@ class BufferedAudioStream(
             var failures = 0
             var receivedBytes = 0L
             var windowStart = nanoTime()
+            val nonce = ByteArray(12)
             while (!closed.get()) {
                 val length = input.readUnsignedShort()
                 if (length < LENGTH_BYTES + RTP_HEADER + TAG_BYTES + NONCE_BYTES) {
@@ -615,7 +629,7 @@ class BufferedAudioStream(
                 }
                 val body = ByteArray(length - LENGTH_BYTES)
                 input.readFully(body)
-                val frame = open(key, body)
+                val frame = open(key, body, nonce)
                 if (frame == null) {
                     if (failures++ < 3) log("Buffered audio: frame did not open (${body.size} bytes)")
                     continue
@@ -854,13 +868,17 @@ class BufferedAudioStream(
         private const val U32 = 0xffff_ffffL
         private const val NTP_UNIX_OFFSET = 2_208_988_800L
 
-        internal fun open(key: ByteArray, body: ByteArray): Frame? {
+        internal fun open(key: ByteArray, body: ByteArray, nonce: ByteArray = ByteArray(12)): Frame? {
             if (body.size < RTP_HEADER + TAG_BYTES + NONCE_BYTES) return null
             if ((body[0].toInt() and 0xff) != 0x80) return null
             val sealedEnd = body.size - NONCE_BYTES
             val sealedLength = sealedEnd - RTP_HEADER
             val payloadLength = sealedLength - TAG_BYTES
-            val nonce = ByteArray(12).also { body.copyInto(it, 4, sealedEnd, body.size) }
+            nonce[0] = 0
+            nonce[1] = 0
+            nonce[2] = 0
+            nonce[3] = 0
+            body.copyInto(nonce, 4, sealedEnd, body.size)
             val rtp = ByteArray(RTP_HEADER + payloadLength)
             body.copyInto(rtp, 0, 0, RTP_HEADER)
             val opened = runCatching {
@@ -1330,6 +1348,7 @@ class CarPlayMediaEngine(
         val active = audioMeta.entries.filter { it.key.session === session }.map { it.value }
         val buffered = bufferedStreams[session]
         if (active.isEmpty() && buffered == null) return null
+        val nowNtp = session.syncedNtp()
         val streams = active.map { meta ->
             val clockRate = meta.format.rtpClockRate
             val entry = linkedMapOf<String, Any?>(
@@ -1348,14 +1367,14 @@ class CarPlayMediaEngine(
                 val sampleTime = (firstUnsigned + Math.round(elapsedSec * clockRate)) and
                     0xffff_ffffL
                 entry["streamConnectionID"] = unsignedPlistInteger(meta.connectionId ?: 0L)
-                entry["timestamp"] = session.syncedNtp()
+                entry["timestamp"] = nowNtp
                 entry["timestampRawNs"] = nowNs
                 entry["sampleTime"] = sampleTime
                 meta.position.onFeedback(meta.type, entry["streamConnectionID"], sampleTime, nowNs)
                     ?.let(session::logDebug)
             }
             entry
-        } + listOfNotNull(buffered?.let { it.stream.feedback(session.syncedNtp(), it.connectionId) })
+        } + listOfNotNull(buffered?.let { it.stream.feedback(nowNtp, it.connectionId) })
         return linkedMapOf("streams" to streams)
     }
 
@@ -1975,10 +1994,12 @@ class IapTunnel(
 
     private val closed = AtomicBoolean(false)
     private val readCounter = AtomicLong(0)
+    private val readNonce = ByteArray(12)
+    private val stateLock = Any()
     private val bindAddress =
         if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
     private val servers = mutableListOf<ServerSocket>()
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
     private val threads = mutableListOf<Thread>()
     private val peerConnected = CountDownLatch(1)
     @Volatile private var listener: Listener = object : Listener {}
@@ -1986,7 +2007,6 @@ class IapTunnel(
     fun listen(listener: Listener): Int {
         this.listener = listener
         val bound = bindAny()
-        servers += bound
         listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localSocketAddress}")
         val secondaryAddress = if (bindAddress is Inet6Address) {
             InetAddress.getByName("0.0.0.0")
@@ -1994,13 +2014,12 @@ class IapTunnel(
             InetAddress.getByName("::")
         }
         val secondary = ServerSocket()
-        runCatching {
+        val secondaryBound = runCatching {
             secondary.apply {
                 reuseAddress = true
                 bind(InetSocketAddress(secondaryAddress, bound.localPort))
             }
         }.onSuccess { secondarySocket ->
-            servers += secondarySocket
             listener.onDebug(
                 "AirPlay iAP tunnel secondary listener bound=" +
                     "${secondarySocket.localSocketAddress}",
@@ -2011,12 +2030,21 @@ class IapTunnel(
                 "AirPlay iAP tunnel secondary listener failed address=" +
                     "$secondaryAddress port=${bound.localPort}: ${error.message}",
             )
-        }
-        servers.forEach { server ->
-            threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
-                isDaemon = true
-                start()
+        }.getOrNull()
+        val activeServers = listOfNotNull(bound, secondaryBound)
+        val startedThreads = synchronized(stateLock) {
+            if (closed.get()) {
+                activeServers.forEach(::safeClose)
+                return bound.localPort
             }
+            servers += activeServers
+            activeServers.map { server ->
+                Thread({ accept(server) }, "airplay-iap-tunnel").also { threads += it }
+            }
+        }
+        startedThreads.forEach {
+            it.isDaemon = true
+            it.start()
         }
         return bound.localPort
     }
@@ -2029,11 +2057,20 @@ class IapTunnel(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        safeClose(socket)
-        servers.toList().forEach(::safeClose)
-        servers.clear()
-        threads.toList().forEach(Thread::interrupt)
-        threads.clear()
+        val activeSocket: Socket?
+        val activeServers: List<ServerSocket>
+        val activeThreads: List<Thread>
+        synchronized(stateLock) {
+            activeSocket = socket
+            socket = null
+            activeServers = servers.toList()
+            servers.clear()
+            activeThreads = threads.toList()
+            threads.clear()
+        }
+        safeClose(activeSocket)
+        activeServers.forEach(::safeClose)
+        activeThreads.forEach(Thread::interrupt)
         peerConnected.countDown()
     }
 
@@ -2054,7 +2091,8 @@ class IapTunnel(
             val accepted = try {
                 bound.accept()
             } catch (error: Exception) {
-                if (!closed.get() && socket == null) listener.onClosed(error)
+                val notifyFailure = synchronized(stateLock) { !closed.get() && socket == null }
+                if (notifyFailure) listener.onClosed(error)
                 return
             }
             if (closed.get()) {
@@ -2068,9 +2106,21 @@ class IapTunnel(
             }
             accepted.tcpNoDelay = true
             accepted.keepAlive = true
-            socket = accepted
-            servers.toList().forEach(::safeClose)
-            servers.clear()
+            val serversToClose = synchronized(stateLock) {
+                if (closed.get() || socket != null) {
+                    null
+                } else {
+                    socket = accepted
+                    val list = servers.toList()
+                    servers.clear()
+                    list
+                }
+            }
+            if (serversToClose == null) {
+                safeClose(accepted)
+                return
+            }
+            serversToClose.forEach(::safeClose)
             readCounter.set(0)
             peerConnected.countDown()
             listener.onOpen(accepted.remoteSocketAddress?.toString())
@@ -2113,7 +2163,9 @@ class IapTunnel(
         } catch (error: Exception) {
             failure = error
         } finally {
-            if (socket === sock) socket = null
+            synchronized(stateLock) {
+                if (socket === sock) socket = null
+            }
             safeClose(sock)
             if (!closed.get()) listener.onClosed(failure)
         }
@@ -2131,7 +2183,7 @@ class IapTunnel(
         }
         if (scanOffset == 0) return ByteArray(0) to buffer
         val plaintext = ByteArray(totalPlainBytes)
-        val nonce = ByteArray(12)
+        val nonce = readNonce
         var offset = 0
         var plainOffset = 0
         while (offset < scanOffset) {
@@ -2279,7 +2331,7 @@ class AirPlayIapTunnelStream(
         synchronized(lock) {
             if (closed) return
             closed = true
-            closeLocation = closeCaller()
+            closeLocation = Thread.currentThread().name
             lock.notifyAll()
         }
         tunnel.close()
@@ -2295,7 +2347,7 @@ class AirPlayIapTunnelStream(
                 tunnel.close()
                 return
             }
-            pending.addLast(bytes.copyOf())
+            pending.addLast(bytes)
             pendingBytes += bytes.size
             lock.notifyAll()
         }
@@ -2325,14 +2377,6 @@ class AirPlayIapTunnelStream(
             closeLocation?.let { append("; requested by $it") }
         },
     )
-
-    private fun closeCaller(): String =
-        Thread.currentThread().stackTrace
-            .drop(2)
-            .take(8)
-            .joinToString(" <- ") { frame ->
-                "${frame.className.substringAfterLast('.')}.${frame.methodName}:${frame.lineNumber}"
-            }
 
     private fun takePendingLocked(maxBytes: Int): ByteArray? {
         val chunk = pending.pollFirst() ?: return null

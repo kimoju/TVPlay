@@ -66,13 +66,15 @@ sealed interface CarPlayBonjourEvent {
     data class ProbeFailed(val stage: ProbeProgress.Stage, val attempt: Int, val error: IOException) : CarPlayBonjourEvent
 }
 
+private val HTTP_STATUS_REGEX = Regex("^HTTP/\\d(?:\\.\\d)? (\\d{3})(?: |$)")
+
 /** Saved reports need discovery outcomes without phone names, addresses, or pairing identifiers. */
 fun CarPlayBonjourEvent.diagnosticSummary(): String = when (this) {
     is CarPlayBonjourEvent.Discovery -> "control discovery stage=$stage ipv4=$ipv4Count ipv6=$ipv6Count"
     is CarPlayBonjourEvent.Resolved ->
         "control resolved family=${if (':' in endpoint.host) "IPv6" else "IPv4"} port=${endpoint.port}"
     is CarPlayBonjourEvent.Probed -> {
-        val status = statusLine?.let { Regex("^HTTP/\\d(?:\\.\\d)? (\\d{3})(?: |$)").find(it)?.groupValues?.get(1) }
+        val status = statusLine?.let { HTTP_STATUS_REGEX.find(it)?.groupValues?.get(1) }
         "control probe attempts=$attempts status=${status ?: "none"} error=${error?.javaClass?.simpleName ?: "none"}"
     }
     is CarPlayBonjourEvent.ProbeProgress ->
@@ -288,6 +290,8 @@ class BonjourServiceAdvertiser(
         }
     }
 
+    @Volatile private var refreshThread: Thread? = null
+
     /**
      * Re-triggers `_carplay-ctrl._tcp` discovery and re-probes any endpoints discovered before
      * `0x4301` (`CarPlayStartSession`) was sent over Bluetooth (common on shared LAN networks).
@@ -295,6 +299,8 @@ class BonjourServiceAdvertiser(
     fun onStartSessionSent() {
         val dnsSnapshot = synchronized(lifecycleLock) {
             if (closed || !started) return
+            refreshThread?.interrupt()
+            refreshThread = null
             seenServices.clear()
             discoveredInterfaceEndpoints.forEach { (key, pair) ->
                 if (seenServices.add(key)) {
@@ -309,11 +315,11 @@ class BonjourServiceAdvertiser(
             interfaceMdns.toList()
         }
         if (dnsSnapshot.isNotEmpty()) {
-            Thread(
+            val thread = Thread(
                 {
                     val delaysMillis = longArrayOf(0L, 1_500L, 3_200L)
                     for (delay in delaysMillis) {
-                        if (closed) break
+                        if (closed || Thread.currentThread().isInterrupted) break
                         if (delay > 0L) {
                             try {
                                 Thread.sleep(delay)
@@ -322,12 +328,13 @@ class BonjourServiceAdvertiser(
                                 break
                             }
                         }
-                        if (closed) break
+                        if (closed || Thread.currentThread().isInterrupted) break
                         dnsSnapshot.forEach { dns ->
+                            if (closed || Thread.currentThread().isInterrupted) return@forEach
                             runCatching {
                                 val infos = dns.list("$CARPLAY_CONTROL_SERVICE_TYPE.local.", 1_200L)
                                 for (info in infos) {
-                                    if (closed) break
+                                    if (closed || Thread.currentThread().isInterrupted) break
                                     val address = info.inetAddresses.firstOrNull {
                                         (it is Inet4Address) == (dns.inetAddress is Inet4Address)
                                     }?.let(::applyLocalScope) ?: continue
@@ -351,8 +358,17 @@ class BonjourServiceAdvertiser(
                 "carplay-bonjour-refresh",
             ).apply {
                 isDaemon = true
-                start()
             }
+            val startRefresh = synchronized(lifecycleLock) {
+                if (closed) {
+                    false
+                } else {
+                    refreshThread?.interrupt()
+                    refreshThread = thread
+                    true
+                }
+            }
+            if (startRefresh) thread.start()
         }
     }
 
@@ -487,6 +503,8 @@ class BonjourServiceAdvertiser(
             dnsToClose = interfaceMdns.toList()
             interfaceMdns.clear()
             publishedFamilies = "none"
+            refreshThread?.interrupt()
+            refreshThread = null
             workerToJoin = worker
             worker = null
             workerToJoin?.interrupt()

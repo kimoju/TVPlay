@@ -1609,6 +1609,7 @@ class LockdownCarKitClient(
 
         val secureLockdown = LockdownPlistChannel(sessionTls)
         var serviceStream: DuplexByteStream? = null
+        var handoffComplete = false
         try {
             val response = secureLockdown.request(
                 LockdownPlistValue.Dictionary(
@@ -1643,12 +1644,13 @@ class LockdownCarKitClient(
             }
             serviceStream = readyStream
             val ownedStream = CarkitServiceStream(readyStream, secureLockdown)
+            handoffComplete = true
             serviceStream = null
             return ownedStream
         } finally {
-            if (serviceStream != null) {
+            if (!handoffComplete) {
                 try {
-                    serviceStream.close()
+                    serviceStream?.close()
                 } finally {
                     secureLockdown.close()
                 }

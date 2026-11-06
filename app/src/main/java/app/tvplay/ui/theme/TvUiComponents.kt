@@ -111,6 +111,9 @@ class TvVectorIconDrawable(
         }
     }
 
+    private val reusablePath = Path()
+    private val reusableArcRect = RectF()
+
     override fun getIntrinsicWidth(): Int = sizePx
     override fun getIntrinsicHeight(): Int = sizePx
 
@@ -123,7 +126,7 @@ class TvVectorIconDrawable(
         canvas.scale(scale, scale)
         strokePaint.strokeWidth = (strokeWidthPx / scale).coerceAtLeast(1.6f)
 
-        val path = Path()
+        val path = reusablePath.apply { reset() }
         when (glyph) {
             TvIconGlyph.PLAY -> {
                 path.moveTo(7f, 5f)
@@ -133,9 +136,12 @@ class TvVectorIconDrawable(
                 canvas.drawPath(path, fillPaint)
             }
             TvIconGlyph.WIFI -> {
-                canvas.drawArc(RectF(2f, 5f, 22f, 23f), 220f, 100f, false, strokePaint)
-                canvas.drawArc(RectF(5.5f, 9f, 18.5f, 21f), 220f, 100f, false, strokePaint)
-                canvas.drawArc(RectF(9f, 13f, 15f, 19f), 220f, 100f, false, strokePaint)
+                reusableArcRect.set(2f, 5f, 22f, 23f)
+                canvas.drawArc(reusableArcRect, 220f, 100f, false, strokePaint)
+                reusableArcRect.set(5.5f, 9f, 18.5f, 21f)
+                canvas.drawArc(reusableArcRect, 220f, 100f, false, strokePaint)
+                reusableArcRect.set(9f, 13f, 15f, 19f)
+                canvas.drawArc(reusableArcRect, 220f, 100f, false, strokePaint)
                 canvas.drawCircle(12f, 18.5f, 1.5f, fillPaint)
             }
             TvIconGlyph.USB -> {

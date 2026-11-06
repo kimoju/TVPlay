@@ -524,23 +524,21 @@ class Iap2LinkEngine(
             sendAcknowledgementDeadlineMillis = null
         }
         val length = payload?.size?.plus(HEADER_BYTES + CHECKSUM_BYTES) ?: HEADER_BYTES
-        val header = ByteArray(HEADER_BYTES)
-        header[0] = LINK_START_HIGH
-        header[1] = LINK_START_LOW
-        header[2] = (length ushr 8).toByte()
-        header[3] = length.toByte()
-        header[4] = control.toByte()
-        header[5] = sequence.toByte()
-        header[6] = lastReceivedInOrder.toByte()
-        header[7] = sessionId.toByte()
-        header[8] = checksum(header, HEADER_BYTES - CHECKSUM_BYTES).toByte()
-        val frame = ByteArrayOutputStream(length)
-        frame.write(header)
+        val frame = ByteArray(length)
+        frame[0] = LINK_START_HIGH
+        frame[1] = LINK_START_LOW
+        frame[2] = (length ushr 8).toByte()
+        frame[3] = length.toByte()
+        frame[4] = control.toByte()
+        frame[5] = sequence.toByte()
+        frame[6] = lastReceivedInOrder.toByte()
+        frame[7] = sessionId.toByte()
+        frame[8] = checksum(frame, HEADER_BYTES - CHECKSUM_BYTES).toByte()
         if (payload != null) {
-            frame.write(payload)
-            frame.write(checksum(payload, payload.size))
+            payload.copyInto(frame, HEADER_BYTES)
+            frame[length - 1] = checksum(payload, payload.size).toByte()
         }
-        appendOutput(frame.toByteArray())
+        appendOutput(frame)
     }
 
     private fun setWritable(value: Boolean) {
@@ -686,10 +684,21 @@ class Iap2LinkEngine(
             )
         }
 
-        private fun checksumValid(bytes: ByteArray): Boolean = bytes.fold(0) { sum, byte -> (sum + u8(byte)) and 0xff } == 0
+        private fun checksumValid(bytes: ByteArray): Boolean {
+            var sum = 0
+            for (index in bytes.indices) {
+                sum = (sum + u8(bytes[index])) and 0xff
+            }
+            return sum == 0
+        }
 
-        private fun checksum(bytes: ByteArray, count: Int): Int =
-            (-bytes.take(count).sumOf { u8(it) }) and 0xff
+        private fun checksum(bytes: ByteArray, count: Int): Int {
+            var sum = 0
+            for (index in 0 until count) {
+                sum += u8(bytes[index])
+            }
+            return (-sum) and 0xff
+        }
 
         private fun sequenceDistance(sequence: Int, previous: Int?): Int =
             if (previous == null) 0 else (sequence - previous) and 0xff
@@ -1265,7 +1274,7 @@ class Iap2CsmChannel private constructor(
     }
 
     private fun enqueue(frame: Iap2Frame) {
-        val encodedBytes = frame.encodedFrame().size
+        val encodedBytes = frame.encodedSize
         if (receivedFrames.size >= MAX_PENDING_FRAMES || encodedBytes > MAX_PENDING_FRAME_BYTES - receivedBytes) {
             failClosed(IOException("CSM received-frame queue limit exceeded"))
         }
@@ -1275,7 +1284,7 @@ class Iap2CsmChannel private constructor(
 
     private fun takeReceived(): Iap2Frame? {
         val frame = receivedFrames.pollFirst() ?: return null
-        receivedBytes -= frame.encodedFrame().size
+        receivedBytes -= frame.encodedSize
         return frame
     }
 

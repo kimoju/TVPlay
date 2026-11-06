@@ -468,6 +468,7 @@ class Iap2UsbSession internal constructor(
     private var closed = false
     private var failure: IphoneUsbException? = null
     private var pendingRead: UsbRequest? = null
+    private val directReadBuffer = ByteBuffer.allocateDirect(USBMUX_READ_CHUNK_BYTES)
     private val readQueuePolicy = UsbReadQueuePolicy.forCurrentPlatform()
     private val requests = UsbRequestQueue(connection, "usbmux-read-reaper")
 
@@ -496,7 +497,7 @@ class Iap2UsbSession internal constructor(
                 )
             }
             initialized = true
-            val buffer = ByteBuffer.allocateDirect(USBMUX_READ_CHUNK_BYTES)
+            val buffer = directReadBuffer.apply { clear() }
             val queueResult = synchronized(stateLock) {
                 checkOpenLocked()
                 pendingRead = request
@@ -1209,6 +1210,7 @@ class NcmUsbBridge internal constructor(
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
     private var buffered = ByteArray(0)
+    private var bufferedHead = 0
     private var bufferedSize = 0
     private var optionalShortPacketPad = false
     // A full-speed link uses 64-byte packets; the short-packet pad follows the real packet size.
@@ -1382,15 +1384,15 @@ class NcmUsbBridge internal constructor(
             // Keep this state when the pad/header arrives in a later USB completion.
             if (optionalShortPacketPad && bufferedSize > 0) {
                 optionalShortPacketPad = false
-                when (buffered[0].toInt() and 0xff) {
+                when (buffered[bufferedHead].toInt() and 0xff) {
                     0 -> discard(1)
                     Ntb16Codec.NTH16_SIG and 0xff -> Unit // The next header is validated below.
                     else -> if (!resynchronize("Invalid NTB16 short-packet pad")) return
                 }
             }
             if (bufferedSize < NTH16_LENGTH) return
-            val blockLength = readU16(buffered, 8)
-            if (readU32(buffered, 0) != Ntb16Codec.NTH16_SIG) {
+            val blockLength = readU16(buffered, bufferedHead + 8)
+            if (readU32(buffered, bufferedHead) != Ntb16Codec.NTH16_SIG) {
                 if (!resynchronize("NCM read buffer does not begin with an NTB16 header")) return
                 continue
             }
@@ -1399,7 +1401,7 @@ class NcmUsbBridge internal constructor(
                 continue
             }
             if (bufferedSize < blockLength) return
-            for (frame in Ntb16Codec.parse(buffered, 0, blockLength)) enqueueFrame(frame)
+            for (frame in Ntb16Codec.parse(buffered, bufferedHead, blockLength)) enqueueFrame(frame)
             discard(blockLength)
             optionalShortPacketPad = blockLength % usbPacketSize == 0
             finishResync()
@@ -1441,29 +1443,40 @@ class NcmUsbBridge internal constructor(
 
     /** Stricter than the normal path, so payload bytes are unlikely to pass as a header. */
     private fun plausibleHeaderAt(offset: Int): Boolean {
-        if (readU32(buffered, offset) != Ntb16Codec.NTH16_SIG) return false
-        val headerLength = readU16(buffered, offset + 4)
-        val blockLength = readU16(buffered, offset + 8)
-        val ndpIndex = readU16(buffered, offset + 10)
+        val base = bufferedHead + offset
+        if (readU32(buffered, base) != Ntb16Codec.NTH16_SIG) return false
+        val headerLength = readU16(buffered, base + 4)
+        val blockLength = readU16(buffered, base + 8)
+        val ndpIndex = readU16(buffered, base + 10)
         return headerLength == NTH16_LENGTH && blockLength >= 28 &&
             ndpIndex >= NTH16_LENGTH && ndpIndex % 4 == 0 && ndpIndex + 8 <= blockLength
     }
 
     private fun discard(count: Int) {
         if (count <= 0) return
-        buffered.copyInto(buffered, 0, count, bufferedSize)
-        bufferedSize -= count
+        if (count >= bufferedSize) {
+            bufferedHead = 0
+            bufferedSize = 0
+        } else {
+            bufferedHead += count
+            bufferedSize -= count
+        }
     }
 
     private fun appendBuffered(source: ByteArray, length: Int) {
-        val required = bufferedSize + length
+        if (bufferedHead > 0 && bufferedHead + bufferedSize + length > buffered.size) {
+            buffered.copyInto(buffered, 0, bufferedHead, bufferedHead + bufferedSize)
+            bufferedHead = 0
+        }
+        val required = bufferedHead + bufferedSize + length
         if (required > buffered.size) {
             val capacity = maxOf(required, maxOf(READ_CHUNK_BYTES, buffered.size * 2))
             val grown = ByteArray(capacity)
-            buffered.copyInto(grown, 0, 0, bufferedSize)
+            buffered.copyInto(grown, 0, bufferedHead, bufferedHead + bufferedSize)
             buffered = grown
+            bufferedHead = 0
         }
-        source.copyInto(buffered, bufferedSize, 0, length)
+        source.copyInto(buffered, bufferedHead + bufferedSize, 0, length)
         bufferedSize += length
     }
 
@@ -2133,7 +2146,9 @@ object Ntb16Codec {
         require(sequence in 0..0xffff) { "sequence must fit in u16" }
 
         val blockLength = DATAGRAM_INDEX + frame.size
-        val block = ByteArray(blockLength)
+        // A transfer that ends exactly on a USB packet boundary is read as a short packet.
+        val wireLength = if (blockLength % USB_PACKET_SIZE == 0) blockLength + 1 else blockLength
+        val block = ByteArray(wireLength)
         putU32(block, 0, NTH16_SIG)
         putU16(block, 4, NTH_LENGTH)
         putU16(block, 6, sequence)
@@ -2149,8 +2164,7 @@ object Ntb16Codec {
         putU16(block, 26, 0)
 
         frame.copyInto(block, DATAGRAM_INDEX)
-        // A transfer that ends exactly on a USB packet boundary is read as a short packet.
-        return if (block.size % USB_PACKET_SIZE == 0) block + byteArrayOf(0) else block
+        return block
     }
 
     /**

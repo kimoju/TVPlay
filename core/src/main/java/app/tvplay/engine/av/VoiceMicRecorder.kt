@@ -820,15 +820,19 @@ internal class VoiceMicRecorder(
         } catch (_: Exception) {
             // Best effort.
         }
+        var workerAlive = false
         thread?.let { worker ->
             try {
                 worker.join(CLOSE_JOIN_MILLIS)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
-            if (worker.isAlive) worker.interrupt()
+            if (worker.isAlive) {
+                workerAlive = true
+                worker.interrupt()
+            }
         }
-        release()
+        if (!workerAlive) release()
     }
 
     @Synchronized

@@ -154,7 +154,9 @@ object TvMediaKeyRouter {
         }
         attachedController = null
         stopSilentAudio()
-        artworkQueue.clear()
+        artworkQueue.clear().forEach { bitmap ->
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
         lastMetadata = CarPlayNowPlaying()
         session?.run {
             isActive = false
@@ -211,6 +213,9 @@ object TvMediaKeyRouter {
         val metadataDirty = metadataChanged(lastMetadata, metadata)
         lastMetadata = metadata
         val artwork = artworkQueue.onMetadata(metadata.artworkTransferId)
+        artwork.discard.forEach { bitmap ->
+            if (bitmap !== artwork.currentArtwork && !bitmap.isRecycled) bitmap.recycle()
+        }
         if (metadataDirty) {
             active.setMetadata(buildMediaMetadata(metadata, artwork.currentArtwork))
         }
@@ -227,9 +232,12 @@ object TvMediaKeyRouter {
     }
 
     private fun applyArtworkResult(result: NowPlayingArtworkQueue.Result<Bitmap>) {
-        val active = session ?: return
-        if (result.currentArtwork != null) {
+        val active = session
+        if (active != null && result.currentArtwork != null) {
             active.setMetadata(buildMediaMetadata(lastMetadata, result.currentArtwork))
+        }
+        result.discard.forEach { bitmap ->
+            if (bitmap !== result.currentArtwork && !bitmap.isRecycled) bitmap.recycle()
         }
     }
 
@@ -282,11 +290,17 @@ object TvMediaKeyRouter {
         silentTrackRunning.set(true)
         silentThread = Thread({
             val silence = ByteArray(1_600)
-            runCatching {
-                track.play()
-                while (silentTrackRunning.get() && !Thread.currentThread().isInterrupted) {
-                    if (track.write(silence, 0, silence.size) <= 0) break
+            try {
+                runCatching {
+                    track.play()
+                    while (silentTrackRunning.get() && !Thread.currentThread().isInterrupted) {
+                        if (track.write(silence, 0, silence.size) <= 0) break
+                    }
                 }
+            } finally {
+                silentTrack.compareAndSet(track, null)
+                runCatching { track.stop() }
+                runCatching { track.release() }
             }
         }, "tvplay-media-key-claim").apply {
             isDaemon = true
@@ -300,7 +314,6 @@ object TvMediaKeyRouter {
         silentThread = null
         silentTrack.getAndSet(null)?.let { track ->
             runCatching { track.stop() }
-            runCatching { track.release() }
         }
     }
 }

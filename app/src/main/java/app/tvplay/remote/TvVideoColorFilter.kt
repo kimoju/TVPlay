@@ -36,9 +36,11 @@ object TvVideoColorFilter {
         private var closed = false
         private val prefs = preferences(view.context)
         private val update: () -> Unit = { if (!closed) apply(view, prefs) }
+        private val updateRunnable = Runnable { update() }
         private val handler = Handler(Looper.getMainLooper())
         private val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-            handler.post { update() }
+            handler.removeCallbacks(updateRunnable)
+            handler.post(updateRunnable)
         }
 
         init {
@@ -49,6 +51,7 @@ object TvVideoColorFilter {
 
         override fun close() {
             closed = true
+            handler.removeCallbacks(updateRunnable)
             prefs.unregisterOnSharedPreferenceChangeListener(listener)
             previewListeners.remove(update)
         }

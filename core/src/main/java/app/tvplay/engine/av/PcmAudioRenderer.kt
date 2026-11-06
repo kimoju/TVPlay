@@ -690,6 +690,7 @@ internal class PcmAudioRenderer(
     private var codec: MediaCodec? = null
     @Volatile private var track: AudioTrack? = null
     private var pcm = ByteArray(64 * 1024)
+    private val adtsHeader = ByteArray(7)
     private var playbackStarted = false
     private var prebufferBytes = 0
     private var startThresholdBytes = 0
@@ -1061,8 +1062,8 @@ internal class PcmAudioRenderer(
                     firstAacPayloadLogged = true
                     Log.i(TAG, "audio AAC access unit bytes=$payloadLength")
                 }
-                val adts = MediaCodecSupport.adtsFrame(rtp, 12, payloadLength, format.sampleRate, format.channels)
-                feedCodec(adts, 0, adts.size, timestampUs)
+                MediaCodecSupport.writeAdtsHeader(adtsHeader, payloadLength, format.sampleRate, format.channels)
+                feedCodec(rtp, 12, payloadLength, timestampUs, header = adtsHeader)
             }
             AudioCodecKind.OPUS -> {
                 if (payloadLength < MIN_OPUS_PACKET_BYTES) {
@@ -1081,7 +1082,13 @@ internal class PcmAudioRenderer(
     private fun sampleTimestampUs(sample: Int): Long =
         (sample.toLong() and 0xffff_ffffL) * 1_000_000L / format.sampleRate
 
-    private fun feedCodec(payload: ByteArray, offset: Int, length: Int, presentationTimeUs: Long) {
+    private fun feedCodec(
+        payload: ByteArray,
+        offset: Int,
+        length: Int,
+        presentationTimeUs: Long,
+        header: ByteArray? = null,
+    ) {
         val codec = codec ?: run { decoderUnavailablePackets++; return }
         diagnosticStage = "decoder-input"
         val index = DecoderInputPump.acquire(
@@ -1103,13 +1110,15 @@ internal class PcmAudioRenderer(
         }
         val input = codec.getInputBuffer(index) ?: return
         input.clear()
-        if (length <= input.remaining()) {
+        val totalLength = (header?.size ?: 0) + length
+        if (totalLength <= input.remaining()) {
+            if (header != null) input.put(header)
             input.put(payload, offset, length)
-            codec.queueInputBuffer(index, 0, length, presentationTimeUs, 0)
+            codec.queueInputBuffer(index, 0, totalLength, presentationTimeUs, 0)
             inputQueued++
             if (!firstInputQueuedLogged) {
                 firstInputQueuedLogged = true
-                Log.i(TAG, "audio decoder first input codec=${format.codec} bytes=$length")
+                Log.i(TAG, "audio decoder first input codec=${format.codec} bytes=$totalLength")
             }
         } else {
             codec.queueInputBuffer(index, 0, 0, 0, 0)
@@ -1202,7 +1211,8 @@ internal class PcmAudioRenderer(
             }
             val writeStarted = System.nanoTime()
             diagnosticStage = "track-write"
-            val count = track.write(data, offset + written, writeLength, AudioTrack.WRITE_BLOCKING)
+            val writeMode = if (playbackStarted) AudioTrack.WRITE_BLOCKING else AudioTrack.WRITE_NON_BLOCKING
+            val count = track.write(data, offset + written, writeLength, writeMode)
             maxWriteMs = maxOf(maxWriteMs, (System.nanoTime() - writeStarted) / 1_000_000L)
             if (count < 0) {
                 writeErrorsThisWindow++
@@ -1210,6 +1220,11 @@ internal class PcmAudioRenderer(
                 break
             }
             if (count == 0) {
+                if (!playbackStarted && prebufferBytes > 0) {
+                    startPlayback(track)
+                    Log.i(TAG, "audio playback started on full prebuffer type=${format.payloadType}")
+                    continue
+                }
                 zeroWritesThisWindow++
                 break
             }
@@ -1274,7 +1289,7 @@ internal class PcmAudioRenderer(
 
     /** For the packets queued since [sinceNs], the frames each adds to the queue times how long it has waited. */
     private fun queuedFrameNsSince(sinceNs: Long, nowNs: Long): Double {
-        if (queue.size <= 1) return 0.0
+        if (queue.size <= 1 || lastArrivalNs.get() <= sinceNs) return 0.0
         val clockRate = format.rtpClockRate.coerceAtLeast(1)
         var frameNs = 0.0
         var previousSample: Int? = null

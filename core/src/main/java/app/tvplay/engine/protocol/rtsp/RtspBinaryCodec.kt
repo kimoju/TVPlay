@@ -582,6 +582,9 @@ class NtpClock : Closeable {
     private var pickOffset = 0.0
     private var pendingT1: BigInteger? = null
     private var synced = false
+    private val requestBuf = ByteArray(NTP_PACKET_BYTES)
+    private val responseBuf = ByteArray(NTP_PACKET_BYTES)
+    private val responsePacket = DatagramPacket(responseBuf, responseBuf.size)
 
     fun listen(): Int {
         synchronized(socketLock) {
@@ -643,7 +646,8 @@ class NtpClock : Closeable {
 
     private fun sendRequest() {
         val destination = peer ?: return
-        val packet = ByteArray(NTP_PACKET_BYTES)
+        val packet = requestBuf
+        packet.fill(0)
         packet[0] = 0x80.toByte()
         packet[1] = PT_REQUEST.toByte()
         writeU16Be(packet, 2, 7)
@@ -682,14 +686,17 @@ class NtpClock : Closeable {
     }
 
     private fun respondToRequest(request: ByteArray, source: InetSocketAddress) {
-        val response = ByteArray(NTP_PACKET_BYTES)
+        val response = responseBuf
+        response.fill(0)
         response[0] = 0x80.toByte()
         response[1] = PT_RESPONSE.toByte()
         writeU16Be(response, 2, 7)
         request.copyInto(response, NTP_ORIGINATE_OFFSET, NTP_TRANSMIT_OFFSET, NTP_PACKET_BYTES)
         writeNtp(syncedNtp(), response, NTP_RECEIVE_OFFSET)
         writeNtp(syncedNtp(), response, NTP_TRANSMIT_OFFSET)
-        currentSocket()?.send(DatagramPacket(response, response.size, source))
+        responsePacket.setData(response, 0, response.size)
+        responsePacket.socketAddress = source
+        currentSocket()?.send(responsePacket)
     }
 
     private fun handleResponse(response: ByteArray) {

@@ -67,15 +67,15 @@ internal class VideoDecodeQueue(
     private val maxFrames: Int = 60,
     private val maxBytes: Int = 8 * 1024 * 1024,
 ) {
-    private val jobs = LinkedBlockingQueue<VideoJob>()
-    private val queuedFrames = AtomicInteger(0)
-    private val queuedFrameBytes = AtomicLong(0L)
+    private val lock = Object()
+    private val jobs = ArrayDeque<VideoJob>()
+    private var queuedFrames = 0
+    private var queuedFrameBytes = 0L
 
     data class Backlog(val pendingFrames: Int, val newestPendingReceivedNs: Long?)
 
     /** Called by the sole consumer after taking its current frame. Control jobs end this chain. */
-    @Synchronized
-    fun backlogAfterCurrent(): Backlog {
+    fun backlogAfterCurrent(): Backlog = synchronized(lock) {
         var frames = 0
         var newest: Long? = null
         for (job in jobs) {
@@ -83,76 +83,105 @@ internal class VideoDecodeQueue(
             frames++
             newest = newest?.let { maxOf(it, job.receivedNs) } ?: job.receivedNs
         }
-        return Backlog(frames, newest)
+        Backlog(frames, newest)
     }
 
-    @Synchronized
-    fun offer(job: VideoJob) {
+    fun offer(job: VideoJob) = synchronized(lock) {
         if (job is VideoJob.Frame) {
-            if (queuedFrames.get() >= maxFrames || queuedFrameBytes.get() + job.nalus.size > maxBytes) {
-                discardFrames()
-                jobs.offer(VideoJob.Resync)
+            if (queuedFrames >= maxFrames || queuedFrameBytes + job.nalus.size > maxBytes) {
+                discardFramesLocked()
+                jobs.addLast(VideoJob.Resync)
             }
             // A single oversized frame is also a lost reference chain.
-            if (job.nalus.size > maxBytes) return
-            queuedFrames.incrementAndGet()
-            queuedFrameBytes.addAndGet(job.nalus.size.toLong())
+            if (job.nalus.size > maxBytes) {
+                lock.notifyAll()
+                return@synchronized
+            }
+            queuedFrames++
+            queuedFrameBytes += job.nalus.size.toLong()
         }
-        jobs.offer(job)
+        jobs.addLast(job)
+        lock.notifyAll()
+    }
+
+    fun offerFirst(job: VideoJob) = synchronized(lock) {
+        if (job is VideoJob.Frame) {
+            if (job.nalus.size > maxBytes) return@synchronized
+            queuedFrames++
+            queuedFrameBytes += job.nalus.size.toLong()
+        }
+        jobs.addFirst(job)
+        lock.notifyAll()
+    }
+
+    fun requestResync() = synchronized(lock) {
+        discardFramesLocked()
+        jobs.addLast(VideoJob.Resync)
+        lock.notifyAll()
     }
 
     /** Drop only the invalidated chain; the next config/surface owns later frames. */
-    @Synchronized
-    fun discardCurrentChain() {
+    fun discardCurrentChain() = synchronized(lock) {
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
-            val next = iterator.next()
-            when (next) {
+            when (val next = iterator.next()) {
                 is VideoJob.Frame -> {
-                    if (jobs.remove(next)) {
-                        queuedFrames.decrementAndGet()
-                        queuedFrameBytes.addAndGet(-next.nalus.size.toLong())
-                    }
+                    iterator.remove()
+                    queuedFrames--
+                    queuedFrameBytes -= next.nalus.size.toLong()
                 }
-                VideoJob.Resync -> jobs.remove(next)
-                else -> return
+                VideoJob.Resync -> iterator.remove()
+                else -> return@synchronized
             }
         }
     }
 
-    @Synchronized
-    fun discardFrames() {
+    fun discardFrames() = synchronized(lock) {
+        discardFramesLocked()
+    }
+
+    private fun discardFramesLocked() {
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
-            val next = iterator.next()
-            if (next is VideoJob.Frame) {
-                if (jobs.remove(next)) {
-                    queuedFrames.decrementAndGet()
-                    queuedFrameBytes.addAndGet(-next.nalus.size.toLong())
+            when (val next = iterator.next()) {
+                is VideoJob.Frame -> {
+                    iterator.remove()
+                    queuedFrames--
+                    queuedFrameBytes -= next.nalus.size.toLong()
                 }
-            } else if (next === VideoJob.Resync) {
-                jobs.remove(next)
+                VideoJob.Resync -> iterator.remove()
+                else -> Unit
             }
         }
     }
 
-    fun poll(timeoutMillis: Long): VideoJob? =
-        jobs.poll(timeoutMillis, TimeUnit.MILLISECONDS)?.also { job ->
-            if (job is VideoJob.Frame) {
-                queuedFrames.decrementAndGet()
-                queuedFrameBytes.addAndGet(-job.nalus.size.toLong())
+    fun poll(timeoutMillis: Long): VideoJob? = synchronized(lock) {
+        if (jobs.isEmpty() && timeoutMillis > 0L) {
+            val deadlineNs = System.nanoTime() + timeoutMillis * 1_000_000L
+            while (jobs.isEmpty()) {
+                val remainingNs = deadlineNs - System.nanoTime()
+                if (remainingNs <= 0L) break
+                lock.wait(
+                    remainingNs / 1_000_000L,
+                    (remainingNs % 1_000_000L).toInt(),
+                )
             }
         }
+        jobs.pollFirst()?.also { job ->
+            if (job is VideoJob.Frame) {
+                queuedFrames--
+                queuedFrameBytes -= job.nalus.size.toLong()
+            }
+        }
+    }
 
     /** Removes and returns every queued job, for a worker that is shutting down. */
-    @Synchronized
-    fun drain(): List<VideoJob> = ArrayList<VideoJob>().also { drained ->
-        jobs.drainTo(drained)
-        for (job in drained) {
-            if (job is VideoJob.Frame) {
-                queuedFrames.decrementAndGet()
-                queuedFrameBytes.addAndGet(-job.nalus.size.toLong())
-            }
+    fun drain(): List<VideoJob> = synchronized(lock) {
+        ArrayList<VideoJob>(jobs.size).also { drained ->
+            drained.addAll(jobs)
+            jobs.clear()
+            queuedFrames = 0
+            queuedFrameBytes = 0L
         }
     }
 }
@@ -597,6 +626,13 @@ object MediaCodecSupport {
      */
     fun toAnnexBInPlace(lengthPrefixed: ByteArray): Boolean {
         if (lengthPrefixed.size < 4) return false
+        val startsWithStartCode = lengthPrefixed[0] == 0.toByte() &&
+            lengthPrefixed[1] == 0.toByte() &&
+            lengthPrefixed[2] == 0.toByte() &&
+            lengthPrefixed[3] == 1.toByte()
+        if (startsWithStartCode && (lengthPrefixed.size == 4 || (lengthPrefixed[4].toInt() and 0x1f) !in 9..12)) {
+            return true
+        }
 
         var inputOffset = 0
         while (inputOffset + 4 <= lengthPrefixed.size) {
@@ -669,19 +705,30 @@ object MediaCodecSupport {
         sampleRate: Int,
         channels: Int,
     ): ByteArray {
+        val frameLength = length + 7
+        val frame = ByteArray(frameLength)
+        writeAdtsHeader(frame, length, sampleRate, channels)
+        source.copyInto(frame, 7, offset, offset + length)
+        return frame
+    }
+
+    /** Writes a 7-byte MPEG-4 ADTS header into [target] for an AAC-LC access unit of [length] bytes. */
+    fun writeAdtsHeader(
+        target: ByteArray,
+        length: Int,
+        sampleRate: Int,
+        channels: Int,
+    ) {
         val frequencyIndex = aacFrequencyIndex(sampleRate)
         val channelConfig = channels.coerceIn(1, 7)
         val frameLength = length + 7
-        val frame = ByteArray(frameLength)
-        frame[0] = 0xff.toByte()
-        frame[1] = 0xf1.toByte()
-        frame[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
-        frame[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
-        frame[4] = ((frameLength ushr 3) and 0xff).toByte()
-        frame[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
-        frame[6] = 0xfc.toByte()
-        source.copyInto(frame, 7, offset, offset + length)
-        return frame
+        target[0] = 0xff.toByte()
+        target[1] = 0xf1.toByte()
+        target[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
+        target[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
+        target[4] = ((frameLength ushr 3) and 0xff).toByte()
+        target[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
+        target[6] = 0xfc.toByte()
     }
 
     /** Extracts one RFC 3640 AAC access unit from an RTP payload. */
@@ -1177,6 +1224,7 @@ class HardwareVideoDecoder internal constructor(
     private var parking: ParkingOutput? = null
     private var lastConfig: VideoJob.Config? = null
     @Volatile private var renderedFrameLogged = false
+    val hasRenderedFirstFrame: Boolean get() = renderedFrameLogged && running
     // The operating rate still asked for, dropped for this stream once a decoder refuses it; and the rate
     // the current codec was configured with.
     @Volatile private var operatingRate = operatingRate
@@ -1270,7 +1318,7 @@ class HardwareVideoDecoder internal constructor(
     /** Asks the worker to stop rendering to [surface], parking the codec when [park]. */
     internal fun requestDetach(surface: Surface, park: Boolean): SurfaceDetachRequest {
         check(Thread.currentThread() !== thread) { "detach from the decoder worker" }
-        return SurfaceDetachRequest(surface, park).also { queue.offer(VideoJob.DetachSurface(it)) }
+        return SurfaceDetachRequest(surface, park).also { queue.offerFirst(VideoJob.DetachSurface(it)) }
     }
 
     /** True once [request] is confirmed or the worker has exited; false when [deadlineNanos] passed first. */
@@ -1307,7 +1355,7 @@ class HardwareVideoDecoder internal constructor(
     }
 
     fun resync() {
-        queue.offer(VideoJob.Resync)
+        queue.requestResync()
     }
 
     override fun close() {
@@ -1761,6 +1809,8 @@ class HardwareVideoDecoder internal constructor(
         outputSurface = surface
         if (surface == null) {
             releaseDecoder()
+            parking?.close()
+            parking = null
             queue.discardCurrentChain()
             Log.i(TAG, "video decoder detached from surface")
             return
@@ -1769,6 +1819,8 @@ class HardwareVideoDecoder internal constructor(
         if (codec != null) {
             try {
                 codec.setOutputSurface(surface)
+                parking?.close()
+                parking = null
                 Log.i(TAG, "video decoder output surface updated")
                 return
             } catch (error: Exception) {
@@ -1776,6 +1828,8 @@ class HardwareVideoDecoder internal constructor(
             }
         }
         releaseDecoder()
+        parking?.close()
+        parking = null
         queue.discardCurrentChain()
         referenceChain.reset()
         lastKeyFrameRequestNs = 0L
@@ -1915,6 +1969,11 @@ class HardwareVideoDecoder internal constructor(
                 val now = System.nanoTime()
                 val slot = queuedSlotOf(info.presentationTimeUs)
                 val queued = if (slot >= 0) queuedAtNanos[slot] else 0L
+                val slotPaced = slot >= 0 && queuedPaced[slot]
+                val slotBeforePause = slot >= 0 && queuedBeforePause[slot]
+                if (slot >= 0) {
+                    queuedPresentationUs[slot] = 0L
+                }
                 val heldOverGap = queued in 1 until resumedAtNanos
                 if (queued > 0 && !heldOverGap) {
                     stats.onDecodeLatency(now - queued)
@@ -1922,9 +1981,9 @@ class HardwareVideoDecoder internal constructor(
                     liveDecodeSamples.incrementAndGet()
                 }
                 val delay = pacingDelay
-                val paced = shown && delay != null && slot >= 0 && queuedPaced[slot]
+                val paced = shown && delay != null && slotPaced
                 val localNs = info.presentationTimeUs * 1000
-                val pauseHeld = paced && queuedBeforePause[slot]
+                val pauseHeld = paced && slotBeforePause
                 val targetNs = if (paced) {
                     if (!heldOverGap && !pauseHeld) delay.onFrame(now - localNs)
                     stats.onPacingDelay(delay.nanos)
@@ -2012,6 +2071,15 @@ class HardwareVideoDecoder internal constructor(
             codec = decoder
             decoder = null
             activeCodecName = null
+            queuedPresentationUs.fill(0L)
+            queuedAtNanos.fill(0L)
+            queuedPaced.fill(false)
+            queuedBeforePause.fill(false)
+            recentPacedSlots.fill(-1)
+            queuedSlot = 0
+            lastQueuedNanos = 0L
+            resumedAtNanos = 0L
+            lastQueuedLocalNanos = 0L
             // The output thread returns from dequeueOutputBuffer within its timeout and then sees no codec.
             awaitNotDequeuing(codec)
         }

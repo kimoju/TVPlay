@@ -135,6 +135,9 @@ class Iap2Frame(messageId: Int, payload: ByteArray) {
     /** A defensive copy of the body, excluding the CSM header. */
     val payload: ByteArray get() = body.copyOf()
 
+    /** The complete six-byte-header CSM encoded byte count without allocating a copy. */
+    val encodedSize: Int get() = Iap2CsmFramer.HEADER_BYTES + body.size
+
     fun body(): Iap2ParameterList = Iap2ParameterList.parse(body)
 
     /** A defensive copy of this frame's complete six-byte-header CSM encoding. */
@@ -681,14 +684,14 @@ class Iap2BodyReader private constructor(
 
     fun optionalU8(id: Int): Int? = first(id)?.let {
         requireSize(it, id, 1)
-        Iap2WireCodec.readU8(it.payload)
+        Iap2WireCodec.readU8(it.payloadView())
     }
 
     fun i8(id: Int): Int = Iap2WireCodec.readI8(scalar(id, 1))
 
     fun optionalI8(id: Int): Int? = first(id)?.let {
         requireSize(it, id, 1)
-        Iap2WireCodec.readI8(it.payload)
+        Iap2WireCodec.readI8(it.payloadView())
     }
 
     fun bool(id: Int): Boolean = u8(id) != 0
@@ -699,35 +702,35 @@ class Iap2BodyReader private constructor(
 
     fun optionalU16(id: Int): Int? = first(id)?.let {
         requireSize(it, id, 2)
-        Iap2WireCodec.readU16(it.payload)
+        Iap2WireCodec.readU16(it.payloadView())
     }
 
     fun i16(id: Int): Int = Iap2WireCodec.readI16(scalar(id, 2))
 
     fun optionalI16(id: Int): Int? = first(id)?.let {
         requireSize(it, id, 2)
-        Iap2WireCodec.readI16(it.payload)
+        Iap2WireCodec.readI16(it.payloadView())
     }
 
     fun u32(id: Int): Long = Iap2WireCodec.readU32(scalar(id, 4))
 
     fun optionalU32(id: Int): Long? = first(id)?.let {
         requireSize(it, id, 4)
-        Iap2WireCodec.readU32(it.payload)
+        Iap2WireCodec.readU32(it.payloadView())
     }
 
     fun i32(id: Int): Int = Iap2WireCodec.readI32(scalar(id, 4))
 
     fun optionalI32(id: Int): Int? = first(id)?.let {
         requireSize(it, id, 4)
-        Iap2WireCodec.readI32(it.payload)
+        Iap2WireCodec.readI32(it.payloadView())
     }
 
     fun u64(id: Int): Long = Iap2WireCodec.readU64(scalar(id, 8))
 
     fun optionalU64(id: Int): Long? = first(id)?.let {
         requireSize(it, id, 8)
-        Iap2WireCodec.readU64(it.payload)
+        Iap2WireCodec.readU64(it.payloadView())
     }
 
     fun bytes(id: Int): ByteArray = raw(id)
@@ -735,52 +738,52 @@ class Iap2BodyReader private constructor(
     fun optionalBytes(id: Int): ByteArray? = optionalRaw(id)
 
     fun string(id: Int): String = try {
-        Iap2WireCodec.readString(raw(id))
+        Iap2WireCodec.readString(require(id).payloadView())
     } catch (failure: Iap2ProtocolException) {
         throw malformed(id, failure)
     }
 
     fun optionalString(id: Int): String? = first(id)?.let {
         try {
-            Iap2WireCodec.readString(it.payload)
+            Iap2WireCodec.readString(it.payloadView())
         } catch (failure: Iap2ProtocolException) {
             throw malformed(id, failure)
         }
     }
 
     fun strings(id: Int): List<String> = try {
-        Iap2WireCodec.readStrings(raw(id))
+        Iap2WireCodec.readStrings(require(id).payloadView())
     } catch (failure: Iap2ProtocolException) {
         throw malformed(id, failure)
     }
 
     fun optionalStrings(id: Int): List<String>? = first(id)?.let {
         try {
-            Iap2WireCodec.readStrings(it.payload)
+            Iap2WireCodec.readStrings(it.payloadView())
         } catch (failure: Iap2ProtocolException) {
             throw malformed(id, failure)
         }
     }
 
     fun u16List(id: Int): List<Int> = try {
-        Iap2WireCodec.readU16List(raw(id))
+        Iap2WireCodec.readU16List(require(id).payloadView())
     } catch (failure: Iap2ProtocolException) {
         throw malformed(id, failure)
     }
 
     fun optionalU16List(id: Int): List<Int>? = first(id)?.let {
         try {
-            Iap2WireCodec.readU16List(it.payload)
+            Iap2WireCodec.readU16List(it.payloadView())
         } catch (failure: Iap2ProtocolException) {
             throw malformed(id, failure)
         }
     }
 
     fun group(id: Int): Iap2BodyReader =
-        Iap2BodyReader(Iap2ParameterList.parse(raw(id)))
+        Iap2BodyReader(Iap2ParameterList.parse(require(id).payloadView()))
 
-    fun optionalGroup(id: Int): Iap2BodyReader? = optionalRaw(id)?.let {
-        Iap2BodyReader(Iap2ParameterList.parse(it))
+    fun optionalGroup(id: Int): Iap2BodyReader? = first(id)?.let {
+        Iap2BodyReader(Iap2ParameterList.parse(it.payloadView()))
     }
 
     fun list(): List<Iap2Parameter> = parameters.asList()
@@ -788,19 +791,20 @@ class Iap2BodyReader private constructor(
     private fun scalar(id: Int, expectedBytes: Int): ByteArray {
         val parameter = require(id)
         requireSize(parameter, id, expectedBytes)
-        return parameter.payload
+        return parameter.payloadView()
     }
 
     private fun requireSize(parameter: Iap2Parameter, id: Int, expectedBytes: Int) {
-        if (parameter.payload.size != expectedBytes) {
+        val size = parameter.payloadView().size
+        if (size != expectedBytes) {
             throw Iap2ProtocolException(
-                "Parameter 0x${hex(id)} expected $expectedBytes bytes, got ${parameter.payload.size}",
+                "Parameter 0x${hex(id)} expected $expectedBytes bytes, got $size",
             )
         }
     }
 
     private fun requireEmpty(parameter: Iap2Parameter, id: Int) {
-        if (parameter.payload.isNotEmpty()) {
+        if (parameter.payloadView().isNotEmpty()) {
             throw Iap2ProtocolException("Parameter 0x${hex(id)} must be void")
         }
     }

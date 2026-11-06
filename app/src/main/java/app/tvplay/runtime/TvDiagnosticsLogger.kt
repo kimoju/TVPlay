@@ -53,13 +53,14 @@ object TvDiagnosticsLogger {
     }
 
     fun record(message: String, nowMillis: Long = System.currentTimeMillis()) {
+        if (DiagnosticRedactor.neverExported(message)) return
         val redacted = DiagnosticRedactor.redact(message) ?: return
         val formatted = "${formatTime(nowMillis)}  $redacted"
         synchronized(ringLock) {
             if (ringBuffer.size >= MAX_RING_LINES) ringBuffer.removeFirst()
             ringBuffer.addLast(formatted)
         }
-        activeSessionLog?.append(formatted)
+        activeSessionLog?.appendPreRedacted(formatted)
     }
 
     fun recentLines(): List<String> = synchronized(ringLock) { ringBuffer.toList() }
@@ -212,11 +213,13 @@ class BoundedDiagnosticWriter<T : Any>(
 
 /** Bounded, private diagnostics. Each write is redacted before touching storage. */
 class SessionLogFile(val file: File) : Closeable {
+    private class Entry(val line: String, val preRedacted: Boolean)
+
     private val lock = Any()
     @Volatile private var closed = false
     private var size = UNKNOWN_SIZE
     // Raw lines queue here; the writer thread redacts, rotates and writes them in order.
-    private val writer: BoundedDiagnosticWriter<String> = BoundedDiagnosticWriter<String>(MAX_PENDING, ::drain)
+    private val writer: BoundedDiagnosticWriter<Entry> = BoundedDiagnosticWriter<Entry>(MAX_PENDING, ::drain)
     private var reportedDrops = 0L
 
     fun reset(header: String) = synchronized(lock) {
@@ -225,30 +228,38 @@ class SessionLogFile(val file: File) : Closeable {
             rotate()
             file.writeText("")
             size = 0
-            write(header)
+            write(header, preRedacted = false)
         }
     }
 
     /** Never waits for disk. Under overload the oldest queued line is discarded. */
     fun append(line: String) {
-        if (!closed && !DiagnosticRedactor.neverExported(line)) writer.enqueue(line)
+        if (!closed && !DiagnosticRedactor.neverExported(line)) {
+            writer.enqueue(Entry(line, preRedacted = false))
+        }
+    }
+
+    internal fun appendPreRedacted(safeLine: String) {
+        if (!closed) {
+            writer.enqueue(Entry(safeLine, preRedacted = true))
+        }
     }
 
     /** Writer thread only. Lines queued before [close] are still written. */
-    private fun drain(line: String): Unit = synchronized(lock) {
+    private fun drain(entry: Entry): Unit = synchronized(lock) {
         val dropped = writer.droppedCount
         if (dropped > reportedDrops) {
-            write("${dropped - reportedDrops} lines dropped")
+            write("${dropped - reportedDrops} lines dropped", preRedacted = true)
             reportedDrops = dropped
         }
-        write(line)
+        write(entry.line, entry.preRedacted)
     }
 
     /** Synchronous write for callers that are already off the hot path. */
-    fun appendNow(line: String) = synchronized(lock) { if (!closed) write(line) }
+    fun appendNow(line: String) = synchronized(lock) { if (!closed) write(line, preRedacted = false) }
 
-    private fun write(line: String) {
-        val safe = DiagnosticRedactor.redact(line) ?: return
+    private fun write(line: String, preRedacted: Boolean) {
+        val safe = if (preRedacted) line else DiagnosticRedactor.redact(line) ?: return
         runCatching {
             val bytes = (safe + "\n").toByteArray()
             if (size == UNKNOWN_SIZE) size = file.length()

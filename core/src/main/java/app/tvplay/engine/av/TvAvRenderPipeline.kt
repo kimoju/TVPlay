@@ -122,6 +122,12 @@ class TvAvRenderPipeline(
 
     fun setFirstVideoFrameListener(listener: (() -> Unit)?) {
         firstVideoFrameListener = listener
+        if (listener != null) {
+            val alreadyRendered = synchronized(videoOwnershipLock) {
+                videoDecoders[MAIN_SCREEN_TYPE]?.hasRenderedFirstFrame == true
+            }
+            if (alreadyRendered) listener.invoke()
+        }
     }
 
     fun setVideoStreamDimensionsListener(listener: ((Int, Int) -> Unit)?) {

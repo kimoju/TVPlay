@@ -834,6 +834,8 @@ object TvLanOtaManager {
             onReportProgress(0)
             var lastReportedPercent = 0
             var lastReportedTimeMillis = System.currentTimeMillis()
+            var lastUiProgressPercent = -1
+            var lastUiProgressTimeMillis = 0L
             var currentBytes = startBytes
 
             BufferedInputStream(connection.inputStream).use { input ->
@@ -850,15 +852,22 @@ object TvLanOtaManager {
                         } else {
                             0
                         }
-                        onProgress(
-                            OtaDownloadProgress(
-                                downloadedBytes = currentBytes,
-                                totalBytes = totalBytes,
-                                percent = percent,
-                                resumedFromBytes = startBytes,
-                            ),
-                        )
                         val now = System.currentTimeMillis()
+                        if (percent != lastUiProgressPercent ||
+                            currentBytes == totalBytes ||
+                            now - lastUiProgressTimeMillis >= 80L
+                        ) {
+                            lastUiProgressPercent = percent
+                            lastUiProgressTimeMillis = now
+                            onProgress(
+                                OtaDownloadProgress(
+                                    downloadedBytes = currentBytes,
+                                    totalBytes = totalBytes,
+                                    percent = percent,
+                                    resumedFromBytes = startBytes,
+                                ),
+                            )
+                        }
                         if (percent >= lastReportedPercent + 20 || now - lastReportedTimeMillis >= REPORT_THROTTLE_MILLIS) {
                             lastReportedPercent = percent
                             lastReportedTimeMillis = now

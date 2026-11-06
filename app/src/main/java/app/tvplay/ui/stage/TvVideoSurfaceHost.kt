@@ -83,17 +83,34 @@ object TvVideoSurfaceHost {
         return currentFallbackBounds
     }
 
-    fun findTextureUnsafeVideoDecoder(hevcEnabled: Boolean): String? = try {
-        val decoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-            .filter { !it.isEncoder }
-            .map { VideoDecoderInfo(it.name, it.supportedTypes.toList()) }
-        val mimes = listOfNotNull(
-            MediaFormat.MIMETYPE_VIDEO_AVC,
-            MediaFormat.MIMETYPE_VIDEO_HEVC.takeIf { hevcEnabled },
-        )
-        textureUnsafeDecoder(decoders, mimes)
-    } catch (_: RuntimeException) {
-        null
+    @Volatile private var cachedUnsafeAvcComputed = false
+    @Volatile private var cachedUnsafeAvc: String? = null
+    @Volatile private var cachedUnsafeHevcComputed = false
+    @Volatile private var cachedUnsafeHevc: String? = null
+
+    fun findTextureUnsafeVideoDecoder(hevcEnabled: Boolean): String? {
+        if (hevcEnabled && cachedUnsafeHevcComputed) return cachedUnsafeHevc
+        if (!hevcEnabled && cachedUnsafeAvcComputed) return cachedUnsafeAvc
+        val result = try {
+            val decoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .filter { !it.isEncoder }
+                .map { VideoDecoderInfo(it.name, it.supportedTypes.toList()) }
+            val mimes = listOfNotNull(
+                MediaFormat.MIMETYPE_VIDEO_AVC,
+                MediaFormat.MIMETYPE_VIDEO_HEVC.takeIf { hevcEnabled },
+            )
+            textureUnsafeDecoder(decoders, mimes)
+        } catch (_: RuntimeException) {
+            null
+        }
+        if (hevcEnabled) {
+            cachedUnsafeHevc = result
+            cachedUnsafeHevcComputed = true
+        } else {
+            cachedUnsafeAvc = result
+            cachedUnsafeAvcComputed = true
+        }
+        return result
     }
 
     fun captureLastSurfacePicture(

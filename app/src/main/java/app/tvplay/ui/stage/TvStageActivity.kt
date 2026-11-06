@@ -790,6 +790,7 @@ class TvStageActivity : Activity() {
                         reconnectAttempts = 0
                         cancelScheduledReconnect()
                         firstFrameRendered = true
+                        CarPlayBackgroundSession.firstFrameRendered = true
                         streamingActive = true
                         activeAirPlaySession?.let { retryBudget.firstFrame(it, System.currentTimeMillis()) }
                         LastConnectionProblem.clear(this)
@@ -1022,6 +1023,7 @@ class TvStageActivity : Activity() {
             snapshot.sink.setMainSurface(surface, videoContainer.width, videoContainer.height)
             snapshot.sink.refreshPicture()
         }
+        snapshot.sink.setVideoSyncEnabled(TvPreferencesStore.loadVideoSyncEnabled(this) && fallbackSurfaceView != null)
         updateVideoLayout(videoContainer.width, videoContainer.height)
         if (TvPreferencesStore.loadMediaKeyForwardingEnabled(this)) {
             TvMediaKeyRouter.attach(this, snapshot.controller) { change ->
@@ -1067,11 +1069,13 @@ class TvStageActivity : Activity() {
                 activeAirPlaySession = session
             }
             CarPlayBackgroundSession.active = true
+            CarPlayBackgroundSession.firstFrameRendered = true
             mainHandler.post {
                 if (controllerGeneration != restartGeneration) return@post
                 reconnectAttempts = 0
                 cancelScheduledReconnect()
                 firstFrameRendered = true
+                CarPlayBackgroundSession.firstFrameRendered = true
                 streamingActive = true
                 retryBudget.firstFrame(session, System.currentTimeMillis())
                 LastConnectionProblem.clear(this@TvStageActivity)

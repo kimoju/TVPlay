@@ -292,7 +292,7 @@ object CarLinkFrameCodec {
         buildFrame(
             seqId = requestHeader.seqId,
             category = CarLinkCmdCategory.ACK,
-            methodIndex = requestHeader.methodIndex,
+            methodIndex = 0,
             body = ByteArray(0),
             source = CarLinkSourceDevice.CAR,
             format = CarLinkDataFormat.RAW,

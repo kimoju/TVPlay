@@ -301,18 +301,26 @@ object CarLinkAuthCipher {
     class ServerHandshakeSession(
         val pinCode: String,
         val authKeyPair: KeyPair = generateEcKeyPair(),
-        val agreementKeyPair: KeyPair = generateEcKeyPair(),
-        val serverNonce: ByteArray = generateNonce(16),
+        var agreementKeyPair: KeyPair = generateEcKeyPair(),
+        var serverNonce: ByteArray = generateNonce(32),
     ) {
         var sessionKey: ByteArray? = null
             private set
+
+        private fun selectSingleWorkMode(requestedMask: Int): Int = when {
+            (requestedMask and 1) != 0 -> 1 // WORK_MODE_NORMAL_CAST
+            (requestedMask and 4) != 0 -> 4 // WORK_MODE_DATA_TRANS
+            (requestedMask and 8) != 0 -> 8 // WORK_MODE_MIRROR
+            (requestedMask and 2) != 0 -> 2 // WORK_MODE_APP_WINDOW_CAST
+            else -> 1
+        }
 
         fun processAuthRequest(
             request: CarLinkProtoCodec.AuthRequestMsg,
             dayOrNightMode: Int = 2,
             screenInfo: String = "",
         ): CarLinkProtoCodec.AuthResponseMsg {
-            val negotiatedWorkModes = (request.workModes and 0x0F).takeIf { it != 0 } ?: 1
+            val negotiatedWorkModes = selectSingleWorkMode(request.workModes)
             val clientId = request.id.toString(Charsets.UTF_8).trim()
 
             // Phase 1: Quick connection attempt (phone sends empty authPk before prompting user for PIN)

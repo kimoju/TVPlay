@@ -254,6 +254,15 @@ object CarLinkProtoCodec {
     }
 
     /**
+     * `UCarProto.NotifyCarToForeground` (`int64 timestamp = 1;`).
+     */
+    fun encodeNotifyCarToForeground(timestampMs: Long = System.currentTimeMillis()): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeInt64(out, 1, timestampMs)
+        return out.toByteArray()
+    }
+
+    /**
      * `UCarProto.AwakenVoiceAssistant`:
      * - `1`: `bytes pcmData` (optional)
      * - `2`: `AudioFormat audioFormat` (optional)

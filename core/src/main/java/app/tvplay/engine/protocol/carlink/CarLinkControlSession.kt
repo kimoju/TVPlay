@@ -240,7 +240,7 @@ class CarLinkControlSession(
                     val resp = hs.processAuthRequest(
                         request = req,
                         dayOrNightMode = 2,
-                        screenInfo = "${displaySpec.widthPixels}x${displaySpec.heightPixels}",
+                        screenInfo = "${displaySpec.widthPixels}_${displaySpec.heightPixels}_320",
                     )
                     negotiatedWorkModes = resp.workModes
                     val respFrame = CarLinkFrameCodec.buildFrame(
@@ -315,7 +315,8 @@ class CarLinkControlSession(
         onLog("CarLink SENSOR connected with ${socket.inetAddress.hostAddress}")
         while (!closed.get() && !socket.isClosed) {
             val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
-            if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
+            val msgType = frame.header.cmdDescription.messageType
+            if (msgType == CarLinkMessageType.REQ || msgType == CarLinkMessageType.SEND_SYNC) {
                 CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), handshakeSession?.sessionKey)
             }
         }
@@ -332,21 +333,56 @@ class CarLinkControlSession(
                 seqId = seqCounter.getAndIncrement(),
                 category = CarLinkCmdCategory.CONTROL,
                 methodIndex = CarLinkMethodIndex.NOTIFY_CAR_TO_FOREGROUND,
-                body = ByteArray(0),
+                body = CarLinkProtoCodec.encodeNotifyCarToForeground(),
                 source = CarLinkSourceDevice.CAR,
-                format = CarLinkDataFormat.RAW,
+                format = CarLinkDataFormat.PB3,
                 messageType = CarLinkMessageType.SEND,
             )
             synchronized(output) {
                 CarLinkFrameCodec.writeFrame(output, fgFrame, handshakeSession?.sessionKey)
             }
         }
+        val heartbeatThread = Thread(
+            {
+                while (!closed.get() && !socket.isClosed && controlOutput === output) {
+                    try {
+                        Thread.sleep(2_000L)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                    if (closed.get() || socket.isClosed || controlOutput !== output) break
+                    val hbFrame = CarLinkFrameCodec.buildFrame(
+                        seqId = seqCounter.getAndIncrement(),
+                        category = CarLinkCmdCategory.CONTROL,
+                        methodIndex = CarLinkMethodIndex.HEARTBEAT,
+                        body = CarLinkProtoCodec.encodeHeartbeat(CarLinkProtoCodec.HeartbeatMsg()),
+                        source = CarLinkSourceDevice.CAR,
+                        format = CarLinkDataFormat.PB3,
+                        messageType = CarLinkMessageType.SEND,
+                    )
+                    val ok = runCatching {
+                        synchronized(output) {
+                            CarLinkFrameCodec.writeFrame(output, hbFrame, handshakeSession?.sessionKey)
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (!ok) break
+                }
+            },
+            "carlink-control-heartbeat",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+        workerThreads += heartbeatThread
         try {
             while (!closed.get() && !socket.isClosed) {
                 val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
                 handleControlFrame(frame, output)
             }
         } finally {
+            heartbeatThread.interrupt()
+            workerThreads.remove(heartbeatThread)
             if (controlOutput === output) {
                 controlOutput = null
                 onSessionDisconnected()
@@ -361,20 +397,27 @@ class CarLinkControlSession(
         } else {
             frame.body
         }
+        if (frame.header.cmdDescription.messageType == CarLinkMessageType.SEND_SYNC) {
+            synchronized(output) {
+                CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
+            }
+        }
 
         when (frame.header.methodIndex) {
             CarLinkMethodIndex.HEARTBEAT -> {
-                val hb = CarLinkProtoCodec.encodeHeartbeat(CarLinkProtoCodec.HeartbeatMsg())
-                val reply = CarLinkFrameCodec.buildFrame(
-                    seqId = frame.header.seqId,
-                    category = CarLinkCmdCategory.CONTROL,
-                    methodIndex = CarLinkMethodIndex.HEARTBEAT,
-                    body = hb,
-                    source = CarLinkSourceDevice.CAR,
-                    format = CarLinkDataFormat.PB3,
-                    messageType = CarLinkMessageType.RES,
-                )
-                synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
+                if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
+                    val hb = CarLinkProtoCodec.encodeHeartbeat(CarLinkProtoCodec.HeartbeatMsg())
+                    val reply = CarLinkFrameCodec.buildFrame(
+                        seqId = frame.header.seqId,
+                        category = CarLinkCmdCategory.CONTROL,
+                        methodIndex = CarLinkMethodIndex.HEARTBEAT,
+                        body = hb,
+                        source = CarLinkSourceDevice.CAR,
+                        format = CarLinkDataFormat.PB3,
+                        messageType = CarLinkMessageType.RES,
+                    )
+                    synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
+                }
             }
             CarLinkMethodIndex.GET_PORT_REQUEST -> {
                 val req = CarLinkProtoCodec.decodeGetPortRequest(payload)
@@ -407,7 +450,7 @@ class CarLinkControlSession(
                         carBrMac = carBrMac,
                         screenWidth = displaySpec.widthPixels,
                         screenHeight = displaySpec.heightPixels,
-                        dpi = 160,
+                        dpi = 320,
                         videoDisplayWidth = displaySpec.widthPixels,
                         videoDisplayHeight = displaySpec.heightPixels,
                         fps = displaySpec.fps,
@@ -426,7 +469,7 @@ class CarLinkControlSession(
                         isSupportHomeKey = true,
                         isSupportBackKey = true,
                         isSupportHevc = hevcEnabled,
-                        realDpi = 160,
+                        realDpi = 320,
                     ),
                 )
                 val reply = CarLinkFrameCodec.buildFrame(
@@ -444,8 +487,10 @@ class CarLinkControlSession(
             CarLinkMethodIndex.NOTIFY_MUSIC_INFO -> {
                 val music = CarLinkProtoCodec.decodeNotifyMusicInfo(payload)
                 onMusicMetadata(music)
-                synchronized(output) {
-                    CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
+                if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
+                    synchronized(output) {
+                        CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
+                    }
                 }
             }
             CarLinkMethodIndex.DISCONNECT -> {

@@ -74,22 +74,27 @@ class CarLinkProtocolTest {
     }
 
     @Test
-    fun `bleSpec builds 16-byte carInfo1 and 18-byte directed carInfo1`() {
+    fun `bleSpec builds 16-byte carInfo1 16-byte padded carInfo2 and 18-byte directed carInfo1`() {
         val normal = CarLinkBleSpec.buildCarInfo1Payload(
             carIdHex12 = "02:AA:BB:CC:DD:EE",
             serialNumber = 7,
             modelIdHex8 = "00010002",
             vendorDataHex4 = "ABCD",
-            version = "1.0",
-            rssiThreshold = -60,
         )
         assertEquals(16, normal.size)
         assertEquals(1.toByte(), normal[0])
-        assertEquals(0.toByte(), normal[1])
+        assertEquals(5.toByte(), normal[1])
         assertEquals(7.toByte(), normal[2])
         assertEquals(0x02.toByte(), normal[3])
         assertEquals(0xEE.toByte(), normal[8])
-        assertEquals((-60).toByte(), normal[15])
+        assertEquals((-65).toByte(), normal[15])
+
+        val info2 = CarLinkBleSpec.buildCarInfo2Payload("TVPlay")
+        assertEquals(16, info2.size)
+        assertEquals('T'.code.toByte(), info2[0])
+        assertEquals('y'.code.toByte(), info2[5])
+        assertEquals(0.toByte(), info2[6])
+        assertEquals(0.toByte(), info2[15])
 
         val directed = CarLinkBleSpec.buildCarInfo1Payload(
             carIdHex12 = "02:AA:BB:CC:DD:EE",
@@ -233,14 +238,22 @@ class CarLinkProtocolTest {
             id = clientIdBytes,
             model = "vivo X100 Pro",
             userConfirmed = true,
-            workModes = 1,
+            workModes = 0x0D, // multi-bit mask: must select single bit 1 (WORK_MODE_NORMAL_CAST)
         )
-        val authResp = serverHandshake.processAuthRequest(authReq, dayOrNightMode = 2, screenInfo = "1920x1080")
+        val authResp = serverHandshake.processAuthRequest(authReq, dayOrNightMode = 2, screenInfo = "1920_1080_320")
         assertEquals(0, authResp.result)
+        assertEquals(1, authResp.workModes)
+        assertEquals(32, authResp.random.size)
         val serverSessionKey = serverHandshake.sessionKey
         assertNotNull(serverSessionKey)
         assertEquals(16, serverSessionKey!!.size)
         assertEquals(2120, CarLinkProtoCodec.DEFAULT_CAR_CERT_BYTES.size)
+        assertTrue(CarLinkProtoCodec.encodeNotifyCarToForeground(1_700_000_000_000L).isNotEmpty())
+        val ack = CarLinkFrameCodec.buildAckFrame(
+            CarLinkMessageHeader(bodyLength = 0, seqId = 77, methodIndex = 24),
+        )
+        assertEquals(CarLinkCmdCategory.ACK, ack.header.cmdCategory)
+        assertEquals(0.toShort(), ack.header.methodIndex)
 
         // Phase 3: Subsequent Quick connection for already-paired clientId -> must return result = 0
         val reconnectSession = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)

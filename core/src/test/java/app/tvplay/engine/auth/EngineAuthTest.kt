@@ -65,6 +65,26 @@ class EngineAuthTest {
         assertEquals(plaintext.size + 16, ciphertext.size)
         val decrypted = AirPlayCrypto.chachaOpen(key, nonce, ciphertext, aad)
         assertArrayEquals(plaintext, decrypted)
+
+        // Verify zero-copy slice decryption (chachaOpenInto) with non-zero offsets
+        val wire = ByteArray(12 + ciphertext.size + 8)
+        aad.copyInto(wire, 4, 0, minOf(aad.size, 8))
+        ciphertext.copyInto(wire, 12)
+        val output = ByteArray(12 + plaintext.size)
+        val written = AirPlayCrypto.chachaOpenInto(
+            key = key,
+            nonce = nonce,
+            ciphertextAndTag = wire,
+            ciphertextOffset = 12,
+            ciphertextLength = ciphertext.size,
+            aad = wire,
+            aadOffset = 4,
+            aadLength = minOf(aad.size, 8),
+            output = output,
+            outputOffset = 12,
+        )
+        assertEquals(plaintext.size, written)
+        assertArrayEquals(plaintext, output.copyOfRange(12, output.size))
     }
 
     @Test

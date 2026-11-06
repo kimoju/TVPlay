@@ -41,10 +41,20 @@ object TvDiagnosticsLogger {
     private val ringLock = Any()
     private val ringBuffer = ArrayDeque<String>(MAX_RING_LINES)
     @Volatile var activeSessionLog: SessionLogFile? = null
+    private val timeFormatThreadLocal = object : ThreadLocal<Pair<SimpleDateFormat, Date>>() {
+        override fun initialValue(): Pair<SimpleDateFormat, Date> =
+            SimpleDateFormat("HH:mm:ss.SSS", Locale.US) to Date()
+    }
+
+    internal fun formatTime(nowMillis: Long): String {
+        val (formatter, date) = timeFormatThreadLocal.get()!!
+        date.time = nowMillis
+        return formatter.format(date)
+    }
 
     fun record(message: String, nowMillis: Long = System.currentTimeMillis()) {
         val redacted = DiagnosticRedactor.redact(message) ?: return
-        val formatted = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(nowMillis))}  $redacted"
+        val formatted = "${formatTime(nowMillis)}  $redacted"
         synchronized(ringLock) {
             if (ringBuffer.size >= MAX_RING_LINES) ringBuffer.removeFirst()
             ringBuffer.addLast(formatted)
@@ -289,7 +299,7 @@ object AsyncDiagnosticLog {
     fun append(target: SessionLogFile?, message: String, nowMillis: Long = System.currentTimeMillis()) {
         if (target == null) return
         val safe = DiagnosticRedactor.redact(message) ?: return
-        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(nowMillis))
+        val timestamp = TvDiagnosticsLogger.formatTime(nowMillis)
         runCatching { writer.enqueue(Entry(target, "$timestamp  $safe")) }
     }
 

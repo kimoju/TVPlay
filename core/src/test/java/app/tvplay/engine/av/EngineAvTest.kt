@@ -1,10 +1,54 @@
 package app.tvplay.engine.av
 
+import app.tvplay.engine.protocol.rtsp.VideoCodec
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EngineAvTest {
+
+    @Test
+    fun toAnnexBInPlaceAndIsRandomAccessAndAdtsSliceOperateWithoutExtraCopies() {
+        val rawAvcc = byteArrayOf(
+            0, 0, 0, 4, 0x67, 0x42, 0x00, 0x1e, // SPS
+            0, 0, 0, 5, 0x65, 0x88.toByte(), 0x84.toByte(), 0x21, 0xa0.toByte(), // IDR slice
+        )
+        val expectedAnnexB = MediaCodecSupport.toAnnexB(rawAvcc.copyOf())
+        assertTrue(MediaCodecSupport.toAnnexBInPlace(rawAvcc))
+        assertArrayEquals(expectedAnnexB, rawAvcc)
+        assertTrue(MediaCodecSupport.isRandomAccess(rawAvcc, VideoCodec.H264))
+
+        val nonIdr = byteArrayOf(0, 0, 0, 1, 0x41, 0x9a.toByte(), 0x10, 0x22, 0x33, 0x44)
+        assertFalse(MediaCodecSupport.isRandomAccess(nonIdr, VideoCodec.H264))
+
+        val rtpWithAac = ByteArray(12 + 6) { (it + 1).toByte() }
+        val adtsFromCopy = MediaCodecSupport.adtsFrame(rtpWithAac.copyOfRange(12, rtpWithAac.size), 48_000, 2)
+        val adtsFromSlice = MediaCodecSupport.adtsFrame(rtpWithAac, 12, 6, 48_000, 2)
+        assertArrayEquals(adtsFromCopy, adtsFromSlice)
+    }
+
+    @Test
+    fun videoDecodeQueueTracksFrameCountAndBytesInO1AndTriggersResyncOnOverflow() {
+        val queue = VideoDecodeQueue(maxFrames = 3, maxBytes = 100)
+        queue.offer(VideoJob.Frame(ByteArray(30), receivedNs = 10L))
+        queue.offer(VideoJob.Frame(ByteArray(30), receivedNs = 20L))
+        assertEquals(2, queue.backlogAfterCurrent().pendingFrames)
+        assertEquals(20L, queue.backlogAfterCurrent().newestPendingReceivedNs)
+
+        val first = queue.poll(0)
+        assertTrue(first is VideoJob.Frame)
+        assertEquals(1, queue.backlogAfterCurrent().pendingFrames)
+
+        // Offering 3 more frames exceeds maxFrames=3 -> discards older frames and inserts Resync + new frame
+        queue.offer(VideoJob.Frame(ByteArray(30), receivedNs = 30L))
+        queue.offer(VideoJob.Frame(ByteArray(30), receivedNs = 40L))
+        queue.offer(VideoJob.Frame(ByteArray(30), receivedNs = 50L))
+        assertEquals(VideoJob.Resync, queue.poll(0))
+        val afterResync = queue.poll(0) as? VideoJob.Frame
+        assertEquals(50L, afterResync?.receivedNs)
+    }
 
     @Test
     fun displayMetricMathSnapsFpsAndPhysicalMillimeters() {

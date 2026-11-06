@@ -102,19 +102,22 @@ class ScreenStream(
     }
 
     private fun run(sock: Socket) {
+        runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY) }
         var failure: Throwable? = null
         val stats = StreamReceiveStats("video", onDiagnostic)
+        val header = ByteArray(HEADER_LEN)
+        val nonce = ByteArray(12)
         try {
-            val input = sock.getInputStream()
+            val input = java.io.BufferedInputStream(sock.getInputStream(), 64 * 1024)
             while (!closed.get()) {
                 stats.reading()
-                val header = readFully(input, HEADER_LEN) ?: break
+                if (!readFullyInto(input, header, 0, HEADER_LEN)) break
                 val bodySize = readU32Le(header, 0)
-                if (bodySize > MAX_BODY) break
+                if (bodySize < 0 || bodySize > MAX_BODY) break
                 val body = readFully(input, bodySize) ?: break
                 val arrivalNanos = System.nanoTime()
                 stats.received(HEADER_LEN + bodySize)
-                onMessage(header, body, stats, arrivalNanos)
+                onMessage(header, body, nonce, stats, arrivalNanos)
                 stats.processed()
             }
         } catch (error: Exception) {
@@ -127,12 +130,19 @@ class ScreenStream(
         }
     }
 
-    private fun onMessage(header: ByteArray, body: ByteArray, stats: StreamReceiveStats, arrivalNanos: Long) {
+    private fun onMessage(
+        header: ByteArray,
+        body: ByteArray,
+        nonce: ByteArray,
+        stats: StreamReceiveStats,
+        arrivalNanos: Long,
+    ) {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
                 if (body.size < ScreenCodec.TAG_SIZE) return
                 val start = System.nanoTime()
-                val payload = ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
+                AirPlayCrypto.writeNonce64(frameCounter.get(), nonce)
+                val payload = AirPlayCrypto.chachaOpen(key, nonce, body, header)
                 stats.decrypted(System.nanoTime() - start, body.size)
                 frameCounter.incrementAndGet()
                 if (firstFrameLogged.compareAndSet(false, true)) {
@@ -156,13 +166,17 @@ class ScreenStream(
     private fun readFully(input: InputStream, length: Int): ByteArray? {
         if (length < 0) return null
         val output = ByteArray(length)
-        var offset = 0
-        while (offset < length) {
-            val read = input.read(output, offset, length - offset)
-            if (read < 0) return null
-            offset += read
+        return if (readFullyInto(input, output, 0, length)) output else null
+    }
+
+    private fun readFullyInto(input: InputStream, target: ByteArray, offset: Int, length: Int): Boolean {
+        var readTotal = 0
+        while (readTotal < length) {
+            val read = input.read(target, offset + readTotal, length - readTotal)
+            if (read < 0) return false
+            readTotal += read
         }
-        return output
+        return true
     }
 
     private companion object {
@@ -348,33 +362,35 @@ class AudioStream(
     }
 
     private fun runData(socket: DatagramSocket, listener: Listener) {
-        runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+        runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
         val stats = StreamReceiveStats("audio type=$streamType", onDiagnostic)
         val buffer = ByteArray(DATAGRAM_BYTES)
+        val packet = DatagramPacket(buffer, buffer.size)
+        val nonce = ByteArray(12)
         try {
             while (!closed.get()) {
-                val packet = DatagramPacket(buffer, buffer.size)
+                packet.length = buffer.size
                 try {
                     stats.reading()
                     socket.receive(packet)
                 } catch (_: Exception) {
                     if (closed.get()) return else continue
                 }
+                val wireSize = packet.length
                 stats.received(
-                    size = packet.length,
-                    sequence = if (packet.length >= RTP_HEADER_LEN) {
+                    size = wireSize,
+                    sequence = if (wireSize >= RTP_HEADER_LEN) {
                         ((buffer[2].toInt() and 0xff) shl 8) or (buffer[3].toInt() and 0xff)
                     } else null,
-                    timestamp = if (packet.length >= RTP_HEADER_LEN) readU32Be(buffer, 4) else null,
+                    timestamp = if (wireSize >= RTP_HEADER_LEN) readU32Be(buffer, 4) else null,
                 )
-                val wire = packet.data.copyOf(packet.length)
                 val packetNumber = receivedPackets.incrementAndGet()
-                if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {
+                if (wireSize < RTP_HEADER_LEN + TAIL_LEN) {
                     if (packetNumber == 1) {
-                        Log.w(TAG, "audio stream type=$streamType short packet bytes=${wire.size}")
+                        Log.w(TAG, "audio stream type=$streamType short packet bytes=$wireSize")
                     }
                     listener.onPacket(
-                        wire,
+                        buffer.copyOf(wireSize),
                         null,
                         null,
                         IOException("audio packet shorter than RTP header plus tail"),
@@ -383,17 +399,30 @@ class AudioStream(
                     continue
                 }
 
-                val aad = wire.copyOfRange(4, RTP_HEADER_LEN)
-                val sealedEnd = wire.size - NONCE_LEN
-                val sealed = wire.copyOfRange(RTP_HEADER_LEN, sealedEnd)
-                val shortNonce = wire.copyOfRange(sealedEnd, wire.size)
-                val nonce = ByteArray(12).also { shortNonce.copyInto(it, 4) }
-                val sample = readU32Be(wire, 4)
+                val sealedEnd = wireSize - NONCE_LEN
+                val sealedLength = sealedEnd - RTP_HEADER_LEN
+                val payloadLength = sealedLength - TAG_LEN
+                buffer.copyInto(nonce, 4, sealedEnd, wireSize)
+                val sample = readU32Be(buffer, 4)
+                val rtp = ByteArray(RTP_HEADER_LEN + payloadLength)
+                buffer.copyInto(rtp, 0, 0, RTP_HEADER_LEN)
 
-                val payload = try {
-                    AirPlayCrypto.chachaOpen(key, nonce, sealed, aad)
+                try {
+                    AirPlayCrypto.chachaOpenInto(
+                        key = key,
+                        nonce = nonce,
+                        ciphertextAndTag = buffer,
+                        ciphertextOffset = RTP_HEADER_LEN,
+                        ciphertextLength = sealedLength,
+                        aad = buffer,
+                        aadOffset = 4,
+                        aadLength = RTP_HEADER_LEN - 4,
+                        output = rtp,
+                        outputOffset = RTP_HEADER_LEN,
+                    )
                 } catch (error: Exception) {
                     val failureNumber = authenticationFailures.incrementAndGet()
+                    val wire = buffer.copyOf(wireSize)
                     if (failureNumber == 1) {
                         Log.w(
                             TAG,
@@ -405,14 +434,13 @@ class AudioStream(
                     stats.processed()
                     continue
                 }
-                val rtp = wire.copyOf(RTP_HEADER_LEN) + payload
                 val decryptedNumber = decryptedPackets.incrementAndGet()
                 if (decryptedNumber <= FIRST_PACKET_LOG_COUNT) {
                     Log.i(
                         TAG,
                         "audio stream type=$streamType packet=$decryptedNumber sample=$sample " +
-                            "wireBytes=${wire.size} payloadBytes=${payload.size} " +
-                            "payloadHead=${payload.copyOf(minOf(payload.size, 16)).toHexString()}",
+                            "wireBytes=$wireSize payloadBytes=$payloadLength " +
+                            "payloadHead=${rtp.copyOfRange(RTP_HEADER_LEN, minOf(rtp.size, RTP_HEADER_LEN + 16)).toHexString()}",
                     )
                 } else if (decryptedNumber % PACKET_LOG_INTERVAL == 0) {
                     Log.i(
@@ -421,7 +449,6 @@ class AudioStream(
                             "authFailures=${authenticationFailures.get()}",
                     )
                 }
-                listener.onPacket(wire, rtp, sample, null)
                 if (!started) {
                     started = true
                     listener.onStarted(sample)
@@ -436,9 +463,11 @@ class AudioStream(
 
     private fun runControl(socket: DatagramSocket) {
         val buffer = ByteArray(DATAGRAM_BYTES)
+        val packet = DatagramPacket(buffer, buffer.size)
         while (!closed.get()) {
+            packet.length = buffer.size
             try {
-                socket.receive(DatagramPacket(buffer, buffer.size))
+                socket.receive(packet)
             } catch (_: Exception) {
                 if (closed.get()) return
             }
@@ -825,12 +854,28 @@ class BufferedAudioStream(
             if (body.size < RTP_HEADER + TAG_BYTES + NONCE_BYTES) return null
             if ((body[0].toInt() and 0xff) != 0x80) return null
             val sealedEnd = body.size - NONCE_BYTES
+            val sealedLength = sealedEnd - RTP_HEADER
+            val payloadLength = sealedLength - TAG_BYTES
             val nonce = ByteArray(12).also { body.copyInto(it, 4, sealedEnd, body.size) }
-            val payload = runCatching {
-                AirPlayCrypto.chachaOpen(key, nonce, body.copyOfRange(RTP_HEADER, sealedEnd), body.copyOfRange(4, RTP_HEADER))
-            }.getOrNull() ?: return null
+            val rtp = ByteArray(RTP_HEADER + payloadLength)
+            body.copyInto(rtp, 0, 0, RTP_HEADER)
+            val opened = runCatching {
+                AirPlayCrypto.chachaOpenInto(
+                    key = key,
+                    nonce = nonce,
+                    ciphertextAndTag = body,
+                    ciphertextOffset = RTP_HEADER,
+                    ciphertextLength = sealedLength,
+                    aad = body,
+                    aadOffset = 4,
+                    aadLength = RTP_HEADER - 4,
+                    output = rtp,
+                    outputOffset = RTP_HEADER,
+                )
+            }.isSuccess
+            if (!opened) return null
             val sequence = ((body[2].toInt() and 0xff) shl 8) or (body[3].toInt() and 0xff)
-            return Frame(sequence, u32(body, 4), body.copyOf(RTP_HEADER) + payload)
+            return Frame(sequence, u32(body, 4), rtp)
         }
 
         internal fun anchorPlist(rtp: Long, ntp: BigInteger, rate: Int): Map<String, Any?> = linkedMapOf(
@@ -2059,25 +2104,42 @@ class IapTunnel(
     }
 
     private fun decryptFrames(buffer: ByteArray): Pair<ByteArray, ByteArray> {
-        val output = ArrayList<ByteArray>()
+        var scanOffset = 0
+        var totalPlainBytes = 0
+        while (buffer.size - scanOffset >= FRAME_HEADER_LEN) {
+            val length = readU16Le(buffer, scanOffset)
+            val frameLength = FRAME_HEADER_LEN + length + TAG_SIZE
+            if (buffer.size - scanOffset < frameLength) break
+            totalPlainBytes += length
+            scanOffset += frameLength
+        }
+        if (scanOffset == 0) return ByteArray(0) to buffer
+        val plaintext = ByteArray(totalPlainBytes)
+        val nonce = ByteArray(12)
         var offset = 0
-        while (buffer.size - offset >= FRAME_HEADER_LEN) {
+        var plainOffset = 0
+        while (offset < scanOffset) {
             val length = readU16Le(buffer, offset)
             val frameLength = FRAME_HEADER_LEN + length + TAG_SIZE
-            if (buffer.size - offset < frameLength) break
-            val aad = buffer.copyOfRange(offset, offset + FRAME_HEADER_LEN)
-            val sealed = buffer.copyOfRange(offset + FRAME_HEADER_LEN, offset + frameLength)
-            val plain = AirPlayCrypto.chachaOpen(
-                readKey,
-                AirPlayCrypto.nonce64(readCounter.get()),
-                sealed,
-                aad,
+            AirPlayCrypto.writeNonce64(readCounter.get(), nonce)
+            val written = AirPlayCrypto.chachaOpenInto(
+                key = readKey,
+                nonce = nonce,
+                ciphertextAndTag = buffer,
+                ciphertextOffset = offset + FRAME_HEADER_LEN,
+                ciphertextLength = length + TAG_SIZE,
+                aad = buffer,
+                aadOffset = offset,
+                aadLength = FRAME_HEADER_LEN,
+                output = plaintext,
+                outputOffset = plainOffset,
             )
+            plainOffset += written
             readCounter.incrementAndGet()
-            output.add(plain)
             offset += frameLength
         }
-        return concatBytes(*output.toTypedArray()) to buffer.copyOfRange(offset, buffer.size)
+        val out = if (plainOffset == plaintext.size) plaintext else plaintext.copyOf(plainOffset)
+        return out to buffer.copyOfRange(offset, buffer.size)
     }
 
     private fun parsePackages(buffer: ByteArray): ByteArray {

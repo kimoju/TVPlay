@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /** CarPlay's main screen stream type. */
@@ -67,6 +68,8 @@ internal class VideoDecodeQueue(
     private val maxBytes: Int = 8 * 1024 * 1024,
 ) {
     private val jobs = LinkedBlockingQueue<VideoJob>()
+    private val queuedFrames = AtomicInteger(0)
+    private val queuedFrameBytes = AtomicLong(0L)
 
     data class Backlog(val pendingFrames: Int, val newestPendingReceivedNs: Long?)
 
@@ -86,13 +89,14 @@ internal class VideoDecodeQueue(
     @Synchronized
     fun offer(job: VideoJob) {
         if (job is VideoJob.Frame) {
-            val frames = jobs.filterIsInstance<VideoJob.Frame>()
-            if (frames.size >= maxFrames || frames.sumOf { it.nalus.size.toLong() } + job.nalus.size > maxBytes) {
+            if (queuedFrames.get() >= maxFrames || queuedFrameBytes.get() + job.nalus.size > maxBytes) {
                 discardFrames()
                 jobs.offer(VideoJob.Resync)
             }
             // A single oversized frame is also a lost reference chain.
             if (job.nalus.size > maxBytes) return
+            queuedFrames.incrementAndGet()
+            queuedFrameBytes.addAndGet(job.nalus.size.toLong())
         }
         jobs.offer(job)
     }
@@ -102,8 +106,15 @@ internal class VideoDecodeQueue(
     fun discardCurrentChain() {
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
-            when (iterator.next()) {
-                is VideoJob.Frame, VideoJob.Resync -> iterator.remove()
+            val next = iterator.next()
+            when (next) {
+                is VideoJob.Frame -> {
+                    if (jobs.remove(next)) {
+                        queuedFrames.decrementAndGet()
+                        queuedFrameBytes.addAndGet(-next.nalus.size.toLong())
+                    }
+                }
+                VideoJob.Resync -> jobs.remove(next)
                 else -> return
             }
         }
@@ -111,14 +122,39 @@ internal class VideoDecodeQueue(
 
     @Synchronized
     fun discardFrames() {
-        jobs.removeIf { it is VideoJob.Frame || it is VideoJob.Resync }
+        val iterator = jobs.iterator()
+        while (iterator.hasNext()) {
+            val next = iterator.next()
+            if (next is VideoJob.Frame) {
+                if (jobs.remove(next)) {
+                    queuedFrames.decrementAndGet()
+                    queuedFrameBytes.addAndGet(-next.nalus.size.toLong())
+                }
+            } else if (next === VideoJob.Resync) {
+                jobs.remove(next)
+            }
+        }
     }
 
-    fun poll(timeoutMillis: Long): VideoJob? = jobs.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+    fun poll(timeoutMillis: Long): VideoJob? =
+        jobs.poll(timeoutMillis, TimeUnit.MILLISECONDS)?.also { job ->
+            if (job is VideoJob.Frame) {
+                queuedFrames.decrementAndGet()
+                queuedFrameBytes.addAndGet(-job.nalus.size.toLong())
+            }
+        }
 
     /** Removes and returns every queued job, for a worker that is shutting down. */
     @Synchronized
-    fun drain(): List<VideoJob> = ArrayList<VideoJob>().also { jobs.drainTo(it) }
+    fun drain(): List<VideoJob> = ArrayList<VideoJob>().also { drained ->
+        jobs.drainTo(drained)
+        for (job in drained) {
+            if (job is VideoJob.Frame) {
+                queuedFrames.decrementAndGet()
+                queuedFrameBytes.addAndGet(-job.nalus.size.toLong())
+            }
+        }
+    }
 }
 
 /** Drain output while waiting for input: full output buffers can otherwise starve input forever. Video and audio decoders share it. */
@@ -273,7 +309,10 @@ internal class FramePacer(
     private val resetNanos: Long = 500_000_000L,
     private val maxEarlyNanos: Long = 100_000_000L,
 ) {
-    private val residuals = ArrayDeque<Long>()
+    private val residuals = LongArray(window)
+    private val scratch = LongArray(window)
+    private var count = 0
+    private var next = 0
     private var frames = 0
     private var candidate = 0L
     private var offset = Long.MIN_VALUE
@@ -285,12 +324,14 @@ internal class FramePacer(
      * arrival), so the frame is shown as soon as it is decoded.
      */
     fun localTime(senderNanos: Long, arrivalNanos: Long): Long {
-        residuals.addLast(arrivalNanos - senderNanos)
-        if (residuals.size > window) residuals.removeFirst()
+        residuals[next] = arrivalNanos - senderNanos
+        next = (next + 1) % window
+        if (count < window) count++
         val warmingUp = frames < refreshEvery
         if (warmingUp || frames % refreshEvery == 0) {
-            val sorted = residuals.toLongArray().also { it.sort() }
-            candidate = sorted[(sorted.size - 1) * percentile / 100]
+            residuals.copyInto(scratch, 0, 0, count)
+            java.util.Arrays.sort(scratch, 0, count)
+            candidate = scratch[(count - 1) * percentile / 100]
         }
         frames++
         if (offset == Long.MIN_VALUE || warmingUp || candidate - offset > resetNanos || offset - candidate > maxEarlyNanos) {
@@ -324,6 +365,7 @@ internal class PacingDelay(
     private val fallPerFrame: Long = 500_000L,
 ) {
     private val needs = LongArray(window)
+    private val scratch = LongArray(window)
     private var count = 0
     private var next = 0
     private var frames = 0
@@ -338,8 +380,9 @@ internal class PacingDelay(
         next = (next + 1) % window
         if (count < window) count++
         if (++frames % refreshEvery == 0) {
-            val sorted = needs.copyOf(count).also { it.sort() }
-            goal = (sorted[(count - 1) * percentile / 100] + marginNanos).coerceIn(minNanos, maxNanos)
+            needs.copyInto(scratch, 0, 0, count)
+            java.util.Arrays.sort(scratch, 0, count)
+            goal = (scratch[(count - 1) * percentile / 100] + marginNanos).coerceIn(minNanos, maxNanos)
         }
         nanos += (goal - nanos).coerceIn(-fallPerFrame, risePerFrame)
     }
@@ -547,14 +590,56 @@ object MediaCodecSupport {
         return output
     }
 
+    /**
+     * Converts CarPlay's length-prefixed NAL units into an Annex B byte stream in place,
+     * avoiding a per-frame buffer allocation and full-frame copy on the decode worker.
+     * Returns false when [lengthPrefixed] is empty or malformed.
+     */
+    fun toAnnexBInPlace(lengthPrefixed: ByteArray): Boolean {
+        if (lengthPrefixed.size < 4) return false
+        if (lengthPrefixed[0] == 0.toByte() &&
+            lengthPrefixed[1] == 0.toByte() &&
+            lengthPrefixed[2] == 0.toByte() &&
+            lengthPrefixed[3] == 1.toByte()
+        ) {
+            return true
+        }
+
+        var inputOffset = 0
+        while (inputOffset + 4 <= lengthPrefixed.size) {
+            val length = readU32Be(lengthPrefixed, inputOffset)
+            inputOffset += 4
+            if (length <= 0 || length > lengthPrefixed.size - inputOffset) return false
+            inputOffset += length
+        }
+        if (inputOffset != lengthPrefixed.size) return false
+
+        var offset = 0
+        while (offset + 4 <= lengthPrefixed.size) {
+            val length = readU32Be(lengthPrefixed, offset)
+            lengthPrefixed[offset] = 0
+            lengthPrefixed[offset + 1] = 0
+            lengthPrefixed[offset + 2] = 0
+            lengthPrefixed[offset + 3] = 1
+            offset += 4 + length
+        }
+        return true
+    }
+
     /** IDR (AVC) or IRAP (HEVC) starts an independently decodable reference chain. */
     fun isRandomAccess(annexB: ByteArray, codec: VideoCodec): Boolean {
         var cursor = 0
-        while (cursor + 3 < annexB.size) {
+        val limit = annexB.size - 3
+        while (cursor < limit) {
+            val third = annexB[cursor + 2].toInt()
+            if (third > 1 || third < 0) {
+                cursor += 3
+                continue
+            }
             val prefix = when {
                 annexB[cursor] != 0.toByte() || annexB[cursor + 1] != 0.toByte() -> 0
-                annexB[cursor + 2] == 1.toByte() -> 3
-                annexB[cursor + 2] == 0.toByte() && annexB[cursor + 3] == 1.toByte() -> 4
+                third == 1 -> 3
+                third == 0 && annexB[cursor + 3] == 1.toByte() -> 4
                 else -> 0
             }
             if (prefix > 0 && cursor + prefix < annexB.size) {
@@ -564,25 +649,38 @@ object MediaCodecSupport {
                     (header shr 1) and 63 in 16..21
                 ) return true
                 cursor += prefix
-            } else cursor++
+            } else {
+                cursor++
+            }
         }
         return false
     }
 
     /** Wraps one raw AAC-LC access unit in an MPEG-4 ADTS frame. */
-    fun adtsFrame(accessUnit: ByteArray, sampleRate: Int, channels: Int): ByteArray {
+    fun adtsFrame(accessUnit: ByteArray, sampleRate: Int, channels: Int): ByteArray =
+        adtsFrame(accessUnit, 0, accessUnit.size, sampleRate, channels)
+
+    /** Wraps one raw AAC-LC access unit slice `[offset, offset + length)` in an MPEG-4 ADTS frame in a single allocation. */
+    fun adtsFrame(
+        source: ByteArray,
+        offset: Int,
+        length: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): ByteArray {
         val frequencyIndex = aacFrequencyIndex(sampleRate)
         val channelConfig = channels.coerceIn(1, 7)
-        val frameLength = accessUnit.size + 7
-        val header = ByteArray(7)
-        header[0] = 0xff.toByte()
-        header[1] = 0xf1.toByte()
-        header[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
-        header[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
-        header[4] = ((frameLength ushr 3) and 0xff).toByte()
-        header[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
-        header[6] = 0xfc.toByte()
-        return header + accessUnit
+        val frameLength = length + 7
+        val frame = ByteArray(frameLength)
+        frame[0] = 0xff.toByte()
+        frame[1] = 0xf1.toByte()
+        frame[2] = ((1 shl 6) or (frequencyIndex shl 2) or (channelConfig ushr 2)).toByte()
+        frame[3] = (((channelConfig and 0x3) shl 6) or (frameLength ushr 11)).toByte()
+        frame[4] = ((frameLength ushr 3) and 0xff).toByte()
+        frame[5] = (((frameLength and 0x7) shl 5) or 0x1f).toByte()
+        frame[6] = 0xfc.toByte()
+        source.copyInto(frame, 7, offset, offset + length)
+        return frame
     }
 
     /** Extracts one RFC 3640 AAC access unit from an RTP payload. */
@@ -1217,6 +1315,7 @@ class HardwareVideoDecoder internal constructor(
     }
 
     private fun run() {
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) }
         try {
             while (running) {
                 val job = queue.poll(5)
@@ -1674,14 +1773,16 @@ class HardwareVideoDecoder internal constructor(
         lastConfig?.let(::configureDecoder)
     }
 
+    private val workerBufferInfo = MediaCodec.BufferInfo()
+
     private fun feed(nalus: ByteArray, receivedNs: Long, presentNs: Long = 0L) {
-        val annexB = MediaCodecSupport.toAnnexB(nalus)
         val config = lastConfig ?: return
         if (outputSurface == null) return
-        if (annexB.isEmpty()) {
+        if (!MediaCodecSupport.toAnnexBInPlace(nalus)) {
             recover("invalid video access unit")
             return
         }
+        val annexB = nalus
         if (!referenceChain.accepts(annexB, config.codec)) {
             requestKeyFrameIfDue()
             return
@@ -1736,7 +1837,9 @@ class HardwareVideoDecoder internal constructor(
                 if (presentNs > 0) {
                     // A gap between consecutive iPhone frame times, not a decoder backlog, marks a pause.
                     if (lastQueuedLocalNanos != 0L && presentNs - lastQueuedLocalNanos > SENDER_PAUSE_NS) {
-                        recentPacedSlots.forEach { if (it >= 0) queuedBeforePause[it] = true }
+                        for (slotIndex in recentPacedSlots) {
+                            if (slotIndex >= 0) queuedBeforePause[slotIndex] = true
+                        }
                     }
                     lastQueuedLocalNanos = presentNs
                     recentPacedSlots.copyInto(recentPacedSlots, 1, 0, PAUSE_HELD_FRAMES - 1)
@@ -1771,11 +1874,15 @@ class HardwareVideoDecoder internal constructor(
         requestKeyFrame()
     }
 
-    private fun queuedSlotOf(presentationUs: Long): Int =
-        queuedPresentationUs.indices.firstOrNull { queuedPresentationUs[it] == presentationUs } ?: -1
+    private fun queuedSlotOf(presentationUs: Long): Int {
+        for (index in queuedPresentationUs.indices) {
+            if (queuedPresentationUs[index] == presentationUs) return index
+        }
+        return -1
+    }
 
     private fun drainOutput(codec: MediaCodec) {
-        val info = MediaCodec.BufferInfo()
+        val info = workerBufferInfo
         while (running) {
             if (!handleOutput(codec, codec.dequeueOutputBuffer(info, 0), info)) return
         }

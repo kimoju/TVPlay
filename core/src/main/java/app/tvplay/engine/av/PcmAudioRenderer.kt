@@ -1005,38 +1005,39 @@ internal class PcmAudioRenderer(
             .putLong(OPUS_SEEK_PRE_ROLL_NANOS)
             .array()
 
+    private val outputBufferInfo = MediaCodec.BufferInfo()
+
     private fun handle(packet: AudioPacket) {
         if (queue.isEmpty()) {
             droppedPacketsLogged = false
         }
         val rtp = packet.rtp
+        val payloadLength = rtp.size - 12
+        if (payloadLength <= 0) return
         val timestampUs = sampleTimestampUs(packet.sample)
         when (format.codec) {
-            AudioCodecKind.LPCM -> writePcm(byteSwapS16(rtp.copyOfRange(12, rtp.size)))
+            AudioCodecKind.LPCM -> {
+                byteSwapS16(rtp, 12, payloadLength)
+                writePcm(rtp, 12, payloadLength)
+            }
             AudioCodecKind.AAC_LC -> {
-                val accessUnit = rtp.copyOfRange(12, rtp.size)
-                if (accessUnit.isNotEmpty()) {
-                    if (!firstAacPayloadLogged) {
-                        firstAacPayloadLogged = true
-                        Log.i(TAG, "audio AAC access unit bytes=${accessUnit.size}")
-                    }
-                    feedCodec(
-                        MediaCodecSupport.adtsFrame(accessUnit, format.sampleRate, format.channels),
-                        timestampUs,
-                    )
+                if (!firstAacPayloadLogged) {
+                    firstAacPayloadLogged = true
+                    Log.i(TAG, "audio AAC access unit bytes=$payloadLength")
                 }
+                val adts = MediaCodecSupport.adtsFrame(rtp, 12, payloadLength, format.sampleRate, format.channels)
+                feedCodec(adts, 0, adts.size, timestampUs)
             }
             AudioCodecKind.OPUS -> {
-                val accessUnit = rtp.copyOfRange(12, rtp.size)
-                if (accessUnit.size < MIN_OPUS_PACKET_BYTES) {
+                if (payloadLength < MIN_OPUS_PACKET_BYTES) {
                     shortOpusPackets++
                     if (!firstOpusShortPacketLogged) {
                         firstOpusShortPacketLogged = true
-                        Log.i(TAG, "audio Opus skipping short packet bytes=${accessUnit.size}")
+                        Log.i(TAG, "audio Opus skipping short packet bytes=$payloadLength")
                     }
                     return
                 }
-                feedCodec(accessUnit, timestampUs)
+                feedCodec(rtp, 12, payloadLength, timestampUs)
             }
         }
     }
@@ -1044,7 +1045,7 @@ internal class PcmAudioRenderer(
     private fun sampleTimestampUs(sample: Int): Long =
         (sample.toLong() and 0xffff_ffffL) * 1_000_000L / format.sampleRate
 
-    private fun feedCodec(payload: ByteArray, presentationTimeUs: Long) {
+    private fun feedCodec(payload: ByteArray, offset: Int, length: Int, presentationTimeUs: Long) {
         val codec = codec ?: run { decoderUnavailablePackets++; return }
         diagnosticStage = "decoder-input"
         val index = DecoderInputPump.acquire(
@@ -1066,13 +1067,13 @@ internal class PcmAudioRenderer(
         }
         val input = codec.getInputBuffer(index) ?: return
         input.clear()
-        if (payload.size <= input.remaining()) {
-            input.put(payload)
-            codec.queueInputBuffer(index, 0, payload.size, presentationTimeUs, 0)
+        if (length <= input.remaining()) {
+            input.put(payload, offset, length)
+            codec.queueInputBuffer(index, 0, length, presentationTimeUs, 0)
             inputQueued++
             if (!firstInputQueuedLogged) {
                 firstInputQueuedLogged = true
-                Log.i(TAG, "audio decoder first input codec=${format.codec} bytes=${payload.size}")
+                Log.i(TAG, "audio decoder first input codec=${format.codec} bytes=$length")
             }
         } else {
             codec.queueInputBuffer(index, 0, 0, 0, 0)
@@ -1083,7 +1084,7 @@ internal class PcmAudioRenderer(
 
     private fun drainCodec(codec: MediaCodec) {
         diagnosticStage = "decoder-output"
-        val info = MediaCodec.BufferInfo()
+        val info = outputBufferInfo
         while (running) {
             diagnosticStage = "decoder-output"
             val index = codec.dequeueOutputBuffer(info, 0)
@@ -1354,11 +1355,14 @@ internal class PcmAudioRenderer(
         }
     }
 
-    private fun byteSwapS16(source: ByteArray): ByteArray {
-        for (index in 0 until source.size - 1 step 2) {
+    private fun byteSwapS16(source: ByteArray, offset: Int = 0, length: Int = source.size - offset): ByteArray {
+        val end = offset + length - 1
+        var index = offset
+        while (index < end) {
             val tmp = source[index]
             source[index] = source[index + 1]
             source[index + 1] = tmp
+            index += 2
         }
         return source
     }

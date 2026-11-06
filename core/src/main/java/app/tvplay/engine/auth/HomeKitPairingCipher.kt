@@ -82,6 +82,40 @@ object AirPlayCrypto {
         var input: ByteBuffer = ByteBuffer.allocateDirect(0)
         var output: ByteBuffer = ByteBuffer.allocateDirect(0)
         var implementation: String = cipher.provider.name
+        private var cachedKeyBytes: ByteArray? = null
+        private var cachedKeySpec: SecretKeySpec? = null
+
+        fun keySpec(key: ByteArray): SecretKeySpec {
+            val existingBytes = cachedKeyBytes
+            val existingSpec = cachedKeySpec
+            if (existingSpec != null && existingBytes != null && existingBytes.contentEquals(key)) {
+                return existingSpec
+            }
+            val keyCopy = key.copyOf()
+            val spec = SecretKeySpec(keyCopy, "ChaCha20")
+            cachedKeyBytes = keyCopy
+            cachedKeySpec = spec
+            return spec
+        }
+    }
+
+    private class BcChachaState {
+        val cipher = ChaCha20Poly1305()
+        private var cachedKeyBytes: ByteArray? = null
+        private var cachedKeyParam: KeyParameter? = null
+
+        fun keyParam(key: ByteArray): KeyParameter {
+            val existingBytes = cachedKeyBytes
+            val existingParam = cachedKeyParam
+            if (existingParam != null && existingBytes != null && existingBytes.contentEquals(key)) {
+                return existingParam
+            }
+            val keyCopy = key.copyOf()
+            val param = KeyParameter(keyCopy)
+            cachedKeyBytes = keyCopy
+            cachedKeyParam = param
+            return param
+        }
     }
 
     // ThreadLocal.withInitial needs API 26.
@@ -89,6 +123,10 @@ object AirPlayCrypto {
         override fun initialValue(): PlatformChacha? =
             PLATFORM_CHACHA_NAMES.firstNotNullOfOrNull { runCatching { Cipher.getInstance(it) }.getOrNull() }
                 ?.let(::PlatformChacha)
+    }
+
+    private val bcState = object : ThreadLocal<BcChachaState>() {
+        override fun initialValue(): BcChachaState = BcChachaState()
     }
 
     /** Implementation used by this thread's last successful operation, for diagnostics. */
@@ -183,6 +221,49 @@ object AirPlayCrypto {
         }
 
     /**
+     * Decrypts a slice `[ciphertextOffset, ciphertextOffset + ciphertextLength)` with AAD slice
+     * `[aadOffset, aadOffset + aadLength)` directly into `output[outputOffset..]`, avoiding intermediate
+     * byte-array allocations on hot audio/control packet paths.
+     */
+    fun chachaOpenInto(
+        key: ByteArray,
+        nonce: ByteArray,
+        ciphertextAndTag: ByteArray,
+        ciphertextOffset: Int,
+        ciphertextLength: Int,
+        aad: ByteArray,
+        aadOffset: Int,
+        aadLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+    ): Int = platformChachaInto(
+        Cipher.DECRYPT_MODE,
+        key,
+        nonce,
+        ciphertextAndTag,
+        ciphertextOffset,
+        ciphertextLength,
+        aad,
+        aadOffset,
+        aadLength,
+        output,
+        outputOffset,
+    ) ?: chachaOpenBouncyCastleInto(
+        key,
+        nonce,
+        ciphertextAndTag,
+        ciphertextOffset,
+        ciphertextLength,
+        aad,
+        aadOffset,
+        aadLength,
+        output,
+        outputOffset,
+    ).also {
+        platformState.get()?.implementation = "BouncyCastle"
+    }
+
+    /**
      * Null when the platform has no ChaCha20-Poly1305 or refuses this use of it (a desktop JDK rejects
      * reusing a key and nonce for encryption, which tests do); a failed tag still throws.
      */
@@ -197,7 +278,7 @@ object AirPlayCrypto {
         val state = platformState.get() ?: return null
         return try {
             val cipher = state.cipher
-            cipher.init(mode, SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce))
+            cipher.init(mode, state.keySpec(key), IvParameterSpec(nonce))
             if (aad.isNotEmpty()) cipher.updateAAD(aad)
             if (!useDirectBuffers) return cipher.doFinal(input).also { state.implementation = cipher.provider.name }
             val source = sized(state.input, input.size).also {
@@ -210,6 +291,34 @@ object AirPlayCrypto {
             val written = cipher.doFinal(source, target)
             target.flip()
             ByteArray(written).also { target.get(it); state.implementation = cipher.provider.name }
+        } catch (failure: AEADBadTagException) {
+            throw failure
+        } catch (_: GeneralSecurityException) {
+            null
+        }
+    }
+
+    internal fun platformChachaInto(
+        mode: Int,
+        key: ByteArray,
+        nonce: ByteArray,
+        input: ByteArray,
+        inputOffset: Int,
+        inputLength: Int,
+        aad: ByteArray,
+        aadOffset: Int,
+        aadLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+    ): Int? {
+        val state = platformState.get() ?: return null
+        return try {
+            val cipher = state.cipher
+            cipher.init(mode, state.keySpec(key), IvParameterSpec(nonce))
+            if (aadLength > 0) cipher.updateAAD(aad, aadOffset, aadLength)
+            cipher.doFinal(input, inputOffset, inputLength, output, outputOffset).also {
+                state.implementation = cipher.provider.name
+            }
         } catch (failure: AEADBadTagException) {
             throw failure
         } catch (_: GeneralSecurityException) {
@@ -230,8 +339,9 @@ object AirPlayCrypto {
         plaintext: ByteArray,
         aad: ByteArray = ByteArray(0),
     ): ByteArray {
-        val cipher = ChaCha20Poly1305()
-        cipher.init(true, AEADParameters(KeyParameter(key), MAC_BITS, nonce, aad))
+        val state = bcState.get()!!
+        val cipher = state.cipher
+        cipher.init(true, AEADParameters(state.keyParam(key), MAC_BITS, nonce, aad))
         val output = ByteArray(cipher.getOutputSize(plaintext.size))
         val length = cipher.processBytes(plaintext, 0, plaintext.size, output, 0)
         cipher.doFinal(output, length)
@@ -244,8 +354,9 @@ object AirPlayCrypto {
         ciphertextAndTag: ByteArray,
         aad: ByteArray = ByteArray(0),
     ): ByteArray {
-        val cipher = ChaCha20Poly1305()
-        cipher.init(false, AEADParameters(KeyParameter(key), MAC_BITS, nonce, aad))
+        val state = bcState.get()!!
+        val cipher = state.cipher
+        cipher.init(false, AEADParameters(state.keyParam(key), MAC_BITS, nonce, aad))
         val output = ByteArray(cipher.getOutputSize(ciphertextAndTag.size))
         val processed = cipher.processBytes(ciphertextAndTag, 0, ciphertextAndTag.size, output, 0)
         val finalized = cipher.doFinal(output, processed)
@@ -253,15 +364,41 @@ object AirPlayCrypto {
         return if (outputLength == output.size) output else output.copyOf(outputLength)
     }
 
+    internal fun chachaOpenBouncyCastleInto(
+        key: ByteArray,
+        nonce: ByteArray,
+        ciphertextAndTag: ByteArray,
+        ciphertextOffset: Int,
+        ciphertextLength: Int,
+        aad: ByteArray,
+        aadOffset: Int,
+        aadLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+    ): Int {
+        val state = bcState.get()!!
+        val cipher = state.cipher
+        cipher.init(false, AEADParameters(state.keyParam(key), MAC_BITS, nonce))
+        if (aadLength > 0) cipher.processAADBytes(aad, aadOffset, aadLength)
+        val processed = cipher.processBytes(ciphertextAndTag, ciphertextOffset, ciphertextLength, output, outputOffset)
+        val finalized = cipher.doFinal(output, outputOffset + processed)
+        return processed + finalized
+    }
+
     /** 12-byte nonce: four zero bytes followed by an eight-byte little-endian counter. */
     fun nonce64(counter: Long): ByteArray {
         val nonce = ByteArray(NONCE_SIZE)
+        writeNonce64(counter, nonce)
+        return nonce
+    }
+
+    /** Writes an eight-byte little-endian counter into [target] at [offset] (default 4, after 4 zero bytes). */
+    fun writeNonce64(counter: Long, target: ByteArray, offset: Int = 4) {
         var value = counter
-        for (index in 4 until NONCE_SIZE) {
-            nonce[index] = value.toByte()
+        for (index in 0 until 8) {
+            target[offset + index] = value.toByte()
             value = value ushr 8
         }
-        return nonce
     }
 
     /** 12-byte (96-bit) nonce from up to 8 label bytes placed after four zero bytes. */
@@ -774,6 +911,7 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
 
     private var readCounter = 0L
     private var writeCounter = 0L
+    private val readNonce = ByteArray(12)
 
     internal fun currentWriteCounter(): Long = writeCounter
 
@@ -782,19 +920,43 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
     }
 
     fun decrypt(buffer: ByteArray): Decrypted {
-        val output = ArrayList<ByteArray>()
+        var scanOffset = 0
+        var totalPlainBytes = 0
+        while (buffer.size - scanOffset >= HEADER_SIZE) {
+            val length = readU16Le(buffer, scanOffset)
+            val frameEnd = scanOffset + HEADER_SIZE + length + TAG_SIZE
+            if (buffer.size < frameEnd) break
+            totalPlainBytes += length
+            scanOffset = frameEnd
+        }
+        if (scanOffset == 0) {
+            return Decrypted(ByteArray(0), buffer.copyOf())
+        }
+        val plaintext = ByteArray(totalPlainBytes)
         var offset = 0
-        while (buffer.size - offset >= HEADER_SIZE) {
+        var plainOffset = 0
+        while (offset < scanOffset) {
             val length = readU16Le(buffer, offset)
             val frameEnd = offset + HEADER_SIZE + length + TAG_SIZE
-            if (buffer.size < frameEnd) break
-            val aad = buffer.copyOfRange(offset, offset + HEADER_SIZE)
-            val ciphertextAndTag = buffer.copyOfRange(offset + HEADER_SIZE, frameEnd)
-            output.add(AirPlayCrypto.chachaOpen(readKey, AirPlayCrypto.nonce64(readCounter), ciphertextAndTag, aad))
+            AirPlayCrypto.writeNonce64(readCounter, readNonce)
+            val written = AirPlayCrypto.chachaOpenInto(
+                key = readKey,
+                nonce = readNonce,
+                ciphertextAndTag = buffer,
+                ciphertextOffset = offset + HEADER_SIZE,
+                ciphertextLength = length + TAG_SIZE,
+                aad = buffer,
+                aadOffset = offset,
+                aadLength = HEADER_SIZE,
+                output = plaintext,
+                outputOffset = plainOffset,
+            )
+            plainOffset += written
             readCounter++
             offset = frameEnd
         }
-        return Decrypted(concatBytes(*output.toTypedArray()), buffer.copyOfRange(offset, buffer.size))
+        val data = if (plainOffset == plaintext.size) plaintext else plaintext.copyOf(plainOffset)
+        return Decrypted(data, buffer.copyOfRange(offset, buffer.size))
     }
 
     fun encrypt(plaintext: ByteArray): ByteArray {

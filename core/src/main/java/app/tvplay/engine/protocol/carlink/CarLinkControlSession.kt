@@ -55,6 +55,9 @@ class CarLinkControlSession(
     private var handshakeSession: CarLinkAuthCipher.ServerHandshakeSession? = null
 
     @Volatile
+    private var negotiatedWorkModes: Int = 1
+
+    @Volatile
     private var controlOutput: OutputStream? = null
 
     @Volatile
@@ -231,13 +234,14 @@ class CarLinkControlSession(
                     val req = CarLinkProtoCodec.decodeAuthRequest(frame.body)
                     connectedPhoneModel = req.model.ifBlank { req.productName }.ifBlank { "Android CarLink" }
                     val pin = pinCodeProvider()
-                    val hs = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)
-                    handshakeSession = hs
+                    val hs = handshakeSession?.takeIf { it.pinCode == pin }
+                        ?: CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin).also { handshakeSession = it }
                     val resp = hs.processAuthRequest(
                         request = req,
                         dayOrNightMode = 2,
                         screenInfo = "${displaySpec.widthPixels}x${displaySpec.heightPixels}",
                     )
+                    negotiatedWorkModes = resp.workModes
                     val respFrame = CarLinkFrameCodec.buildFrame(
                         seqId = frame.header.seqId,
                         category = CarLinkCmdCategory.AUTH,
@@ -248,7 +252,10 @@ class CarLinkControlSession(
                         messageType = CarLinkMessageType.RES,
                     )
                     CarLinkFrameCodec.writeFrame(output, respFrame)
-                    onLog("CarLink AUTH: processed AuthRequest from $connectedPhoneModel (PIN=$pin)")
+                    onLog(
+                        "CarLink AUTH: processed AuthRequest from $connectedPhoneModel " +
+                            "(result=${resp.result}, quickConnect=${req.authPk.isEmpty()}, PIN=$pin)",
+                    )
                 }
                 CarLinkMethodIndex.AUTH_CONFIRM -> {
                     val confirm = runCatching {
@@ -394,7 +401,7 @@ class CarLinkControlSession(
                         videoDisplayHeight = displaySpec.heightPixels,
                         fps = displaySpec.fps,
                         isSupportP2P = true,
-                        isSupportSoftAP = true,
+                        isSupportSoftAP = false,
                         isDataTransMode = true,
                         default5GChannel = 149,
                         isSupportCamera = false,
@@ -402,7 +409,7 @@ class CarLinkControlSession(
                         isSupportLowLatencyDecodingMode = true,
                         isSupportVoiceWaken = false,
                         sdkVersion = "1.5.0",
-                        workModes = 1,
+                        workModes = negotiatedWorkModes,
                         isSupportPOINav = true,
                         isSupportRotation = false,
                         isSupportHomeKey = true,

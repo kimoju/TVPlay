@@ -245,6 +245,7 @@ object WirelessPermissions {
             if (sdkInt >= Build.VERSION_CODES.S) {
                 listOf(
                     Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
                     Manifest.permission.ACCESS_COARSE_LOCATION,
                     Manifest.permission.ACCESS_FINE_LOCATION,
                 )
@@ -256,12 +257,14 @@ object WirelessPermissions {
             }
         sdkInt >= Build.VERSION_CODES.TIRAMISU -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.NEARBY_WIFI_DEVICES,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_FINE_LOCATION,
         )
         sdkInt >= Build.VERSION_CODES.S -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_FINE_LOCATION,
         )
@@ -296,6 +299,7 @@ object WirelessPermissions {
             Manifest.permission.ACCESS_COARSE_LOCATION in missing ->
             R.string.allow_precise_location_for_diplay_in_the_head_unit_s_app_p
         Manifest.permission.BLUETOOTH_CONNECT in missing ||
+            Manifest.permission.BLUETOOTH_ADVERTISE in missing ||
             Manifest.permission.NEARBY_WIFI_DEVICES in missing ->
             R.string.allow_nearby_devices_for_diplay_in_the_head_unit_s_app_per
         else -> R.string.could_not_start_carplay_return_to_diplay_and_check_app_per

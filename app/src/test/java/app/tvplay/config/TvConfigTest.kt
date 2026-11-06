@@ -45,6 +45,7 @@ class TvConfigTest {
             sdkInt = Build.VERSION_CODES.TIRAMISU,
         )
         assertTrue(Manifest.permission.BLUETOOTH_CONNECT in wifiDirect33)
+        assertTrue(Manifest.permission.BLUETOOTH_ADVERTISE in wifiDirect33)
         assertTrue(Manifest.permission.NEARBY_WIFI_DEVICES in wifiDirect33)
 
         val lanWifi33 = WirelessPermissions.required(
@@ -54,6 +55,7 @@ class TvConfigTest {
         assertEquals(
             listOf(
                 Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.ACCESS_FINE_LOCATION,
             ),

@@ -65,14 +65,18 @@ object CarLinkBleSpec {
         val channel: Int = 0,
     )
 
+    const val WIFI_DEFAULT_MAC_ADDRESS = "02:00:00:00:00:00"
+    const val WIFI_TYPE_P2P = 1001
+    const val WIFI_TYPE_SOFT_AP = 1002
+
     data class ServerConnectionInfo(
         val name: String,
         val ssid: String,
         val psk: String,
-        val mac: String,
+        val mac: String = WIFI_DEFAULT_MAC_ADDRESS,
         val freq: Int,
         val port: Int = 0,
-        val type: Int = 1,
+        val type: Int = WIFI_TYPE_P2P,
     )
 
     fun encodeVersion(version: String = DEFAULT_PROTOCOL_VERSION): ByteArray {
@@ -189,10 +193,25 @@ class CarLinkBleAdvertiser(
     private val onClientConnected: (BluetoothDevice, CarLinkBleSpec.ClientInfo) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
 ) : Closeable {
+    private class PreparedWriteBuffer {
+        val data = ByteArray(1024)
+        var length = 0
+
+        fun append(offset: Int, bytes: ByteArray) {
+            if (offset < 0 || offset >= data.size || bytes.isEmpty()) return
+            val copyLen = minOf(bytes.size, data.size - offset)
+            System.arraycopy(bytes, 0, data, offset, copyLen)
+            length = maxOf(length, offset + copyLen)
+        }
+
+        fun toByteArray(): ByteArray = data.copyOfRange(0, length)
+    }
+
     private val closed = AtomicBoolean(false)
     private val serialCounter = AtomicInteger(1)
     private val handler = Handler(Looper.getMainLooper())
-    private val writeFragments = ConcurrentHashMap<String, ByteArrayOutputStream>()
+    private val writeFragments = ConcurrentHashMap<String, PreparedWriteBuffer>()
+    private val pendingClients = ConcurrentHashMap<String, BluetoothDevice>()
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
@@ -215,10 +234,28 @@ class CarLinkBleAdvertiser(
      */
     fun refreshPairingAdvertisement() {
         if (closed.get() || isSessionActiveProvider()) return
+        val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        if (btManager != null && gattServer == null) {
+            startGattServer(btManager)
+        }
         serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
         handler.removeCallbacks(rotateTask)
-        restartAdvertisingInternal()
+        restartAdvertisingInternal(btManager?.adapter)
         handler.postDelayed(rotateTask, CarLinkBleSpec.ROTATION_INTERVAL_MS)
+    }
+
+    /**
+     * Notifies any connected BLE GATT clients that were waiting for the Wi-Fi Direct / SoftAP
+     * hotspot credentials to become ready.
+     */
+    fun notifyPendingClients() {
+        if (closed.get() || pendingClients.isEmpty()) return
+        handler.post {
+            if (closed.get()) return@post
+            for (device in pendingClients.values.toList()) {
+                notifyServerConnectionInfo(device)
+            }
+        }
     }
 
     fun start(): Boolean {
@@ -250,12 +287,14 @@ class CarLinkBleAdvertiser(
         )
         val clientInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val serverInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.SERVER_CONNECTION_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                BluetoothGattCharacteristic.PROPERTY_INDICATE or
+                BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
         val cccd = BluetoothGattDescriptor(
@@ -332,6 +371,7 @@ class CarLinkBleAdvertiser(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 writeFragments.remove(device.address)
+                pendingClients.remove(device.address)
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onLog("CarLink BLE: phone GATT connected ${device.address}")
             }
@@ -352,7 +392,8 @@ class CarLinkBleAdvertiser(
                 }
             }
             if (descriptor.uuid == CarLinkBleSpec.CCCD_UUID) {
-                notifyServerConnectionInfo(device)
+                pendingClients[device.address] = device
+                handler.postDelayed({ notifyServerConnectionInfo(device) }, 40L)
             }
         }
 
@@ -385,32 +426,32 @@ class CarLinkBleAdvertiser(
             value: ByteArray?,
         ) {
             val bytes = value ?: ByteArray(0)
-            if (characteristic.uuid == CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID) {
-                if (preparedWrite) {
-                    val stream = writeFragments.getOrPut(device.address) { ByteArrayOutputStream() }
-                    stream.write(bytes)
-                } else {
-                    val combined = writeFragments.remove(device.address)?.let { stream ->
-                        stream.write(bytes)
-                        stream.toByteArray()
-                    } ?: bytes
-                    handleClientInfoBytes(device, combined)
-                }
-            }
             if (responseNeeded) {
                 runCatching {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, bytes)
+                }
+            }
+            if (characteristic.uuid == CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID) {
+                if (preparedWrite) {
+                    val buffer = writeFragments.getOrPut(device.address) { PreparedWriteBuffer() }
+                    buffer.append(offset, bytes)
+                } else {
+                    val combined = writeFragments.remove(device.address)?.let { buffer ->
+                        buffer.append(offset, bytes)
+                        buffer.toByteArray()
+                    } ?: bytes
+                    handleClientInfoBytes(device, combined)
                 }
             }
         }
 
         override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
             val buffer = writeFragments.remove(device.address)
-            if (execute && buffer != null) {
-                handleClientInfoBytes(device, buffer.toByteArray())
-            }
             runCatching {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+            if (execute && buffer != null && buffer.length > 0) {
+                handleClientInfoBytes(device, buffer.toByteArray())
             }
         }
     }
@@ -418,11 +459,12 @@ class CarLinkBleAdvertiser(
     private fun handleClientInfoBytes(device: BluetoothDevice, bytes: ByteArray) {
         val jsonStr = bytes.toString(Charsets.UTF_8).trim()
         onLog("CarLink BLE: received ClientInfo from ${device.address}: $jsonStr")
+        pendingClients[device.address] = device
         val clientInfo = runCatching { CarLinkBleSpec.parseClientInfoJson(jsonStr) }.getOrNull()
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
-        notifyServerConnectionInfo(device)
+        handler.postDelayed({ notifyServerConnectionInfo(device) }, 40L)
     }
 
     private fun buildServerInfoBytes(): ByteArray {
@@ -432,14 +474,23 @@ class CarLinkBleAdvertiser(
 
     @Suppress("DEPRECATION")
     fun notifyServerConnectionInfo(device: BluetoothDevice) {
+        if (closed.get()) return
         val server = gattServer ?: return
         val service = server.getService(CarLinkBleSpec.SHARE_SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(CarLinkBleSpec.SERVER_CONNECTION_INFO_CHARACTERISTIC_UUID) ?: return
         val payload = buildServerInfoBytes()
-        if (payload.isEmpty()) return
+        if (payload.isEmpty()) {
+            pendingClients[device.address] = device
+            onLog("CarLink BLE: deferring ServerConnectionInfo until Wi-Fi P2P hotspot is ready for ${device.address}")
+            return
+        }
         runCatching {
             characteristic.value = payload
-            server.notifyCharacteristicChanged(device, characteristic, false)
+            val confirmed = server.notifyCharacteristicChanged(device, characteristic, true)
+            if (!confirmed) {
+                server.notifyCharacteristicChanged(device, characteristic, false)
+            }
+            pendingClients.remove(device.address)
             onLog("CarLink BLE: notified ServerConnectionInfo (${payload.size}B) to ${device.address}")
         }.onFailure { e ->
             onLog("CarLink BLE: notifyServerConnectionInfo failed: ${e.message}")
@@ -448,7 +499,7 @@ class CarLinkBleAdvertiser(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        handler.removeCallbacks(rotateTask)
+        handler.removeCallbacksAndMessages(null)
         val cb = activeAdvertiseCallback
         activeAdvertiseCallback = null
         if (cb != null) {
@@ -458,5 +509,6 @@ class CarLinkBleAdvertiser(
         runCatching { gattServer?.close() }
         gattServer = null
         writeFragments.clear()
+        pendingClients.clear()
     }
 }

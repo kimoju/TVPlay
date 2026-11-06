@@ -97,6 +97,16 @@ class CarLinkProtocolTest {
             targetPhoneBtMac = "11:22:33:44:55:66",
         )
         assertEquals(18, directed.size)
+
+        val serverInfo = CarLinkBleSpec.ServerConnectionInfo(
+            name = "TVPlay",
+            ssid = "DIRECT-TV-TVPlay",
+            psk = "12345678",
+            freq = 5180,
+        )
+        val serverInfoJson = CarLinkBleSpec.buildServerInfoJson(serverInfo)
+        assertTrue(serverInfoJson.contains("\"mac\":\"02:00:00:00:00:00\""))
+        assertTrue(serverInfoJson.contains("\"type\":1001"))
     }
 
     @Test
@@ -174,6 +184,40 @@ class CarLinkProtocolTest {
         assertTrue(CarLinkAuthCipher.verifyEcdsa(clientAuthPk, clientAgreePk, clientNonce, clientSig))
 
         val serverHandshake = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)
+        CarLinkAuthCipher.clearPeerAuthRecords()
+        val clientIdBytes = "xiaomi-14-pro-id".toByteArray(Charsets.UTF_8)
+
+        // Phase 1: Quick connection before pairing (empty authPk) -> must return result = 1 to trigger PIN dialog
+        val quickReqUnpaired = CarLinkProtoCodec.AuthRequestMsg(
+            version = CarLinkAuthCipher.PROTOCOL_VERSION_1_5,
+            authPk = ByteArray(0),
+            authPkHmac = ByteArray(0),
+            agreementPk = clientAgreePk,
+            agreementPkSig = clientSig,
+            random = clientNonce,
+            id = clientIdBytes,
+            model = "Xiaomi 14 Pro",
+            userConfirmed = false,
+            workModes = 1,
+        )
+        val quickRespUnpaired = serverHandshake.processAuthRequest(
+            quickReqUnpaired,
+            dayOrNightMode = 2,
+            screenInfo = "1920x1080",
+        )
+        assertEquals(1, quickRespUnpaired.result)
+
+        // Phase 2a: Normal connection with wrong PIN -> must return result = 2
+        val wrongHmac = CarLinkAuthCipher.generatePinHmac(clientAuthPk, clientNonce, "000000")
+        val wrongPinReq = quickReqUnpaired.copy(
+            authPk = clientAuthPk,
+            authPkHmac = wrongHmac,
+            userConfirmed = true,
+        )
+        val wrongPinResp = serverHandshake.processAuthRequest(wrongPinReq, dayOrNightMode = 2, screenInfo = "1920x1080")
+        assertEquals(2, wrongPinResp.result)
+
+        // Phase 2b: Normal connection with valid 6-digit PIN -> must return result = 0 and cache peer record
         val authReq = CarLinkProtoCodec.AuthRequestMsg(
             version = CarLinkAuthCipher.PROTOCOL_VERSION_1_5,
             authPk = clientAuthPk,
@@ -181,14 +225,26 @@ class CarLinkProtocolTest {
             agreementPk = clientAgreePk,
             agreementPkSig = clientSig,
             random = clientNonce,
+            id = clientIdBytes,
             model = "vivo X100 Pro",
             userConfirmed = true,
             workModes = 1,
         )
         val authResp = serverHandshake.processAuthRequest(authReq, dayOrNightMode = 2, screenInfo = "1920x1080")
+        assertEquals(0, authResp.result)
         val serverSessionKey = serverHandshake.sessionKey
         assertNotNull(serverSessionKey)
         assertEquals(16, serverSessionKey!!.size)
+
+        // Phase 3: Subsequent Quick connection for already-paired clientId -> must return result = 0
+        val reconnectSession = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)
+        val quickRespPaired = reconnectSession.processAuthRequest(
+            quickReqUnpaired,
+            dayOrNightMode = 2,
+            screenInfo = "1920x1080",
+        )
+        assertEquals(0, quickRespPaired.result)
+        assertNotNull(reconnectSession.sessionKey)
 
         val clientSessionKey = CarLinkAuthCipher.deriveSessionKey(
             localAgreementKeyPair = clientAgreeKp,

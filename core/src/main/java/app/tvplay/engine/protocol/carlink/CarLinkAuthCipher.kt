@@ -16,6 +16,7 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECParameterSpec
 import java.security.spec.ECPoint
 import java.security.spec.ECPublicKeySpec
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.Mac
@@ -272,8 +273,30 @@ object CarLinkAuthCipher {
         return cipher.doFinal(ciphertext)
     }
 
+    data class PeerAuthRecord(
+        val clientAuthPk: ByteArray,
+        val serverAuthKeyPair: KeyPair,
+    )
+
+    private val peerAuthRecords = ConcurrentHashMap<String, PeerAuthRecord>()
+
+    fun clearPeerAuthRecords() {
+        peerAuthRecords.clear()
+    }
+
     /**
      * High-level server handshake state machine (`ServerKeyNegotiator`).
+     *
+     * Implements the 2-phase ICCOA CarLink handshake:
+     * 1. **Quick Connection** (`request.authPk.isEmpty()`):
+     *    - If `clientId` (`request.id`) has no cached [PeerAuthRecord], returns `result = 1`
+     *      (`"quick connection rejected, need normal connection"`), which triggers the phone
+     *      (Xiaomi CarWith / vivo Jovi InCar / OPPO Car+) to display the 6-digit PIN input dialog.
+     *    - If `clientId` was previously paired, verifies ECDSA signature, derives `sessionKey`,
+     *      and returns `result = 0`.
+     * 2. **Normal Connection** (`request.authPk.size >= 64`):
+     *    - Verifies the phone's PIN HMAC (`result = 2` on PIN mismatch), derives `sessionKey` via
+     *      ECDH + HKDF-SHA256, caches [PeerAuthRecord] for future quick connections, and returns `result = 0`.
      */
     class ServerHandshakeSession(
         val pinCode: String,
@@ -289,17 +312,108 @@ object CarLinkAuthCipher {
             dayOrNightMode: Int = 2,
             screenInfo: String = "",
         ): CarLinkProtoCodec.AuthResponseMsg {
-            val serverAuthPk = encodeRawPublicKey(authKeyPair.public)
-            val serverAgreementPk = encodeRawPublicKey(agreementKeyPair.public)
+            val negotiatedWorkModes = (request.workModes and 0x0F).takeIf { it != 0 } ?: 1
+            val clientId = request.id.toString(Charsets.UTF_8).trim()
 
-            if (request.authPk.size >= 64 && request.agreementPk.size >= 64 && request.random.isNotEmpty()) {
-                // Derive ECDH + HKDF-SHA256 session key even if the phone skipped PIN verification on reconnect
+            // Phase 1: Quick connection attempt (phone sends empty authPk before prompting user for PIN)
+            if (request.authPk.isEmpty()) {
+                val peerRecord = if (clientId.isNotEmpty()) peerAuthRecords[clientId] else null
+                if (peerRecord == null || request.agreementPk.size < 64 || request.random.isEmpty()) {
+                    return CarLinkProtoCodec.AuthResponseMsg(
+                        version = PROTOCOL_VERSION_1_5,
+                        authPk = ByteArray(0),
+                        authPkHmac = ByteArray(0),
+                        agreementPk = ByteArray(0),
+                        agreementPkSig = ByteArray(0),
+                        random = ByteArray(0),
+                        result = 1,
+                        workModes = negotiatedWorkModes,
+                        dayOrNightMode = dayOrNightMode,
+                        screenInfo = screenInfo,
+                    )
+                }
+                if (
+                    request.agreementPkSig.isNotEmpty() &&
+                    !verifyEcdsa(
+                        peerRawAuthPublicKey = peerRecord.clientAuthPk,
+                        message = request.agreementPk,
+                        suffix = request.random,
+                        signatureBytes = request.agreementPkSig,
+                    )
+                ) {
+                    peerAuthRecords.remove(clientId)
+                    return CarLinkProtoCodec.AuthResponseMsg(
+                        version = PROTOCOL_VERSION_1_5,
+                        result = 1,
+                        workModes = negotiatedWorkModes,
+                        dayOrNightMode = dayOrNightMode,
+                        screenInfo = screenInfo,
+                    )
+                }
+                val serverAgreementPk = encodeRawPublicKey(agreementKeyPair.public)
                 runCatching {
                     sessionKey = deriveSessionKey(
                         localAgreementKeyPair = agreementKeyPair,
                         peerRawAgreementPublicKey = request.agreementPk,
                         clientNonce = request.random,
                         serverNonce = serverNonce,
+                    )
+                }
+                val sigSuffix = request.agreementPk + serverNonce + request.random
+                val agreementPkSig = signEcdsa(
+                    keyPair = peerRecord.serverAuthKeyPair,
+                    message = serverAgreementPk,
+                    suffix = sigSuffix,
+                )
+                return CarLinkProtoCodec.AuthResponseMsg(
+                    version = PROTOCOL_VERSION_1_5,
+                    authPk = ByteArray(0),
+                    authPkHmac = ByteArray(0),
+                    agreementPk = serverAgreementPk,
+                    agreementPkSig = agreementPkSig,
+                    random = serverNonce,
+                    result = 0,
+                    workModes = negotiatedWorkModes,
+                    dayOrNightMode = dayOrNightMode,
+                    screenInfo = screenInfo,
+                )
+            }
+
+            // Phase 2: Normal connection with 6-digit PIN
+            if (
+                request.authPkHmac.isNotEmpty() &&
+                !verifyPinHmac(
+                    expectedMac = request.authPkHmac,
+                    message = request.authPk,
+                    salt = request.random,
+                    pinCode = pinCode,
+                )
+            ) {
+                return CarLinkProtoCodec.AuthResponseMsg(
+                    version = PROTOCOL_VERSION_1_5,
+                    result = 2,
+                    workModes = negotiatedWorkModes,
+                    dayOrNightMode = dayOrNightMode,
+                    screenInfo = screenInfo,
+                )
+            }
+
+            val serverAuthPk = encodeRawPublicKey(authKeyPair.public)
+            val serverAgreementPk = encodeRawPublicKey(agreementKeyPair.public)
+
+            if (request.authPk.size >= 64 && request.agreementPk.size >= 64 && request.random.isNotEmpty()) {
+                runCatching {
+                    sessionKey = deriveSessionKey(
+                        localAgreementKeyPair = agreementKeyPair,
+                        peerRawAgreementPublicKey = request.agreementPk,
+                        clientNonce = request.random,
+                        serverNonce = serverNonce,
+                    )
+                }
+                if (clientId.isNotEmpty()) {
+                    peerAuthRecords[clientId] = PeerAuthRecord(
+                        clientAuthPk = request.authPk.copyOf(),
+                        serverAuthKeyPair = authKeyPair,
                     )
                 }
             }
@@ -326,7 +440,7 @@ object CarLinkAuthCipher {
                 agreementPkSig = agreementPkSig,
                 random = serverNonce,
                 result = 0,
-                workModes = if (request.workModes != 0) request.workModes else 1,
+                workModes = negotiatedWorkModes,
                 dayOrNightMode = dayOrNightMode,
                 screenInfo = screenInfo,
             )

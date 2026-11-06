@@ -64,7 +64,7 @@ object CarLinkProtoCodec {
         val videoDisplayHeight: Int,
         val fps: Int = 60,
         val isSupportP2P: Boolean = true,
-        val isSupportSoftAP: Boolean = true,
+        val isSupportSoftAP: Boolean = false,
         val isDataTransMode: Boolean = true,
         val default5GChannel: Int = 149,
         val isSupportCamera: Boolean = false,

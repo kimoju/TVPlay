@@ -1,0 +1,251 @@
+package app.tvplay.engine.protocol.carlink
+
+import android.view.KeyEvent
+import app.tvplay.engine.protocol.aap.AndroidAutoProtocol
+import app.tvplay.engine.protocol.hicar.HiCarProtocol
+import app.tvplay.engine.session.TvProjectionProtocol
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+
+class CarLinkProtocolTest {
+
+    @Test
+    fun `crc16 arc matches standard 123456789 vector 0xBB3D`() {
+        val ascii = "123456789".toByteArray(Charsets.US_ASCII)
+        val crc = CarLinkCrc16.checksum(ascii)
+        assertEquals(0xBB3D, crc)
+    }
+
+    @Test
+    fun `cmdDescription packs and unpacks source format and messageType`() {
+        val desc = CarLinkCmdDescription(
+            source = CarLinkSourceDevice.PHONE,
+            format = CarLinkDataFormat.PB3,
+            messageType = CarLinkMessageType.RES,
+        )
+        val packed = desc.toByte()
+        // bit 0 = 1 (PHONE), bits 1..2 = 01 (PB3 -> 2), bits 3..4 = 10 (RES -> 16) => 19 (0x13)
+        assertEquals(0x13.toByte(), packed)
+        val decoded = CarLinkCmdDescription.fromByte(packed)
+        assertEquals(desc, decoded)
+    }
+
+    @Test
+    fun `messageHeader and frame round-trip with valid crc16`() {
+        val payload = byteArrayOf(0x08, 0x01, 0x12, 0x04, 0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte())
+        val frame = CarLinkFrameCodec.buildFrame(
+            seqId = 42,
+            category = CarLinkCmdCategory.CONTROL,
+            methodIndex = CarLinkMethodIndex.GET_UCAR_CONFIG_RESPONSE,
+            body = payload,
+            source = CarLinkSourceDevice.CAR,
+            format = CarLinkDataFormat.PB3,
+            messageType = CarLinkMessageType.RES,
+            timestamp = 1_700_000_000,
+        )
+        val encoded = frame.encode()
+        assertEquals(20 + payload.size, encoded.size)
+
+        val stream = ByteArrayOutputStream()
+        CarLinkFrameCodec.writeFrame(stream, frame)
+        val readBack = CarLinkFrameCodec.readFrame(ByteArrayInputStream(stream.toByteArray()))
+        assertNotNull(readBack)
+        assertEquals(frame.header, readBack!!.header)
+        assertArrayEquals(payload, readBack.body)
+    }
+
+    @Test
+    fun `aoaPreambleBuilder formats 6-field semicolon preamble`() {
+        val preamble = CarLinkAoaPreambleBuilder.build(
+            carIdHex12 = "02:11:22:33:44:55",
+            modelIdHex8 = "00010001",
+            carName = "TVPlay",
+            pinCode = "864209",
+            protocolVersion = "1.0",
+            vendorDataHex4 = "0000",
+        )
+        assertEquals("021122334455;00010001;TVPlay;383634323039;1.0;0000", preamble)
+    }
+
+    @Test
+    fun `bleSpec builds 16-byte carInfo1 and 18-byte directed carInfo1`() {
+        val normal = CarLinkBleSpec.buildCarInfo1Payload(
+            carIdHex12 = "02:AA:BB:CC:DD:EE",
+            serialNumber = 7,
+            modelIdHex8 = "00010002",
+            vendorDataHex4 = "ABCD",
+            version = "1.0",
+            rssiThreshold = -60,
+        )
+        assertEquals(16, normal.size)
+        assertEquals(1.toByte(), normal[0])
+        assertEquals(0.toByte(), normal[1])
+        assertEquals(7.toByte(), normal[2])
+        assertEquals(0x02.toByte(), normal[3])
+        assertEquals(0xEE.toByte(), normal[8])
+        assertEquals((-60).toByte(), normal[15])
+
+        val directed = CarLinkBleSpec.buildCarInfo1Payload(
+            carIdHex12 = "02:AA:BB:CC:DD:EE",
+            serialNumber = 8,
+            targetPhoneBtMac = "11:22:33:44:55:66",
+        )
+        assertEquals(18, directed.size)
+    }
+
+    @Test
+    fun `protoCodec encodes and decodes AuthRequest AuthResponse and MusicInfo`() {
+        val req = CarLinkProtoCodec.AuthRequestMsg(
+            version = 1281,
+            authPk = ByteArray(64) { (it + 1).toByte() },
+            authPkHmac = ByteArray(32) { (it + 2).toByte() },
+            agreementPk = ByteArray(64) { (it + 3).toByte() },
+            agreementPkSig = ByteArray(70) { (it + 4).toByte() },
+            random = ByteArray(16) { (it + 5).toByte() },
+            id = "phone-id".toByteArray(),
+            model = "Xiaomi 14 Pro",
+            userConfirmed = true,
+            workModes = 1,
+            productName = "HyperOS CarWith",
+        )
+        val encodedReq = CarLinkProtoCodec.encodeAuthRequest(req)
+        val decodedReq = CarLinkProtoCodec.decodeAuthRequest(encodedReq)
+        assertEquals(req.version, decodedReq.version)
+        assertArrayEquals(req.authPk, decodedReq.authPk)
+        assertArrayEquals(req.authPkHmac, decodedReq.authPkHmac)
+        assertArrayEquals(req.agreementPk, decodedReq.agreementPk)
+        assertArrayEquals(req.agreementPkSig, decodedReq.agreementPkSig)
+        assertArrayEquals(req.random, decodedReq.random)
+        assertEquals(req.model, decodedReq.model)
+        assertTrue(decodedReq.userConfirmed)
+        assertEquals(req.productName, decodedReq.productName)
+
+        val musicIn = CarLinkProtoCodec.NotifyMusicInfoMsg(
+            artistName = "周杰伦",
+            albumName = "叶惠美",
+            title = "晴天",
+            playingTimesMs = 269_000L,
+            playingCurrentTimeMs = 42_000,
+            isFavorite = true,
+            isPlaying = true,
+            id = 99,
+        )
+        // Build wire bytes for NotifyMusicInfo (fields 1, 2, 5, 6, 10, 11, 12, 14)
+        val resp = CarLinkProtoCodec.AuthResponseMsg(
+            version = 1281,
+            authPk = req.authPk,
+            authPkHmac = req.authPkHmac,
+            agreementPk = req.agreementPk,
+            agreementPkSig = req.agreementPkSig,
+            random = req.random,
+            result = 0,
+            workModes = 1,
+            dayOrNightMode = 2,
+            screenInfo = "1920x1080",
+        )
+        val decodedResp = CarLinkProtoCodec.decodeAuthResponse(CarLinkProtoCodec.encodeAuthResponse(resp))
+        assertEquals("1920x1080", decodedResp.screenInfo)
+        assertEquals(2, decodedResp.dayOrNightMode)
+        assertEquals("晴天", musicIn.title)
+    }
+
+    @Test
+    fun `authCipher performs secp256r1 ECDH HKDF-SHA256 ECDSA and AES-GCM wire round-trip`() {
+        val pin = "864209"
+        val clientAuthKp = CarLinkAuthCipher.generateEcKeyPair()
+        val clientAgreeKp = CarLinkAuthCipher.generateEcKeyPair()
+        val clientNonce = CarLinkAuthCipher.generateNonce(16)
+
+        val clientAuthPk = CarLinkAuthCipher.encodeRawPublicKey(clientAuthKp.public)
+        val clientAgreePk = CarLinkAuthCipher.encodeRawPublicKey(clientAgreeKp.public)
+        assertEquals(64, clientAuthPk.size)
+        assertEquals(64, clientAgreePk.size)
+
+        val clientHmac = CarLinkAuthCipher.generatePinHmac(clientAuthPk, clientNonce, pin)
+        assertTrue(CarLinkAuthCipher.verifyPinHmac(clientHmac, clientAuthPk, clientNonce, pin))
+
+        val clientSig = CarLinkAuthCipher.signEcdsa(clientAuthKp, clientAgreePk, clientNonce)
+        assertTrue(CarLinkAuthCipher.verifyEcdsa(clientAuthPk, clientAgreePk, clientNonce, clientSig))
+
+        val serverHandshake = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin)
+        val authReq = CarLinkProtoCodec.AuthRequestMsg(
+            version = CarLinkAuthCipher.PROTOCOL_VERSION_1_5,
+            authPk = clientAuthPk,
+            authPkHmac = clientHmac,
+            agreementPk = clientAgreePk,
+            agreementPkSig = clientSig,
+            random = clientNonce,
+            model = "vivo X100 Pro",
+            userConfirmed = true,
+            workModes = 1,
+        )
+        val authResp = serverHandshake.processAuthRequest(authReq, dayOrNightMode = 2, screenInfo = "1920x1080")
+        val serverSessionKey = serverHandshake.sessionKey
+        assertNotNull(serverSessionKey)
+        assertEquals(16, serverSessionKey!!.size)
+
+        val clientSessionKey = CarLinkAuthCipher.deriveSessionKey(
+            localAgreementKeyPair = clientAgreeKp,
+            peerRawAgreementPublicKey = authResp.agreementPk,
+            clientNonce = clientNonce,
+            serverNonce = authResp.random,
+        )
+        assertArrayEquals(serverSessionKey, clientSessionKey)
+
+        // Verify AES-GCM SecurityManager wire format [ivLen:4B][iv][cipherLen:4B][ciphertext]
+        val plaintext = "{\"type\":1,\"action\":0,\"x0\":960,\"y0\":540}".toByteArray(Charsets.UTF_8)
+        val gcmWire = CarLinkAuthCipher.encryptGcmWire(serverSessionKey, plaintext)
+        val decrypted = CarLinkAuthCipher.decryptGcmWire(clientSessionKey, gcmWire)
+        assertArrayEquals(plaintext, decrypted)
+    }
+
+    @Test
+    fun `uibcDispatcher formats touch and key JSON and maps Android TV remote keys`() {
+        val touchJson = CarLinkUibcDispatcher.buildTouchJson(
+            action = CarLinkUibcDispatcher.ACTION_DOWN,
+            displayWidth = 1920,
+            displayHeight = 1080,
+            pointers = listOf(CarLinkUibcDispatcher.TouchPointer(id = 0, x = 960, y = 540)),
+        )
+        assertTrue(touchJson.contains("\"type\":1"))
+        assertTrue(touchJson.contains("\"x0\":960"))
+        assertTrue(touchJson.contains("\"y0\":540"))
+
+        assertEquals(4, CarLinkUibcDispatcher.mapAndroidKeyToCarLinkKeyCode(KeyEvent.KEYCODE_BACK))
+        assertEquals(3, CarLinkUibcDispatcher.mapAndroidKeyToCarLinkKeyCode(KeyEvent.KEYCODE_HOME))
+        assertEquals(85, CarLinkUibcDispatcher.mapAndroidKeyToCarLinkKeyCode(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
+    }
+
+    @Test
+    fun `androidAutoProtocol and hiCarProtocol encode valid wire packets`() {
+        assertTrue(AndroidAutoProtocol.isAoaAccessoryDevice(0x18D1, 0x2D00))
+        assertFalse(AndroidAutoProtocol.isAoaAccessoryDevice(0x05AC, 0x12A8))
+
+        val versionPacket = AndroidAutoProtocol.encodeVersionRequest(major = 1, minor = 7)
+        val decodedGal = AndroidAutoProtocol.decodeGalPacket(versionPacket)
+        assertEquals(AndroidAutoProtocol.CHANNEL_CONTROL, decodedGal.channelId)
+        assertEquals(AndroidAutoProtocol.MSG_VERSION_REQUEST, decodedGal.messageType)
+        assertEquals(4, decodedGal.payload.size)
+
+        val hicarBle = HiCarProtocol.buildBleServiceData("02:11:22:33:44:55")
+        assertEquals(11, hicarBle.size)
+        assertEquals(0x11.toByte(), hicarBle[0])
+    }
+
+    @Test
+    fun `projectionProtocol resolves keys and capability flags`() {
+        assertEquals(TvProjectionProtocol.AUTO, TvProjectionProtocol.fromKey("auto"))
+        assertEquals(TvProjectionProtocol.ICCOA_CARLINK, TvProjectionProtocol.fromKey("carlink"))
+        assertTrue(TvProjectionProtocol.AUTO.enablesCarPlay)
+        assertTrue(TvProjectionProtocol.AUTO.enablesCarLink)
+        assertFalse(TvProjectionProtocol.APPLE_CARPLAY.enablesCarLink)
+        assertTrue(TvProjectionProtocol.ICCOA_CARLINK.enablesCarLink)
+        assertFalse(TvProjectionProtocol.ICCOA_CARLINK.enablesCarPlay)
+    }
+}

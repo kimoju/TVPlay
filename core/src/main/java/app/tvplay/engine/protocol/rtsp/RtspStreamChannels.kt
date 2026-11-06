@@ -958,7 +958,7 @@ internal fun currentScreenListener(type: Int, sink: MediaSink, isCurrent: () -> 
  * decrypts their payloads, and hands decoded media to a [MediaSink].
  */
 class CarPlayMediaEngine(
-    private val sink: MediaSink,
+    val sink: MediaSink,
     private val microphoneEnabled: Boolean = false,
 ) : AirPlayMediaHandler {
     internal data class StreamKey(

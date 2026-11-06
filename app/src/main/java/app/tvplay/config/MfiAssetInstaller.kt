@@ -8,6 +8,7 @@ import app.tvplay.engine.av.OpusEncoderSupport
 import app.tvplay.engine.av.TvDisplaySpec
 import app.tvplay.engine.session.TvAccessoryIdentitySpec
 import app.tvplay.engine.session.TvIconAsset
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvSessionConfig
 import app.tvplay.engine.session.TvStreamServerConfig
 import app.tvplay.engine.session.TvTransportMode
@@ -143,6 +144,9 @@ object MfiAssetInstaller {
             .takeIf { it.isNotEmpty() },
         carPlayUsbInterfaceNumber: Int = 3,
         wirelessIdentity: TvWirelessIdentitySpec? = null,
+        projectionProtocol: TvProjectionProtocol = TvPreferencesStore.loadProjectionProtocol(context),
+        carLinkPinCode: String = TvPreferencesStore.loadCarLinkPinCode(context),
+        carLinkCertBytes: ByteArray = loadCarLinkCertificate(context),
     ): TvSessionConfig {
         val deviceIdHex = deviceId(identity)
         val compactId = deviceIdHex.replace(":", "")
@@ -171,8 +175,19 @@ object MfiAssetInstaller {
             lanWifiSsid = effectiveLanSsid,
             lanWifiPassphrase = lanWifiPassphrase,
             lanNetworkInterface = lanNetworkInterface,
+            projectionProtocol = projectionProtocol,
+            carLinkPinCode = carLinkPinCode,
+            carLinkCertBytes = carLinkCertBytes,
         )
     }
+
+    /**
+     * Loads the ICCOA CarLink vehicle certificate (`assets/ccd.data`, 2,120 bytes).
+     */
+    fun loadCarLinkCertificate(context: Context): ByteArray =
+        runCatching {
+            context.assets.open("ccd.data").use { it.readBytes() }
+        }.getOrDefault(ByteArray(0))
 
     /**
      * Builds the [TvStreamServerConfig] consumed by the RTSP control session.

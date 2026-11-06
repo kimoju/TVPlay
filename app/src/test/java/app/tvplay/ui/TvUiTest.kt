@@ -713,6 +713,16 @@ class TvUiTest {
         progressBar.progress = 68
         assertEquals(68, progressBar.progress)
 
+        // Verify ICCOA CarLink protocol switcher and 6-digit PIN rotation
+        val repo = TvSettingsRepository(workbench)
+        repo.connection.projectionProtocol = app.tvplay.engine.session.TvProjectionProtocol.ICCOA_CARLINK
+        assertEquals(app.tvplay.engine.session.TvProjectionProtocol.ICCOA_CARLINK, repo.connection.projectionProtocol)
+        val initialPin = repo.connection.carLinkPinCode
+        assertEquals(6, initialPin.length)
+        val refreshedPin = repo.connection.refreshCarLinkPinCode()
+        assertEquals(6, refreshedPin.length)
+        assertTrue(refreshedPin.all(Char::isDigit))
+
         workbenchController.pause().stop().destroy()
     }
 }

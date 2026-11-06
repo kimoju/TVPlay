@@ -32,6 +32,7 @@ import app.tvplay.engine.av.MediaAudioBuffer
 import app.tvplay.engine.av.UiDensityScale
 import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.WifiP2pChannels
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
 import app.tvplay.runtime.TvLanOtaManager
@@ -304,6 +305,41 @@ class WorkbenchSettingsTabs(
     private fun buildConnectionPage(): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(2), dp(2), dp(4), dp(16))
+
+        addView(sectionHeader("投屏协议引擎（Apple CarPlay / 安卓 CarLink）"))
+        val protocolOptions = TvProjectionProtocol.entries.map { it to it.displayName }
+        addView(
+            cycleCard(
+                title = "协议引擎模式",
+                subtitle = "支持双模并发（同时监听 iPhone CarPlay 与小米/vivo/OPPO CarLink）或指定单一协议",
+                options = protocolOptions,
+                current = settings.connection.projectionProtocol,
+                icon = TvIconGlyph.SPARKLES,
+            ) { chosen ->
+                settings.connection.projectionProtocol = chosen
+                onSettingChanged?.invoke()
+                refresh()
+            },
+            cardLayoutParams(),
+        )
+
+        if (settings.connection.projectionProtocol.enablesCarLink) {
+            val currentPin = settings.connection.carLinkPinCode
+            addView(
+                actionCard(
+                    title = "ICCOA CarLink 6 位连接码 (PIN)",
+                    subtitle = "当前连接码：$currentPin（小米 CarWith / vivo Jovi InCar / OPPO Car+ 首次配对或 AOA2 有线鉴权使用）",
+                    buttonLabel = "刷新 PIN 码",
+                    icon = TvIconGlyph.SHIELD_MFI,
+                    onClick = {
+                        settings.connection.refreshCarLinkPinCode()
+                        onSettingChanged?.invoke()
+                        refresh()
+                    },
+                ),
+                cardLayoutParams(),
+            )
+        }
 
         addView(sectionHeader("主连接方式（无线 / USB 有线）"))
         val currentTransportKey = when {

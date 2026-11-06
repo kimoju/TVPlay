@@ -18,6 +18,7 @@ import androidx.core.graphics.ColorUtils
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvSettingsRepository
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.LastConnectionProblem
@@ -58,6 +59,8 @@ class WorkbenchHeroStage(
     ) {
         val wirelessEnabled = settings.connection.wirelessEnabled
         val wirelessMode = settings.connection.wirelessHotspotMode
+        val projectionProtocol = settings.connection.projectionProtocol
+        val carLinkPinCode = settings.connection.carLinkPinCode
         val modeLabel = when {
             !wirelessEnabled -> "USB 有线低延迟直连"
             wirelessMode == TvWirelessMode.LAN_WIFI -> "无线 · 家庭局域网互联"
@@ -65,10 +68,13 @@ class WorkbenchHeroStage(
         }
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
         val pairedAddress = settings.connection.pairedPhoneAddress
-        val pairedSummary = if (pairedAddress != null) {
-            settings.connection.pairedPhoneName
-        } else {
-            "自动识别已配对 iPhone"
+        val pairedSummary = when {
+            pairedAddress != null -> settings.connection.pairedPhoneName
+            projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK -> "小米 CarWith / vivo / OPPO"
+            projectionProtocol == TvProjectionProtocol.ANDROID_AUTO -> "Android Auto 手机"
+            projectionProtocol == TvProjectionProtocol.HUAWEI_HICAR -> "华为 HarmonyOS 手机"
+            projectionProtocol == TvProjectionProtocol.AUTO -> "iPhone / 小米 / vivo / OPPO"
+            else -> "自动识别已配对 iPhone"
         }
         val hotspotSummary = when {
             !wirelessEnabled -> "即插即用 · 免蓝牙配对 · 硬件解码直通"
@@ -102,6 +108,8 @@ class WorkbenchHeroStage(
                 lastProblemSummary = lastProblem,
                 versionName = installedVersion,
                 videoSpecSummary = videoSpecSummary,
+                projectionProtocol = projectionProtocol,
+                carLinkPinCode = carLinkPinCode,
             ),
             palette = TvColorScheme.resolve(context),
             callbacks = object : Callbacks {
@@ -118,6 +126,13 @@ class WorkbenchHeroStage(
                 override fun onChooseWirelessMode(mode: TvWirelessMode) {
                     if (!settings.connection.wirelessEnabled || settings.connection.wirelessHotspotMode != mode) {
                         onSelectWirelessMode?.invoke(mode)
+                    }
+                }
+
+                override fun onChooseProjectionProtocol(protocol: TvProjectionProtocol) {
+                    if (settings.connection.projectionProtocol != protocol) {
+                        settings.connection.projectionProtocol = protocol
+                        updateStatus(hasActiveSession, pendingReconnect, onDisconnectSession)
                     }
                 }
 
@@ -163,12 +178,15 @@ class WorkbenchHeroStage(
         val lastProblemSummary: String?,
         val versionName: String = "1.1.1",
         val videoSpecSummary: String = "60 FPS · H.264",
+        val projectionProtocol: TvProjectionProtocol = TvProjectionProtocol.AUTO,
+        val carLinkPinCode: String = "864209",
     )
 
     interface Callbacks {
         fun onStartOrEnterProjection()
         fun onChooseTransportMode(wireless: Boolean)
         fun onChooseWirelessMode(mode: TvWirelessMode)
+        fun onChooseProjectionProtocol(protocol: TvProjectionProtocol) {}
         fun onStopSession()
         fun onOpenBluetoothSettings()
     }
@@ -207,8 +225,12 @@ class WorkbenchHeroStage(
             else -> palette.accent
         }
         val statusText = when {
-            model.sessionActive -> "已连接 iPhone · 正在投屏"
-            model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待蓝牙握手" else "后台待命 · 等待 USB 接入"
+            model.sessionActive -> "已建立手机互联 · 正在投屏"
+            model.sessionRunning -> if (model.wirelessEnabled) "后台待命 · 等待无线握手" else "后台待命 · 等待 USB 接入"
+            model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ->
+                "ICCOA CarLink 就绪 · PIN 码 ${model.carLinkPinCode}"
+            model.projectionProtocol == TvProjectionProtocol.AUTO ->
+                "双模并发就绪 · MFi + CarLink PIN ${model.carLinkPinCode}"
             else -> "就绪 · 离线 MFi 硬件级认证"
         }
         val statusPill = row().apply {
@@ -294,9 +316,16 @@ class WorkbenchHeroStage(
         val titleCol = column().apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
+        val heroTitleText = when (model.projectionProtocol) {
+            TvProjectionProtocol.AUTO -> "CarPlay & CarLink 双模接收端"
+            TvProjectionProtocol.APPLE_CARPLAY -> "Apple CarPlay 接收端"
+            TvProjectionProtocol.ICCOA_CARLINK -> "ICCOA CarLink 安卓车联"
+            TvProjectionProtocol.ANDROID_AUTO -> "Google Android Auto 接收端"
+            TvProjectionProtocol.HUAWEI_HICAR -> "华为 HiCar 智行接收端"
+        }
         titleCol.addView(
             label(
-                "Apple CarPlay 接收端",
+                heroTitleText,
                 22f,
                 palette.primaryText,
                 bold = true,
@@ -431,12 +460,44 @@ class WorkbenchHeroStage(
         modeCard.addView(
             bentoSectionHeader(
                 glyph = TvIconGlyph.WIFI,
-                title = "连接模式切换",
+                title = "协议与连接模式切换",
                 badgeText = model.hotspotSummary ?: "即时生效",
                 palette = palette,
             ),
         )
         modeCard.addView(space(dp(10)))
+
+        val protocolRow = row()
+        val protocolItems = listOf(
+            TvProjectionProtocol.AUTO to "双模并发",
+            TvProjectionProtocol.APPLE_CARPLAY to "Apple CarPlay",
+            TvProjectionProtocol.ICCOA_CARLINK to "安卓 CarLink",
+        )
+        protocolItems.forEachIndexed { idx, (proto, titleText) ->
+            val selected = model.projectionProtocol == proto
+            val btn = TvPlayButton(context).apply {
+                tag = "proto_${proto.key}"
+                text = titleText
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
+                minHeight = dp(40)
+                minimumHeight = dp(40)
+                style(
+                    if (selected) TvPlayButtonKind.PRIMARY else TvPlayButtonKind.SECONDARY,
+                    palette,
+                    overlay = false,
+                    glyph = if (proto == TvProjectionProtocol.APPLE_CARPLAY) TvIconGlyph.SHIELD_MFI else TvIconGlyph.PHONE,
+                )
+                setOnClickListener { callbacks.onChooseProjectionProtocol(proto) }
+            }
+            protocolRow.addView(
+                btn,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (idx < protocolItems.lastIndex) marginEnd = dp(8)
+                },
+            )
+        }
+        modeCard.addView(protocolRow)
+        modeCard.addView(space(dp(8)))
 
         val transportRow = row()
         val wirelessBtn = TvPlayButton(context).apply {
@@ -564,11 +625,20 @@ class WorkbenchHeroStage(
             )
         } else {
             val isDirect = model.wirelessMode == TvWirelessMode.WIFI_DIRECT
+            val isAndroidOnly = model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ||
+                model.projectionProtocol == TvProjectionProtocol.ANDROID_AUTO ||
+                model.projectionProtocol == TvProjectionProtocol.HUAWEI_HICAR
             guideCard.addView(
                 bentoSectionHeader(
                     glyph = TvIconGlyph.BLUETOOTH,
-                    title = "无线 CarPlay 连接流程",
-                    badgeText = if (isDirect) "5GHz 点对点" else "同路由器局域网",
+                    title = if (isAndroidOnly) "无线安卓车联 (CarLink) 连接流程" else "无线 CarPlay / CarLink 连接流程",
+                    badgeText = if (model.projectionProtocol.enablesCarLink) {
+                        "PIN: ${model.carLinkPinCode}"
+                    } else if (isDirect) {
+                        "5GHz 点对点"
+                    } else {
+                        "同路由器局域网"
+                    },
                     palette = palette,
                 ),
             )
@@ -576,9 +646,9 @@ class WorkbenchHeroStage(
             guideCard.addView(
                 stepTimelineRow(
                     "01",
-                    if (isDirect) "开启蓝牙与 Wi-Fi" else "接入同一家庭路由器",
-                    if (isDirect) "保持电视与 iPhone 蓝牙、Wi-Fi 开启，免填路由器密码"
-                    else "电视通过 Wi-Fi 或千兆网线与 iPhone 处于同一局域网",
+                    if (isDirect) "开启手机蓝牙与 Wi-Fi" else "接入同一家庭路由器",
+                    if (isDirect) "保持电视与手机蓝牙、Wi-Fi 开启，BLE 0xFCFB 自动广播发现"
+                    else "电视通过 Wi-Fi 或千兆网线与 iPhone / 安卓手机处于同一局域网",
                     palette,
                 ),
             )
@@ -586,8 +656,9 @@ class WorkbenchHeroStage(
             guideCard.addView(
                 stepTimelineRow(
                     "02",
-                    "蓝牙配对「${model.bluetoothDeviceName}」",
-                    "在 iPhone「设置 → 蓝牙」中连接本电视（目标：${model.pairedPhoneSummary}）",
+                    if (isAndroidOnly) "打开小米 CarWith / vivo / OPPO 车联" else "蓝牙配对「${model.bluetoothDeviceName}」或开启安卓车联",
+                    if (isAndroidOnly) "手机设置 → 更多连接 → CarWith / 智能车载，自动弹窗发现「TVPlay」"
+                    else "iPhone 连接蓝牙「${model.bluetoothDeviceName}」；小米 / vivo / OPPO 自动发现连接",
                     palette,
                 ),
             )
@@ -595,8 +666,9 @@ class WorkbenchHeroStage(
             guideCard.addView(
                 stepTimelineRow(
                     "03",
-                    "确认使用 CarPlay 车载",
-                    "点击上方启动按钮，首次连接在 iPhone 弹窗确认启用 CarPlay",
+                    if (model.projectionProtocol.enablesCarLink) "输入 6 位连接码 ${model.carLinkPinCode}" else "确认使用 CarPlay 车载",
+                    if (model.projectionProtocol.enablesCarLink) "安卓首次连接输入 PIN 码「${model.carLinkPinCode}」；iPhone 确认启用 CarPlay"
+                    else "点击上方启动按钮，首次连接在 iPhone 弹窗确认启用 CarPlay",
                     palette,
                 ),
             )

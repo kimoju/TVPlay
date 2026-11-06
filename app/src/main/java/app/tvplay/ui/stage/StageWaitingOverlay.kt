@@ -18,12 +18,14 @@ import android.widget.TextView
 import androidx.core.graphics.ColorUtils
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
+import app.tvplay.config.TvPreferencesStore
 import app.tvplay.config.WaitingScreenColors
 import app.tvplay.engine.network.BluetoothLinkCheck
 import app.tvplay.engine.network.BluetoothRadioCheck
 import app.tvplay.engine.network.WirelessStartupFailure
 import app.tvplay.engine.session.CarPlayStatus
 import app.tvplay.engine.session.TvFailureReason
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.ConnectionFailureGuidance
 import app.tvplay.ui.theme.AmbientMeshBackgroundDrawable
@@ -74,13 +76,24 @@ object StageWaitingOverlay {
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> TvIconGlyph.LAN
             else -> TvIconGlyph.WIFI
         }
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(context) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
+        val carLinkPin = runCatching { TvPreferencesStore.loadCarLinkPinCode(context) }
+            .getOrDefault("864209")
+        val protoLabel = when (protocol) {
+            TvProjectionProtocol.AUTO -> "CarPlay + CarLink 双模"
+            TvProjectionProtocol.APPLE_CARPLAY -> "CarPlay"
+            TvProjectionProtocol.ICCOA_CARLINK -> "ICCOA CarLink · PIN $carLinkPin"
+            TvProjectionProtocol.ANDROID_AUTO -> "Android Auto"
+            TvProjectionProtocol.HUAWEI_HICAR -> "华为 HiCar"
+        }
         val modeBadgeText = when {
-            !wirelessEnabled -> "USB 有线 CarPlay 高速直连"
+            !wirelessEnabled -> "USB 有线 $protoLabel 高速直连"
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidSuffix = existingWifiSsid.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
-                "无线 CarPlay · 家庭局域网$ssidSuffix"
+                "无线 $protoLabel · 家庭局域网$ssidSuffix"
             }
-            else -> "无线 CarPlay · Wi-Fi Direct 5GHz 直连"
+            else -> "无线 $protoLabel · Wi-Fi Direct 5GHz 直连"
         }
 
         val topBadgeRow = LinearLayout(context).apply {
@@ -488,6 +501,10 @@ object StageWaitingOverlay {
         existingWifiSsid: String = "",
     ): String {
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(context) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
+        val carLinkPin = runCatching { TvPreferencesStore.loadCarLinkPinCode(context) }
+            .getOrDefault("864209")
         return when {
             status is CarPlayStatus.IphoneNotListed ->
                 context.getString(
@@ -495,17 +512,33 @@ object StageWaitingOverlay {
                     else R.string.connection_help_no_usb_device,
                 )
             !wirelessEnabled ->
-                context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an)
+                if (protocol.enablesCarLink) {
+                    context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an) +
+                        "\n（安卓 CarLink AOA2 有线连接码：$carLinkPin）"
+                } else {
+                    context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an)
+                }
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidHint = existingWifiSsid.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
-                "01  确保电视与 iPhone 连接至同一局域网 Wi-Fi$ssidHint\n" +
-                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在 iPhone 蓝牙中配对「$btName」\n" +
+                val step3 = if (protocol.enablesCarLink) {
+                    "03  iPhone 确认「使用 CarPlay 车载」；小米 CarWith / vivo / OPPO 输入连接码「$carLinkPin」"
+                } else {
                     "03  在 iPhone 弹窗中确认「使用 CarPlay 车载」，自动进入全屏画面"
+                }
+                "01  确保电视与手机连接至同一局域网 Wi-Fi$ssidHint\n" +
+                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
+                    step3
             }
-            else ->
-                "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
-                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在 iPhone 蓝牙中配对「$btName」\n" +
+            else -> {
+                val step3 = if (protocol.enablesCarLink) {
+                    "03  iPhone 自动建立 5GHz CarPlay；小米 CarWith / vivo / OPPO 弹窗输入连接码「$carLinkPin」"
+                } else {
                     "03  蓝牙握手完成后自动建立 5GHz 无线 CarPlay 通道"
+                }
+                "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
+                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
+                    step3
+            }
         }
     }
 

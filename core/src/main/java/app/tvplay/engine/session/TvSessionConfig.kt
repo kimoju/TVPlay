@@ -12,6 +12,47 @@ typealias Iap2WirelessTransportConfig = TvWirelessIdentitySpec
 typealias Iap2IdentificationConfig = TvAccessoryIdentitySpec
 typealias CarPlayRuntimeConfig = TvSessionConfig
 
+/**
+ * Projection protocol mode supported by TVPlay.
+ *
+ * - [AUTO]: Concurrently runs Apple CarPlay + ICCOA CarLink / Android Auto / HiCar discovery and listeners.
+ * - [APPLE_CARPLAY]: Apple CarPlay only (iPhone wireless & USB).
+ * - [ICCOA_CARLINK]: ICCOA CarLink (Xiaomi HyperOS CarWith, vivo Jovi InCar, OPPO/OnePlus/Realme Car+).
+ * - [ANDROID_AUTO]: Google Android Auto (AOA2 USB & Wireless GAL over TLS).
+ * - [HUAWEI_HICAR]: Huawei HiCar (HarmonyOS BLE 0xFE35 + Wi-Fi P2P / USB).
+ */
+enum class TvProjectionProtocol(
+    val key: String,
+    val displayName: String,
+    val shortName: String,
+) {
+    AUTO("auto", "双模并发 (CarPlay + 安卓 CarLink)", "双模并发"),
+    APPLE_CARPLAY("carplay", "Apple CarPlay (iPhone 专属)", "CarPlay"),
+    ICCOA_CARLINK("carlink", "ICCOA CarLink (小米 / vivo / OPPO)", "CarLink"),
+    ANDROID_AUTO("android_auto", "Google Android Auto (AOA2 / 无线)", "Android Auto"),
+    HUAWEI_HICAR("hicar", "华为 HiCar 智行 (HarmonyOS)", "HiCar");
+
+    val enablesCarPlay: Boolean
+        get() = this == AUTO || this == APPLE_CARPLAY
+
+    val enablesCarLink: Boolean
+        get() = this == AUTO || this == ICCOA_CARLINK
+
+    val enablesAndroidAuto: Boolean
+        get() = this == AUTO || this == ANDROID_AUTO
+
+    val enablesHiCar: Boolean
+        get() = this == AUTO || this == HUAWEI_HICAR
+
+    val enablesAndroidProjection: Boolean
+        get() = this != APPLE_CARPLAY
+
+    companion object {
+        fun fromKey(key: String?): TvProjectionProtocol =
+            entries.firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) } ?: AUTO
+    }
+}
+
 enum class TvTransportMode {
     WIRED,
     WIRELESS,
@@ -137,6 +178,11 @@ class TvSessionConfig(
     val lanWifiSsid: String = "",
     val lanWifiPassphrase: String = "",
     val lanNetworkInterface: String? = null,
+    val projectionProtocol: TvProjectionProtocol = TvProjectionProtocol.AUTO,
+    val carLinkPinCode: String = DEFAULT_CARLINK_PIN,
+    val carLinkModelId: String = DEFAULT_CARLINK_MODEL_ID,
+    val carLinkVendorData: String = DEFAULT_CARLINK_VENDOR_DATA,
+    val carLinkCertBytes: ByteArray = ByteArray(0),
 ) {
     val wirelessHotspotMode: TvWirelessMode get() = wirelessMode
     val wirelessBluetoothDeviceAddress: String? get() = wirelessBluetoothAddress
@@ -162,6 +208,9 @@ class TvSessionConfig(
     companion object {
         const val APPLE_VENDOR_ID = 0x05ac
         const val DEFAULT_AVAILABLE_CURRENT_MILLI_AMPS = 2400
+        const val DEFAULT_CARLINK_PIN = "864209"
+        const val DEFAULT_CARLINK_MODEL_ID = "00010001"
+        const val DEFAULT_CARLINK_VENDOR_DATA = "0000"
         val DEFAULT_HOST_MAC = byteArrayOf(0x02, 0x00, 0x00, 0x00, 0x00, 0x02)
 
         fun validateLanCredentials(ssid: String, passphrase: String): String? {

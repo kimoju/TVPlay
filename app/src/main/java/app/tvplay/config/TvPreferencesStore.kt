@@ -17,6 +17,8 @@ import app.tvplay.engine.av.PhysicalSizeBasis
 import app.tvplay.engine.av.SafeAreaStringCodec
 import app.tvplay.engine.av.UiDensityScale
 import app.tvplay.engine.network.WifiP2pChannels
+import app.tvplay.engine.protocol.carlink.CarLinkAuthCipher
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvTransportMode
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
@@ -1080,5 +1082,36 @@ object TvPreferencesStore {
             .remove(KEY_OTA_PENDING_APP_KEY)
             .remove(KEY_OTA_PENDING_BASE_URL)
             .apply()
+    }
+
+    private const val KEY_PROJECTION_PROTOCOL = "projection_protocol"
+    private const val KEY_CARLINK_PIN_CODE = "carlink_pin_code"
+
+    fun loadProjectionProtocol(context: Context): TvProjectionProtocol =
+        TvProjectionProtocol.fromKey(prefs(context).getString(KEY_PROJECTION_PROTOCOL, TvProjectionProtocol.AUTO.key))
+
+    fun saveProjectionProtocol(context: Context, protocol: TvProjectionProtocol) {
+        prefs(context).edit().putString(KEY_PROJECTION_PROTOCOL, protocol.key).apply()
+    }
+
+    fun loadCarLinkPinCode(context: Context): String {
+        val existing = prefs(context).getString(KEY_CARLINK_PIN_CODE, null)
+            ?.trim()
+            ?.takeIf { it.length == 6 && it.all(Char::isDigit) }
+        if (existing != null) return existing
+        val generated = CarLinkAuthCipher.generateSixDigitPin()
+        prefs(context).edit().putString(KEY_CARLINK_PIN_CODE, generated).apply()
+        return generated
+    }
+
+    fun saveCarLinkPinCode(context: Context, pin: String) {
+        val clean = pin.trim().filter(Char::isDigit).padEnd(6, '0').take(6)
+        prefs(context).edit().putString(KEY_CARLINK_PIN_CODE, clean).apply()
+    }
+
+    fun refreshCarLinkPinCode(context: Context): String {
+        val generated = CarLinkAuthCipher.generateSixDigitPin()
+        prefs(context).edit().putString(KEY_CARLINK_PIN_CODE, generated).apply()
+        return generated
     }
 }

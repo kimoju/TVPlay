@@ -11,6 +11,7 @@ import app.tvplay.engine.av.DisplaySafeAreaRect
 import app.tvplay.engine.av.DisplayScaleMath
 import app.tvplay.engine.av.OpusEncoderSupport
 import app.tvplay.engine.av.PhysicalSizeBasis
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvTransportMode
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
@@ -31,6 +32,17 @@ class TvSettingsRepository(private val context: Context) {
     val identity = IdentitySettings(context)
 
     class ConnectionSettings(private val context: Context) {
+        var projectionProtocol: TvProjectionProtocol
+            get() = TvPreferencesStore.loadProjectionProtocol(context)
+            set(value) = TvPreferencesStore.saveProjectionProtocol(context, value)
+
+        var carLinkPinCode: String
+            get() = TvPreferencesStore.loadCarLinkPinCode(context)
+            set(value) = TvPreferencesStore.saveCarLinkPinCode(context, value)
+
+        fun refreshCarLinkPinCode(): String =
+            TvPreferencesStore.refreshCarLinkPinCode(context)
+
         var transportMode: TvTransportMode
             get() = TvPreferencesStore.loadTransportMode(context)
             set(value) = TvPreferencesStore.saveTransportMode(context, value)

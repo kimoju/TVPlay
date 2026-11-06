@@ -74,7 +74,12 @@ import app.tvplay.engine.protocol.iap2.Iap2WirelessControlTerminal
 import app.tvplay.engine.protocol.iap2.Iap2WirelessIdentification
 import app.tvplay.engine.protocol.iap2.Iap2WirelessLinkRole
 import app.tvplay.engine.protocol.iap2.forWirelessLink
+import app.tvplay.engine.protocol.carlink.CarLinkBleAdvertiser
+import app.tvplay.engine.protocol.carlink.CarLinkBleSpec
+import app.tvplay.engine.protocol.carlink.CarLinkControlSession
+import app.tvplay.engine.protocol.carlink.CarLinkUibcDispatcher
 import app.tvplay.engine.protocol.rtsp.AirPlayContact
+import app.tvplay.engine.protocol.rtsp.CarPlayMediaEngine
 import app.tvplay.engine.protocol.rtsp.AirPlayDeviceInfo
 import app.tvplay.engine.protocol.rtsp.AirPlayKnobState
 import app.tvplay.engine.protocol.rtsp.AirPlayListenerIdentity
@@ -753,6 +758,8 @@ class TvSessionEngine(
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: UsbTunnelVpnService? = null
     @Volatile private var vpnBound = false
+    @Volatile private var carLinkSession: CarLinkControlSession? = null
+    @Volatile private var carLinkBleAdvertiser: CarLinkBleAdvertiser? = null
     private val wirelessHandoffRequested = AtomicBoolean(false)
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
@@ -899,13 +906,95 @@ class TvSessionEngine(
         synchronized(this) {
             if (closed) return
         }
-        connectionDiagnostic("start transport=${config.transport}")
+        connectionDiagnostic("start transport=${config.transport} protocol=${config.projectionProtocol.key}")
+        if (config.projectionProtocol.enablesCarLink) {
+            startCarLinkSubsystem()
+        }
+        if (!config.projectionProtocol.enablesCarPlay) {
+            onStatus(CarPlayStatus.RunningWireless)
+            return
+        }
         if (!hasRequiredUsbService()) return
         if (config.transport == TvTransportMode.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
         }
         startMfi()
+    }
+
+    private fun startCarLinkSubsystem() {
+        val carMacHex12 = airPlayConfig.btMac.replace(":", "").trim()
+            .takeIf { it.length == 12 }
+            ?: config.hostMac.joinToString("") { "%02X".format(it.toInt() and 0xFF) }
+        val sink = (media as? CarPlayMediaEngine)?.sink
+        val session = CarLinkControlSession(
+            displaySpec = airPlayConfig.main,
+            carBrMac = config.hostMac,
+            pinCodeProvider = { config.carLinkPinCode },
+            certBytes = config.carLinkCertBytes,
+            hevcEnabled = airPlayConfig.hevc,
+            mediaSink = sink,
+            onSessionConnected = { phoneModel ->
+                debugLog("ICCOA CarLink connected: $phoneModel")
+                onStatus(CarPlayStatus.WirelessActive)
+            },
+            onSessionDisconnected = {
+                debugLog("ICCOA CarLink disconnected")
+                if (!closed && activeSession == null) {
+                    onStatus(CarPlayStatus.ControlEnded)
+                }
+            },
+            onMusicMetadata = { music ->
+                val metadata = TvNowPlayingMetadata(
+                    title = music.title.takeIf { it.isNotBlank() },
+                    artist = music.artistName.takeIf { it.isNotBlank() },
+                    album = music.albumName.takeIf { it.isNotBlank() },
+                )
+                nowPlayingListener?.invoke(metadata)
+                playbackListener?.invoke(music.isPlaying)
+            },
+            onLog = ::debugLog,
+        )
+        carLinkSession = session
+        executor.execute {
+            if (!closed) {
+                runCatching { session.start() }
+                    .onFailure { e -> debugLog("CarLink session start error: ${e.message}") }
+            }
+        }
+        if (config.transport == TvTransportMode.WIRELESS) {
+            val advertiser = CarLinkBleAdvertiser(
+                context = appContext,
+                carIdHex12 = carMacHex12,
+                carName = config.label,
+                modelIdHex8 = config.carLinkModelId,
+                vendorDataHex4 = config.carLinkVendorData,
+                serverInfoProvider = {
+                    val ssid = config.lanWifiSsid.ifBlank { config.label }
+                    val psk = config.lanWifiPassphrase
+                    val hostAddr = wirelessPublishedAddress?.hostAddress ?: ""
+                    CarLinkBleSpec.ServerConnectionInfo(
+                        name = config.label,
+                        ssid = ssid,
+                        psk = psk,
+                        mac = hostAddr.ifBlank { airPlayConfig.btMac },
+                        freq = 5180,
+                        port = 0,
+                        type = if (config.wirelessMode == TvWirelessMode.WIFI_DIRECT) 1 else 2,
+                    )
+                },
+                onClientConnected = { device, info ->
+                    debugLog("CarLink BLE client connected: ${info.name} (${info.model}) [${device.address}]")
+                },
+                onLog = ::debugLog,
+            )
+            carLinkBleAdvertiser = advertiser
+            mainHandler.post {
+                if (!closed) {
+                    runCatching { advertiser.start() }
+                }
+            }
+        }
     }
 
     /** Reloads the offline MFi authentication provider without restarting the app. */
@@ -948,7 +1037,24 @@ class TvSessionEngine(
      */
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        val session = activeSession
+        if (session == null) {
+            val cl = carLinkSession
+            if (cl != null && cl.isActive() && contacts.isNotEmpty()) {
+                val anyDown = contacts.any { it.down }
+                val action = if (anyDown) CarLinkUibcDispatcher.ACTION_DOWN else CarLinkUibcDispatcher.ACTION_UP
+                val pointers = contacts.map { c ->
+                    CarLinkUibcDispatcher.TouchPointer(
+                        id = c.id,
+                        x = (c.x * airPlayConfig.main.widthPixels).toInt(),
+                        y = (c.y * airPlayConfig.main.heightPixels).toInt(),
+                    )
+                }
+                touchExecutor.execute { cl.sendTouch(action, pointers) }
+                return true
+            }
+            return false
+        }
         return try {
             synchronized(touchLock) {
                 val isMove = isContinuousMove(lastTouch, contacts)
@@ -1086,12 +1192,27 @@ class TvSessionEngine(
 
     fun requestSiri(): Boolean = invokeSiri()
 
-    /** Updates CarPlay night mode on the active RTSP control session. */
+    /** Updates CarPlay / CarLink night mode on the active control session. */
     fun setNightMode(night: Boolean): Boolean {
         if (closed) return false
-        val session = activeSession ?: return false
+        carLinkSession?.takeIf { it.isActive() }?.let { cl ->
+            touchExecutor.execute { cl.sendNightMode(night) }
+        }
+        val session = activeSession ?: return carLinkSession?.isActive() == true
         return try {
             touchExecutor.execute { session.setNightMode(night) }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Sends an Android key event to an active ICCOA CarLink session over UIBC / Control channel. */
+    fun sendCarLinkKeyEvent(action: Int, androidKeyCode: Int, metaState: Int = 0): Boolean {
+        if (closed) return false
+        val cl = carLinkSession?.takeIf { it.isActive() } ?: return false
+        return try {
+            touchExecutor.execute { cl.sendKeyEvent(action, androidKeyCode, metaState) }
             true
         } catch (_: Exception) {
             false
@@ -1119,6 +1240,10 @@ class TvSessionEngine(
         Thread(
             {
                 try {
+                    closeBestEffort("CarLink BLE advertiser") { carLinkBleAdvertiser?.close() }
+                    carLinkBleAdvertiser = null
+                    closeBestEffort("CarLink session") { carLinkSession?.close() }
+                    carLinkSession = null
                     if (config.transport == TvTransportMode.WIRELESS) {
                         closeBestEffort("wireless stack") { closeWirelessStack(service) }
                         closeBestEffort("AirPlay wireless service") { service?.detach() }

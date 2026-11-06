@@ -655,4 +655,64 @@ class TvUiTest {
         assertTrue("Completion must fire once async teardown finishes", completionCalled)
         CarPlayBackgroundSession.clear()
     }
+
+    @Test
+    fun otaUpdateModalAndGlassProgressBarRenderSpatialBentoDesignInsteadOfNativeAlertDialog() {
+        val workbenchController = Robolectric.buildActivity(TvWorkbenchActivity::class.java).setup()
+        val workbench = workbenchController.get()
+
+        val release = app.tvplay.runtime.LanOtaRelease(
+            releaseId = 22L,
+            versionName = "1.2.7",
+            versionCode = 52L,
+            channel = "stable",
+            minSdk = 24,
+            targetSdk = 34,
+            abis = listOf("arm64-v8a"),
+            isMandatory = false,
+            forceUpdate = false,
+            fileName = "TVPlay-1.2.7.apk",
+            fileSize = 2_500_000L,
+            sha256 = "ec58ca7ef7a7a415940385ca3c0143ff2f9fa53b2a2ebddea3bbddbbc51df697",
+            md5 = null,
+            crc32 = null,
+            changelog = "优化改进：1. 全新 Apple tvOS 风格空间毛玻璃 OTA 升级弹窗；2. 自定义流光胶囊进度条",
+            downloadUrl = "http://10.0.0.30:8080/api/v1/ota/download/22",
+            shortcutUrl = "http://10.0.0.30:8080/d/app.tvplay",
+            pageUrl = "http://10.0.0.30:8080/download.html?app=app.tvplay",
+            publishedAt = "2026-11-06 10:30:00",
+        )
+        val checkResult = app.tvplay.runtime.LanOtaCheckResult(
+            hasUpdate = true,
+            forceUpdate = false,
+            appKey = "app.tvplay",
+            release = release,
+            serverBaseUrl = "http://10.0.0.30:8080",
+        )
+
+        val showOtaMethod = TvWorkbenchActivity::class.java.getDeclaredMethod(
+            "showOtaUpdateDialog",
+            app.tvplay.runtime.LanOtaCheckResult::class.java,
+        ).apply { isAccessible = true }
+        showOtaMethod.invoke(workbench, checkResult)
+
+        val activeDialogField = TvWorkbenchActivity::class.java.getDeclaredField("activeDialog").apply {
+            isAccessible = true
+        }
+        val dialog = activeDialogField.get(workbench) as? android.app.Dialog
+        assertNotNull("showOtaUpdateDialog must show a tracked TvModalDialog", dialog)
+        assertTrue(dialog!!.isShowing)
+        assertFalse("OTA dialog must not be a native Android AlertDialog", dialog is android.app.AlertDialog)
+
+        val modalTexts = collectAllText(dialog.window!!.decorView).joinToString("\n")
+        assertTrue("Modal must display version comparison", "v1.2.7" in modalTexts)
+        assertTrue("Modal must display formatted bulleted release notes", "• 1. 全新 Apple tvOS 风格" in modalTexts)
+        assertTrue("Modal must display primary CTA button", "立即下载并升级" in modalTexts)
+
+        val progressBar = app.tvplay.ui.theme.TvGlassProgressBar(workbench)
+        progressBar.progress = 68
+        assertEquals(68, progressBar.progress)
+
+        workbenchController.pause().stop().destroy()
+    }
 }

@@ -38,11 +38,11 @@ import app.tvplay.runtime.TvLanOtaManager
 import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.TvColorScheme
 import app.tvplay.ui.theme.TvIconGlyph
+import app.tvplay.ui.theme.TvModalDialog
 import app.tvplay.ui.theme.TvPlayButton
 import app.tvplay.ui.theme.TvPlayButtonKind
 import app.tvplay.ui.theme.TvVectorIconDrawable
 import app.tvplay.ui.theme.TvVectorIcons
-import app.tvplay.ui.theme.appDialogBuilder
 
 enum class SettingsCategory(val title: String) {
     CONNECTION("连接与配对"),
@@ -341,21 +341,56 @@ class WorkbenchSettingsTabs(
                 current = currentTransportKey,
                 icon = TvIconGlyph.RADAR,
                 onClickOverride = {
-                    val dialogItems = arrayOf(
-                        "无线 · Wi-Fi Direct 5GHz 直连（推荐：免路由器密码，点对点直连）",
-                        "无线 · 家庭局域网模式（电视与 iPhone 连接同一 Wi-Fi 或网线）",
-                        "USB 有线数据线直连（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
-                    )
                     val checkedIndex = transportOptions.indexOfFirst { it.first == currentTransportKey }.coerceAtLeast(0)
-                    appDialogBuilder(context)
-                        .setTitle("选择 CarPlay 连接模式")
-                        .setSingleChoiceItems(dialogItems, checkedIndex) { dialog, which ->
-                            dialog.dismiss()
-                            val chosenKey = transportOptions.getOrNull(which)?.first ?: return@setSingleChoiceItems
-                            applyTransportKey(chosenKey)
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
+                    val optionItems = listOf(
+                        TvModalDialog.OptionItem(
+                            title = "无线 · Wi-Fi Direct 5GHz 直连（推荐）",
+                            subtitle = "免填路由器密码，电视与 iPhone 自动建立 5GHz 高速点对点通道",
+                            badgeText = if (checkedIndex == 0) "当前模式" else "点击切换",
+                            selected = checkedIndex == 0,
+                            icon = TvIconGlyph.WIFI,
+                        ),
+                        TvModalDialog.OptionItem(
+                            title = "无线 · 家庭局域网模式",
+                            subtitle = "电视与 iPhone 连接同一台家庭路由器（Wi-Fi 或千兆网线）",
+                            badgeText = if (checkedIndex == 1) "当前模式" else "点击切换",
+                            selected = checkedIndex == 1,
+                            icon = TvIconGlyph.LAN,
+                        ),
+                        TvModalDialog.OptionItem(
+                            title = "USB 有线数据线直连",
+                            subtitle = "使用 Lightning / USB-C 数据线直连电视 USB 接口",
+                            badgeText = if (checkedIndex == 2) "当前模式" else "点击切换",
+                            selected = checkedIndex == 2,
+                            icon = TvIconGlyph.USB,
+                        ),
+                    )
+                    var dialogRef: android.app.Dialog? = null
+                    val listView = TvModalDialog.createOptionListView(
+                        context = context,
+                        items = optionItems,
+                        palette = palette,
+                    ) { which ->
+                        runCatching { dialogRef?.dismiss() }
+                        val chosenKey = transportOptions.getOrNull(which)?.first ?: return@createOptionListView
+                        applyTransportKey(chosenKey)
+                    }
+                    val handle = TvModalDialog.create(
+                        context = context,
+                        title = "选择 CarPlay 连接模式",
+                        subtitle = "使用遥控器上下键选择目标链路模式并按确认键生效",
+                        icon = TvIconGlyph.RADAR,
+                        badgeText = "3 种链路",
+                        bodyView = listView,
+                        actions = listOf(
+                            TvModalDialog.ActionSpec(
+                                label = "取消",
+                                kind = TvPlayButtonKind.SECONDARY,
+                            ),
+                        ),
+                    )
+                    dialogRef = handle.dialog
+                    handle.dialog.show()
                 },
             ) { key ->
                 applyTransportKey(key)
@@ -1303,7 +1338,7 @@ class WorkbenchSettingsTabs(
                 isFocusableInTouchMode = true
                 requestFocus()
                 val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+                imm?.showSoftInput(this, 0)
             }
             addTextChangedListener(
                 object : TextWatcher {

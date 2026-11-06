@@ -18,18 +18,28 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
+import android.util.TypedValue
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.Window
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Switch
+import android.widget.TextView
 import androidx.core.graphics.ColorUtils
 import java.io.ByteArrayOutputStream
 import kotlin.math.cos
@@ -739,6 +749,487 @@ fun Context.appDialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(this, 
 fun appDialogBuilder(context: Context): AlertDialog.Builder = context.appDialogBuilder()
 
 fun Context.appDialog(): Dialog = Dialog(this, appDialogTheme())
+
+/**
+ * Spatial Liquid Glass capsule progress bar (`ui-ux-pro-max`) replacing Android's native ProgressBar.
+ * Renders a rounded capsule track with a glowing blue-to-cyan gradient fill and specular top edge.
+ */
+class TvGlassProgressBar(
+    context: Context,
+    private val palette: TvColorScheme = TvColorScheme.resolve(context),
+) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = palette.trackOff
+    }
+    private val trackStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = (1f * density).coerceAtLeast(1f)
+        color = palette.outline
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = (1f * density).coerceAtLeast(1f)
+        color = ColorUtils.setAlphaComponent(Color.WHITE, 0x55)
+    }
+    private val trackRect = RectF()
+    private val fillRect = RectF()
+
+    var progress: Int = 0
+        set(value) {
+            val clamped = value.coerceIn(0, 100)
+            if (field != clamped) {
+                field = clamped
+                invalidate()
+            }
+        }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val defaultHeight = (14f * density).toInt().coerceAtLeast(10)
+        val resolvedWidth = resolveSize((320f * density).toInt(), widthMeasureSpec)
+        val resolvedHeight = resolveSize(defaultHeight, heightMeasureSpec)
+        setMeasuredDimension(resolvedWidth, resolvedHeight)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        fillPaint.shader = LinearGradient(
+            0f,
+            0f,
+            w.toFloat().coerceAtLeast(1f),
+            0f,
+            palette.accent,
+            palette.cyanAccent,
+            Shader.TileMode.CLAMP,
+        )
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val inset = trackStrokePaint.strokeWidth / 2f
+        val radius = h / 2f
+        trackRect.set(inset, inset, w - inset, h - inset)
+        canvas.drawRoundRect(trackRect, radius, radius, trackPaint)
+        canvas.drawRoundRect(trackRect, radius, radius, trackStrokePaint)
+
+        if (progress > 0) {
+            val minFillWidth = h.coerceAtMost(w)
+            val fillRight = (w * (progress / 100f)).coerceIn(minFillWidth, w - inset)
+            fillRect.set(inset, inset, fillRight, h - inset)
+            canvas.drawRoundRect(fillRect, radius, radius, fillPaint)
+            canvas.drawRoundRect(fillRect, radius, radius, highlightPaint)
+        }
+    }
+}
+
+/**
+ * Spatial Liquid Glass Bento Modal Dialog (`ui-ux-pro-max`) for Android TV 10-foot experience.
+ *
+ * Replaces stock Android `AlertDialog` with a borderless glassmorphic Bento card matching
+ * [WorkbenchHeroStage] and [StageQuickControlOverlay], complete with vector icon well,
+ * status capsule badge, scrollable content cards, and D-pad focus-ring buttons.
+ */
+object TvModalDialog {
+
+    data class ActionSpec(
+        val label: String,
+        val kind: TvPlayButtonKind = TvPlayButtonKind.SECONDARY,
+        val icon: TvIconGlyph? = null,
+        val dismissOnClick: Boolean = true,
+        val onClick: ((Dialog) -> Unit)? = null,
+    )
+
+    data class OptionItem(
+        val title: String,
+        val subtitle: String? = null,
+        val badgeText: String? = null,
+        val selected: Boolean = false,
+        val icon: TvIconGlyph = TvIconGlyph.PHONE,
+    )
+
+    class Handle(
+        val dialog: Dialog,
+        val rightBadgeView: TextView,
+        val primaryButton: TvPlayButton?,
+    )
+
+    fun create(
+        context: Context,
+        title: String,
+        subtitle: String? = null,
+        icon: TvIconGlyph = TvIconGlyph.SPARKLES,
+        badgeText: String? = null,
+        badgeIsWarning: Boolean = false,
+        cancelable: Boolean = true,
+        bodyView: View? = null,
+        actions: List<ActionSpec> = emptyList(),
+    ): Handle {
+        val density = context.resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        val palette = TvColorScheme.resolve(context)
+
+        val dialog = Dialog(context)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setCancelable(cancelable)
+        dialog.setCanceledOnTouchOutside(cancelable)
+
+        val rootCard = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(26), dp(22), dp(26), dp(22))
+            background = HeroBentoCardDrawable(
+                palette = palette,
+                highlighted = !badgeIsWarning,
+                cornerRadiusPx = dp(26).toFloat(),
+                strokeWidthPx = dp(2).toFloat(),
+                activeGlow = true,
+            )
+        }
+
+        // 1. Header Row (Icon Badge Well + Title/Subtitle + Right Status Pill)
+        val headerRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(14))
+        }
+        val iconWell = TvVectorIcons.badgeWell(
+            context = context,
+            glyph = icon,
+            palette = palette,
+            active = true,
+            sizeDp = 42,
+            iconDp = 20,
+        )
+        val titleCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginStart = dp(14)
+                marginEnd = dp(12)
+            }
+        }
+        titleCol.addView(
+            TextView(context).apply {
+                text = title
+                setTextColor(palette.textPrimary)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            },
+        )
+        if (!subtitle.isNullOrBlank()) {
+            titleCol.addView(
+                TextView(context).apply {
+                    text = subtitle
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(2), 0, 0)
+                },
+            )
+        }
+
+        val rightBadge = TextView(context).apply {
+            text = badgeText.orEmpty()
+            visibility = if (badgeText.isNullOrBlank()) View.GONE else View.VISIBLE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            setTextColor(if (badgeIsWarning) palette.warningText else palette.cyanAccent)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor(
+                    if (badgeIsWarning) {
+                        palette.warningSurface
+                    } else {
+                        ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x28 else 0x18)
+                    },
+                )
+                setStroke(
+                    dp(1),
+                    if (badgeIsWarning) {
+                        palette.warningOutline
+                    } else {
+                        ColorUtils.setAlphaComponent(palette.cyanAccent, 0x77)
+                    },
+                )
+            }
+        }
+
+        headerRow.addView(iconWell, LinearLayout.LayoutParams(dp(42), dp(42)))
+        headerRow.addView(titleCol)
+        headerRow.addView(rightBadge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        rootCard.addView(headerRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // 2. Hairline Divider
+        val divider = View(context).apply {
+            setBackgroundColor(palette.outline)
+        }
+        rootCard.addView(
+            divider,
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(1)).apply { bottomMargin = dp(14) },
+        )
+
+        // 3. Body View
+        if (bodyView != null) {
+            rootCard.addView(
+                bodyView,
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    bottomMargin = if (actions.isNotEmpty()) dp(16) else 0
+                },
+            )
+        }
+
+        // 4. Footer Action Buttons
+        var primaryBtn: TvPlayButton? = null
+        if (actions.isNotEmpty()) {
+            val footerRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                clipChildren = false
+                clipToPadding = false
+            }
+            val createdButtons = mutableListOf<TvPlayButton>()
+            actions.forEachIndexed { index, spec ->
+                val btn = TvPlayButton(context, spec.kind, spec.icon).apply {
+                    id = View.generateViewId()
+                    text = spec.label
+                    minHeight = dp(44)
+                    minimumHeight = dp(44)
+                    setPadding(dp(18), dp(10), dp(18), dp(10))
+                    setOnClickListener {
+                        if (spec.dismissOnClick) {
+                            runCatching { dialog.dismiss() }
+                        }
+                        spec.onClick?.invoke(dialog)
+                    }
+                }
+                if (spec.kind == TvPlayButtonKind.PRIMARY && primaryBtn == null) {
+                    primaryBtn = btn
+                }
+                createdButtons += btn
+                footerRow.addView(
+                    btn,
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                        if (index > 0) marginStart = dp(10)
+                    },
+                )
+            }
+            if (primaryBtn == null) {
+                primaryBtn = createdButtons.firstOrNull()
+            }
+            rootCard.addView(footerRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        val outerWrapper = FrameLayout(context).apply {
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            addView(
+                rootCard,
+                FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER),
+            )
+        }
+
+        dialog.setContentView(outerWrapper)
+        dialog.window?.let { win ->
+            win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            win.setDimAmount(if (palette.night) 0.78f else 0.55f)
+            val dm = context.resources.displayMetrics
+            val targetWidth = min((dm.widthPixels * 0.72f).toInt(), dp(640))
+                .coerceAtLeast(min(dm.widthPixels - dp(24), dp(420)))
+            win.setLayout(targetWidth, WRAP_CONTENT)
+        }
+
+        dialog.setOnShowListener {
+            primaryBtn?.post { primaryBtn.requestFocus() }
+        }
+
+        return Handle(
+            dialog = dialog,
+            rightBadgeView = rightBadge,
+            primaryButton = primaryBtn,
+        )
+    }
+
+    /**
+     * Builds a styled glassmorphic sub-card container for modal body sections.
+     */
+    fun createSubCard(
+        context: Context,
+        palette: TvColorScheme = TvColorScheme.resolve(context),
+        isWarning: Boolean = false,
+    ): LinearLayout {
+        val density = context.resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(13), dp(16), dp(13))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setColor(
+                    if (isWarning) {
+                        palette.warningSurface
+                    } else {
+                        ColorUtils.setAlphaComponent(palette.subtleSurface, if (palette.night) 0xE6 else 0xF5)
+                    },
+                )
+                setStroke(
+                    dp(1),
+                    if (isWarning) palette.warningOutline else palette.outline,
+                )
+            }
+        }
+    }
+
+    /**
+     * Builds a focusable Bento list of selectable rows for device or option pickers.
+     */
+    fun createOptionListView(
+        context: Context,
+        items: List<OptionItem>,
+        palette: TvColorScheme = TvColorScheme.resolve(context),
+        onSelect: (Int) -> Unit,
+    ): View {
+        val density = context.resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        val listLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            clipChildren = false
+            clipToPadding = false
+        }
+        items.forEachIndexed { index, item ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isFocusable = true
+                isFocusableInTouchMode = false
+                isClickable = true
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+            }
+            val iconWell = TvVectorIcons.badgeWell(
+                context = context,
+                glyph = item.icon,
+                palette = palette,
+                active = item.selected,
+                sizeDp = 36,
+                iconDp = 17,
+            )
+            val textCol = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(12)
+                    marginEnd = dp(10)
+                }
+            }
+            textCol.addView(
+                TextView(context).apply {
+                    text = item.title
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                },
+            )
+            if (!item.subtitle.isNullOrBlank()) {
+                textCol.addView(
+                    TextView(context).apply {
+                        text = item.subtitle
+                        setTextColor(palette.textSecondary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(0, dp(2), 0, 0)
+                    },
+                )
+            }
+            val statusPill = TextView(context).apply {
+                val pillLabel = item.badgeText ?: if (item.selected) "当前已选" else "点击选择"
+                text = pillLabel
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                setPadding(dp(11), dp(4), dp(11), dp(4))
+            }
+            fun styleRow(focused: Boolean) {
+                val highlighted = focused || item.selected
+                row.background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(
+                        if (focused) {
+                            ColorUtils.blendARGB(palette.surfaceCardElevated, palette.accent, 0.22f)
+                        } else if (item.selected) {
+                            ColorUtils.blendARGB(palette.surfaceCard, palette.accent, 0.14f)
+                        } else {
+                            palette.surfaceCard
+                        },
+                        if (focused) palette.surfaceCardElevated else palette.subtleSurface,
+                    ),
+                ).apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(15).toFloat()
+                    setStroke(
+                        if (focused) dp(2) else dp(1),
+                        when {
+                            focused -> palette.focusRing
+                            item.selected -> palette.accent
+                            else -> palette.outline
+                        },
+                    )
+                }
+                statusPill.setTextColor(
+                    when {
+                        focused -> palette.onAccent
+                        item.selected -> palette.success
+                        else -> palette.textSecondary
+                    },
+                )
+                statusPill.background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 999f * density
+                    setColor(
+                        when {
+                            focused -> palette.accent
+                            item.selected -> palette.successSurface
+                            else -> palette.badgeSurface
+                        },
+                    )
+                    setStroke(
+                        dp(1),
+                        when {
+                            focused -> ColorUtils.blendARGB(palette.accent, Color.WHITE, 0.25f)
+                            item.selected -> ColorUtils.setAlphaComponent(palette.success, 0x66)
+                            else -> palette.badgeOutline
+                        },
+                    )
+                }
+            }
+            styleRow(false)
+            row.setOnFocusChangeListener { _, hasFocus -> styleRow(hasFocus) }
+            row.setOnClickListener { onSelect(index) }
+            row.addView(iconWell, LinearLayout.LayoutParams(dp(36), dp(36)))
+            row.addView(textCol)
+            row.addView(statusPill, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            listLayout.addView(
+                row,
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    if (index < items.lastIndex) bottomMargin = dp(8)
+                },
+            )
+            if (index == 0 || item.selected) {
+                row.post { row.requestFocus() }
+            }
+        }
+        return ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            addView(listLayout, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+    }
+}
 
 /** Keeps custom AirPlay home icons inside a small square PNG so an oversized picker file cannot stall /info. */
 object AirPlayIconSizing {

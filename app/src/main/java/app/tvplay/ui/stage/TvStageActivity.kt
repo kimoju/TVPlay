@@ -3,7 +3,7 @@ package app.tvplay.ui.stage
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.Dialog
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
@@ -15,6 +15,8 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
@@ -23,6 +25,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -35,6 +38,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -93,10 +97,12 @@ import app.tvplay.runtime.TvDiagnosticsLogger
 import app.tvplay.runtime.TvMediaKeyRouter
 import app.tvplay.runtime.TvProjectionSessionHost
 import app.tvplay.runtime.TvSessionForegroundService
-import app.tvplay.ui.theme.appDialogBuilder
 import app.tvplay.runtime.WirelessStartupRetryBudget
 import app.tvplay.ui.theme.AppAppearance
 import app.tvplay.ui.theme.TvColorScheme
+import app.tvplay.ui.theme.TvIconGlyph
+import app.tvplay.ui.theme.TvModalDialog
+import app.tvplay.ui.theme.TvPlayButtonKind
 import app.tvplay.ui.workbench.TvWorkbenchActivity
 
 typealias TvPlayProjectionActivity = TvStageActivity
@@ -158,7 +164,7 @@ class TvStageActivity : Activity() {
         Thread(runnable, "tvplay-stage-teardown").apply { isDaemon = true }
     }
     private var bluetoothReceiverRegistered = false
-    private var activeDialog: android.app.AlertDialog? = null
+    private var activeDialog: Dialog? = null
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (isFinishing || isDestroyed || isProjectionVisible || streamingActive || activeAirPlaySession != null) return
@@ -1298,7 +1304,7 @@ class TvStageActivity : Activity() {
         mainHandler.postDelayed(task, delayMillis)
     }
 
-    private fun showTrackedDialog(dialog: android.app.AlertDialog) {
+    private fun showTrackedDialog(dialog: Dialog) {
         runCatching { activeDialog?.dismiss() }
         activeDialog = dialog
         dialog.setOnDismissListener {
@@ -1317,143 +1323,281 @@ class TvStageActivity : Activity() {
             currentMode == TvWirelessMode.LAN_WIFI -> 1
             else -> 0
         }
-        val options = arrayOf(
-            "无线 · Wi-Fi Direct 5GHz 直连（推荐：免路由器密码，点对点直连）",
-            "无线 · 家庭局域网模式（电视与 iPhone 连接同一 Wi-Fi，需配置密码）",
-            "USB 有线连接模式（使用 Lightning / USB-C 数据线直连电视 USB 接口）",
+        val palette = TvColorScheme.resolve(this)
+        val optionItems = listOf(
+            TvModalDialog.OptionItem(
+                title = "无线 · Wi-Fi Direct 5GHz 直连（推荐）",
+                subtitle = "免填路由器密码，电视与 iPhone 自动建立 5GHz 点对点直连",
+                badgeText = if (currentIndex == 0) "当前模式" else "点击切换",
+                selected = currentIndex == 0,
+                icon = TvIconGlyph.WIFI,
+            ),
+            TvModalDialog.OptionItem(
+                title = "无线 · 家庭局域网模式",
+                subtitle = "电视与 iPhone 连接同一台家庭路由器（Wi-Fi 或网线）",
+                badgeText = if (currentIndex == 1) "当前模式" else "点击切换",
+                selected = currentIndex == 1,
+                icon = TvIconGlyph.LAN,
+            ),
+            TvModalDialog.OptionItem(
+                title = "USB 有线连接模式",
+                subtitle = "使用 Lightning / USB-C 数据线直连电视 USB 接口",
+                badgeText = if (currentIndex == 2) "当前模式" else "点击切换",
+                selected = currentIndex == 2,
+                icon = TvIconGlyph.USB,
+            ),
         )
-        appDialogBuilder(this)
-            .setTitle("切换 CarPlay 连接模式")
-            .setSingleChoiceItems(options, currentIndex) { dialog, which ->
-                dialog.dismiss()
-                intent?.removeExtra("wireless")
-                when (which) {
-                    0 -> {
-                        TvPreferencesStore.saveWirelessEnabled(this, true)
-                        TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
-                        permissionsPromptedThisSession = false
-                        reconnectAttempts = 0
-                        reconnectNow()
+        var dialogRef: Dialog? = null
+        val listView = TvModalDialog.createOptionListView(
+            context = this,
+            items = optionItems,
+            palette = palette,
+        ) { which ->
+            runCatching { dialogRef?.dismiss() }
+            intent?.removeExtra("wireless")
+            when (which) {
+                0 -> {
+                    TvPreferencesStore.saveWirelessEnabled(this, true)
+                    TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
+                    permissionsPromptedThisSession = false
+                    reconnectAttempts = 0
+                    reconnectNow()
+                }
+                1 -> {
+                    TvPreferencesStore.saveWirelessEnabled(this, true)
+                    TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.LAN_WIFI)
+                    permissionsPromptedThisSession = false
+                    reconnectAttempts = 0
+                    val currentPass = TvPreferencesStore.loadExistingWifiPassphrase(this)
+                    val currentSsid = TvPreferencesStore.loadExistingWifiSsid(this)
+                        .ifBlank { LanNetworkLink.detectConnectedWifiSsid(this).orEmpty() }
+                    if (currentSsid.isNotBlank()) {
+                        TvPreferencesStore.saveExistingWifiCredentials(this, currentSsid, currentPass)
                     }
-                    1 -> {
-                        TvPreferencesStore.saveWirelessEnabled(this, true)
-                        TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.LAN_WIFI)
-                        permissionsPromptedThisSession = false
-                        reconnectAttempts = 0
-                        val currentPass = TvPreferencesStore.loadExistingWifiPassphrase(this)
-                        val currentSsid = TvPreferencesStore.loadExistingWifiSsid(this)
-                            .ifBlank { LanNetworkLink.detectConnectedWifiSsid(this).orEmpty() }
-                        if (currentSsid.isNotBlank()) {
-                            TvPreferencesStore.saveExistingWifiCredentials(this, currentSsid, currentPass)
-                        }
-                        if (currentSsid.isBlank() || (currentPass.isBlank() && !LanNetworkLink.isConnectedWifiOpen(this))) {
-                            showLanWifiConfigDialog()
-                        } else {
-                            reconnectNow()
-                        }
-                    }
-                    2 -> {
-                        TvPreferencesStore.saveWirelessEnabled(this, false)
-                        permissionsPromptedThisSession = false
-                        vpnPromptedThisSession = false
-                        reconnectAttempts = 0
+                    if (currentSsid.isBlank() || (currentPass.isBlank() && !LanNetworkLink.isConnectedWifiOpen(this))) {
+                        showLanWifiConfigDialog()
+                    } else {
                         reconnectNow()
                     }
                 }
+                2 -> {
+                    TvPreferencesStore.saveWirelessEnabled(this, false)
+                    permissionsPromptedThisSession = false
+                    vpnPromptedThisSession = false
+                    reconnectAttempts = 0
+                    reconnectNow()
+                }
             }
-            .setNegativeButton("取消", null)
-            .create()
-            .also(::showTrackedDialog)
+        }
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "切换 CarPlay 连接模式",
+            subtitle = "使用遥控器上下键选择目标模式并按确认键立即重连",
+            icon = TvIconGlyph.RADAR,
+            badgeText = "3 种链路",
+            bodyView = listView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+            ),
+        )
+        dialogRef = handle.dialog
+        showTrackedDialog(handle.dialog)
     }
 
     private fun showLanWifiConfigDialog() {
         if (isFinishing || isDestroyed) return
         val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
         val palette = TvColorScheme.resolve(this)
-        val container = LinearLayout(this).apply {
+
+        val bodyColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val padH = (24 * density).toInt()
-            val padV = (12 * density).toInt()
-            setPadding(padH, padV, padH, padV)
         }
+        val tipCard = TvModalDialog.createSubCard(this, palette).apply {
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = "局域网模式下，无线 CarPlay 蓝牙握手 (0x5703 / 0x4301) 需向 iPhone 下发当前路由器的 Wi-Fi 名称与密码：\n" +
+                        "• 请在下方确认路由器 Wi-Fi 名称并填写密码；\n" +
+                        "• 或直接改用「Wi-Fi Direct 5GHz 直连」（免填密码）。"
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setLineSpacing(0f, 1.3f)
+                },
+            )
+        }
+        bodyColumn.addView(
+            tipCard,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(10)
+            },
+        )
+
+        fun createStyledInput(initial: String, hintText: String, password: Boolean): EditText {
+            fun boxBg(focused: Boolean) = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(if (focused) palette.surfaceCardElevated else palette.subtleSurface)
+                setStroke(
+                    if (focused) dp(2) else dp(1),
+                    if (focused) palette.focusRing else palette.outline,
+                )
+            }
+            return EditText(this).apply {
+                setText(initial)
+                hint = hintText
+                setTextColor(palette.textPrimary)
+                setHintTextColor(palette.textSecondary)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+                isSingleLine = true
+                imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                inputType = if (password) {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                } else {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                }
+                background = boxBg(false)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                setOnFocusChangeListener { _, hasFocus -> background = boxBg(hasFocus) }
+            }
+        }
+
         val detectedSsid = LanNetworkLink.detectConnectedWifiSsid(this).orEmpty()
-        val ssidInput = EditText(this).apply {
-            hint = "家庭路由器 Wi-Fi 名称 (SSID)"
-            setText(TvPreferencesStore.loadExistingWifiSsid(this@TvStageActivity).ifBlank { detectedSsid })
-            setTextColor(palette.textPrimary)
-            setHintTextColor(palette.textSecondary)
-            isSingleLine = true
-        }
-        val passLabel = TextView(this).apply {
-            text = "家庭路由器 Wi-Fi 密码（iAP2 握手时需下发给 iPhone，若为无密码开放网络可留空）："
-            setTextColor(palette.textSecondary)
-            setPadding(0, (10 * density).toInt(), 0, (4 * density).toInt())
-        }
-        val passInput = EditText(this).apply {
-            hint = "WPA2 Wi-Fi 密码"
-            setText(TvPreferencesStore.loadExistingWifiPassphrase(this@TvStageActivity))
-            setTextColor(palette.textPrimary)
-            setHintTextColor(palette.textSecondary)
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        container.addView(
-            ssidInput,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        val ssidInput = createStyledInput(
+            initial = TvPreferencesStore.loadExistingWifiSsid(this).ifBlank { detectedSsid },
+            hintText = "家庭路由器 Wi-Fi 名称 (SSID)",
+            password = false,
         )
-        container.addView(
-            passLabel,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        val passInput = createStyledInput(
+            initial = TvPreferencesStore.loadExistingWifiPassphrase(this),
+            hintText = "WPA2 Wi-Fi 密码（若为开放网络可留空）",
+            password = true,
         )
-        container.addView(
-            passInput,
+
+        val formCard = TvModalDialog.createSubCard(this, palette).apply {
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = "路由器 Wi-Fi 名称 (SSID)"
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(0, 0, 0, dp(5))
+                },
+            )
+            addView(
+                ssidInput,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(10)
+                },
+            )
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = "路由器 Wi-Fi 密码 (WPA2)"
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(0, 0, 0, dp(5))
+                },
+            )
+            addView(
+                passInput,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+        }
+        bodyColumn.addView(
+            formCard,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
 
-        appDialogBuilder(this)
-            .setTitle("配置家庭局域网路由器 Wi-Fi")
-            .setMessage(
-                "局域网模式下，无线 CarPlay 蓝牙握手 (0x5703 / 0x4301) 必须向 iPhone 下发当前路由器的真实 Wi-Fi 名称与密码，iPhone 才会连接电视的 AirPlay 端口。\n" +
-                    "• 请在下方确认路由器 Wi-Fi 名称并填写密码；\n" +
-                    "• 或直接改用「Wi-Fi Direct 5GHz 直连」（免填密码）。",
-            )
-            .setView(container)
-            .setPositiveButton("保存并重新连接") { _, _ ->
-                val ssid = ssidInput.text?.toString()?.trim().orEmpty()
-                val pass = passInput.text?.toString().orEmpty()
-                TvPreferencesStore.saveExistingWifiCredentials(this, ssid, pass)
-                reconnectAttempts = 0
-                reconnectNow()
-            }
-            .setNeutralButton("改用 Wi-Fi Direct 直连（推荐）") { _, _ ->
-                TvPreferencesStore.saveWirelessEnabled(this, true)
-                TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
-                permissionsPromptedThisSession = false
-                reconnectAttempts = 0
-                reconnectNow()
-            }
-            .setNegativeButton("取消", null)
-            .create()
-            .also(::showTrackedDialog)
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "配置家庭局域网路由器 Wi-Fi",
+            subtitle = "下发路由器凭据或一键切换至 Wi-Fi Direct 直连",
+            icon = TvIconGlyph.LAN,
+            badgeText = "LAN 模式",
+            bodyView = bodyColumn,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "改用 Wi-Fi Direct 直连（推荐）",
+                    kind = TvPlayButtonKind.SECONDARY,
+                    icon = TvIconGlyph.WIFI,
+                ) {
+                    TvPreferencesStore.saveWirelessEnabled(this, true)
+                    TvPreferencesStore.saveWirelessHotspotMode(this, TvWirelessMode.WIFI_DIRECT)
+                    permissionsPromptedThisSession = false
+                    reconnectAttempts = 0
+                    reconnectNow()
+                },
+                TvModalDialog.ActionSpec(
+                    label = "保存并重新连接",
+                    kind = TvPlayButtonKind.PRIMARY,
+                    icon = TvIconGlyph.REFRESH,
+                ) {
+                    val ssid = ssidInput.text?.toString()?.trim().orEmpty()
+                    val pass = passInput.text?.toString().orEmpty()
+                    TvPreferencesStore.saveExistingWifiCredentials(this, ssid, pass)
+                    reconnectAttempts = 0
+                    reconnectNow()
+                },
+            ),
+        )
+        showTrackedDialog(handle.dialog)
     }
 
     private fun openBluetoothSettings() {
         val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
-        val options = arrayOf(
-            "开启本机蓝牙可见（推荐：让 iPhone 在蓝牙设置中直接搜到「$btName」）",
-            "打开电视系统蓝牙设置（进入系统蓝牙界面配对）",
+        val palette = TvColorScheme.resolve(this)
+        val items = listOf(
+            TvModalDialog.OptionItem(
+                title = "开启本机蓝牙可见（推荐）",
+                subtitle = "让 iPhone 在「设置 → 蓝牙」底部直接搜到「$btName」并完成配对",
+                badgeText = "一键广播",
+                selected = true,
+                icon = TvIconGlyph.RADAR,
+            ),
+            TvModalDialog.OptionItem(
+                title = "打开电视系统蓝牙设置",
+                subtitle = "进入 Android TV 系统原生蓝牙界面管理或配对设备",
+                badgeText = "系统设置",
+                selected = false,
+                icon = TvIconGlyph.BLUETOOTH,
+            ),
         )
-        appDialogBuilder(this)
-            .setTitle("电视与 iPhone 蓝牙配对")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> requestBluetoothDiscoverable()
-                    1 -> launchSystemBluetoothSettings()
-                }
+        var dialogRef: Dialog? = null
+        val listView = TvModalDialog.createOptionListView(
+            context = this,
+            items = items,
+            palette = palette,
+        ) { which ->
+            runCatching { dialogRef?.dismiss() }
+            when (which) {
+                0 -> requestBluetoothDiscoverable()
+                1 -> launchSystemBluetoothSettings()
             }
-            .setNegativeButton("取消", null)
-            .create()
-            .also(::showTrackedDialog)
+        }
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "电视与 iPhone 蓝牙配对",
+            subtitle = "本机蓝牙标识：$btName",
+            icon = TvIconGlyph.BLUETOOTH,
+            badgeText = "蓝牙向导",
+            bodyView = listView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "关闭",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+            ),
+        )
+        dialogRef = handle.dialog
+        showTrackedDialog(handle.dialog)
     }
 
     private fun requestBluetoothDiscoverable() {

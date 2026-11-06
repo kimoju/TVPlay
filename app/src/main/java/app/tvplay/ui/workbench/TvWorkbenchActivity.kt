@@ -3,25 +3,33 @@ package app.tvplay.ui.workbench
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.Dialog
 import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.setPadding
 import app.tvplay.R
 import app.tvplay.config.TvPlayBluetooth
@@ -44,7 +52,10 @@ import app.tvplay.ui.stage.CarPlayScreen
 import app.tvplay.ui.theme.AppAppearanceOwner
 import app.tvplay.ui.theme.AppAppearanceRuntime
 import app.tvplay.ui.theme.TvColorScheme
-import app.tvplay.ui.theme.appDialogBuilder
+import app.tvplay.ui.theme.TvGlassProgressBar
+import app.tvplay.ui.theme.TvIconGlyph
+import app.tvplay.ui.theme.TvModalDialog
+import app.tvplay.ui.theme.TvPlayButtonKind
 import app.tvplay.ui.theme.resolveAppNightNow
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -72,7 +83,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private var pendingWirelessLaunch: Boolean = true
     private var pendingChoosePhoneLaunchAfterSelect: Boolean = false
     private val themeModeDiagnostics = ThemeModeDiagnostics()
-    private var activeDialog: android.app.AlertDialog? = null
+    private var activeDialog: Dialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = TvSettingsRepository(this)
@@ -148,7 +159,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         super.onDestroy()
     }
 
-    private fun showTrackedDialog(dialog: android.app.AlertDialog) {
+    private fun showTrackedDialog(dialog: Dialog) {
         runCatching { activeDialog?.dismiss() }
         activeDialog = dialog
         dialog.setOnDismissListener {
@@ -502,17 +513,44 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         launchAfterSelect: Boolean,
         includeAccessories: Boolean,
     ) {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        val palette = TvColorScheme.resolve(this)
+
         if (!BluetoothRadioCheck.isOn(this)) {
-            appDialogBuilder(this)
-                .setTitle("请先开启电视蓝牙")
-                .setMessage(
-                    "无线 CarPlay 需要通过电视蓝牙与 iPhone 完成初始握手。请先打开电视系统蓝牙设置并开启蓝牙开关。",
+            val bodyCard = TvModalDialog.createSubCard(this, palette, isWarning = true).apply {
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = "无线 CarPlay 需要通过电视蓝牙与 iPhone 完成初始握手与 Wi-Fi 参数下发。\n请先打开电视系统蓝牙设置并开启蓝牙开关。"
+                        setTextColor(palette.textPrimary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                        setLineSpacing(0f, 1.32f)
+                    },
                 )
-                .setPositiveButton("打开电视蓝牙设置") { _, _ ->
-                    openSystemBluetoothSettings()
-                }
-                .setNegativeButton("取消", null)
-                .show()
+            }
+            val handle = TvModalDialog.create(
+                context = this,
+                title = "请先开启电视蓝牙",
+                subtitle = "蓝牙无线握手 · CarPlay 自动建联前置条件",
+                icon = TvIconGlyph.BLUETOOTH,
+                badgeText = "蓝牙未开启",
+                badgeIsWarning = true,
+                bodyView = bodyCard,
+                actions = listOf(
+                    TvModalDialog.ActionSpec(
+                        label = "取消",
+                        kind = TvPlayButtonKind.SECONDARY,
+                    ),
+                    TvModalDialog.ActionSpec(
+                        label = "打开电视蓝牙设置",
+                        kind = TvPlayButtonKind.PRIMARY,
+                        icon = TvIconGlyph.BLUETOOTH,
+                    ) {
+                        openSystemBluetoothSettings()
+                    },
+                ),
+            )
+            showTrackedDialog(handle.dialog)
             return
         }
 
@@ -522,140 +560,296 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         if (devices.isEmpty()) {
             val onlyAccessoriesPaired = allBonded.isNotEmpty()
             val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
-            val builder = appDialogBuilder(this)
-                .setTitle("尚未配对 iPhone")
-                .setMessage(
-                    (if (onlyAccessoriesPaired) {
-                        "当前仅检测到电视蓝牙遥控器或音频外设，尚未发现已配对的 iPhone。\n\n"
-                    } else {
-                        "尚未检测到已配对的 iPhone。\n\n"
-                    }) +
-                        "推荐配对方式：\n" +
-                        "1. 点击下方「开启蓝牙可见并等待连接」并允许可见\n" +
-                        "2. 在 iPhone 上打开「设置 → 蓝牙」，在底部「其他设备」中点击「$btName」\n" +
-                        "3. 配对完成后将自动建立无线 CarPlay 投屏",
+            val guideCard = TvModalDialog.createSubCard(this, palette).apply {
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = if (onlyAccessoriesPaired) {
+                            "当前仅检测到电视蓝牙遥控器或音频外设，尚未发现已配对的 iPhone。"
+                        } else {
+                            "尚未在电视蓝牙列表中检测到已配对的 iPhone。"
+                        }
+                        setTextColor(palette.textSecondary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setPadding(0, 0, 0, dp(10))
+                    },
                 )
-                .setPositiveButton("开启蓝牙可见并等待连接（推荐）") { _, _ ->
-                    requestBluetoothDiscoverable(launchStageAfter = launchAfterSelect)
-                }
-                .setNegativeButton("系统蓝牙设置") { _, _ ->
-                    launchSystemBluetoothSettings()
-                }
-            if (onlyAccessoriesPaired) {
-                builder.setNeutralButton("显示全部蓝牙设备") { _, _ ->
-                    doShowChooseIphoneDialog(
-                        launchAfterSelect = launchAfterSelect,
-                        includeAccessories = true,
+                val steps = listOf(
+                    "1. 点击下方「开启蓝牙可见并等待连接」并允许可见",
+                    "2. 在 iPhone 上打开「设置 → 蓝牙」，在底部「其他设备」中点击「$btName」",
+                    "3. 配对完成后将自动建立无线 CarPlay 投屏",
+                )
+                steps.forEachIndexed { idx, stepText ->
+                    addView(
+                        TextView(this@TvWorkbenchActivity).apply {
+                            text = stepText
+                            setTextColor(palette.textPrimary)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                            if (idx < steps.lastIndex) {
+                                setPadding(0, 0, 0, dp(6))
+                            }
+                        },
                     )
                 }
-            } else if (launchAfterSelect) {
-                builder.setNeutralButton("直接进入等待画面") { _, _ ->
-                    openStageActivity(wireless = true)
-                }
             }
-            builder.show()
+            val actions = buildList {
+                add(
+                    TvModalDialog.ActionSpec(
+                        label = "系统蓝牙设置",
+                        kind = TvPlayButtonKind.SECONDARY,
+                    ) {
+                        launchSystemBluetoothSettings()
+                    },
+                )
+                if (onlyAccessoriesPaired) {
+                    add(
+                        TvModalDialog.ActionSpec(
+                            label = "显示全部蓝牙设备",
+                            kind = TvPlayButtonKind.SECONDARY,
+                        ) {
+                            doShowChooseIphoneDialog(
+                                launchAfterSelect = launchAfterSelect,
+                                includeAccessories = true,
+                            )
+                        },
+                    )
+                } else if (launchAfterSelect) {
+                    add(
+                        TvModalDialog.ActionSpec(
+                            label = "直接进入等待画面",
+                            kind = TvPlayButtonKind.SECONDARY,
+                        ) {
+                            openStageActivity(wireless = true)
+                        },
+                    )
+                }
+                add(
+                    TvModalDialog.ActionSpec(
+                        label = "开启蓝牙可见并等待连接（推荐）",
+                        kind = TvPlayButtonKind.PRIMARY,
+                        icon = TvIconGlyph.BLUETOOTH,
+                    ) {
+                        requestBluetoothDiscoverable(launchStageAfter = launchAfterSelect)
+                    },
+                )
+            }
+            val handle = TvModalDialog.create(
+                context = this,
+                title = "尚未配对 iPhone",
+                subtitle = "本机蓝牙名称：$btName · 支持一键开启蓝牙广播可见",
+                icon = TvIconGlyph.PHONE,
+                badgeText = "待配对",
+                bodyView = guideCard,
+                actions = actions,
+            )
+            showTrackedDialog(handle.dialog)
             return
         }
 
-        val labels = devices.map { device ->
-            val tag = when {
-                device.isLikelyIphone -> " · iPhone"
-                device.isAccessory -> " · 外设"
-                else -> ""
-            }
-            "${device.name}$tag (${device.address})"
-        }.toTypedArray()
         val currentAddress = settings.connection.pairedPhoneAddress
-        val checkedIndex = devices.indexOfFirst { it.address.equals(currentAddress, ignoreCase = true) }
+        val optionItems = devices.map { device ->
+            val selected = device.address.equals(currentAddress, ignoreCase = true)
+            val roleLabel = when {
+                device.isLikelyIphone -> "iPhone 设备"
+                device.isAccessory -> "蓝牙外设"
+                else -> "蓝牙设备"
+            }
+            TvModalDialog.OptionItem(
+                title = device.name,
+                subtitle = "$roleLabel  ·  MAC ${device.address}",
+                badgeText = if (selected) "当前绑定" else "点击绑定",
+                selected = selected,
+                icon = if (device.isAccessory) TvIconGlyph.BLUETOOTH else TvIconGlyph.PHONE,
+            )
+        }
 
-        appDialogBuilder(this)
-            .setTitle("选择已配对的 iPhone")
-            .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
-                val chosen = devices[which]
-                settings.connection.savePairedPhone(chosen.address, chosen.name)
-                if (CarPlayBackgroundSession.hasSession()) {
-                    PendingReconnect.mark()
-                }
-                refreshWorkbenchStatus()
-                settingsPane.refresh()
-                dialog.dismiss()
-                if (launchAfterSelect) {
-                    launchProjectionStage(wireless = true, skipPermissionPrompt = true)
-                }
+        var dialogRef: Dialog? = null
+        val listView = TvModalDialog.createOptionListView(
+            context = this,
+            items = optionItems,
+            palette = palette,
+        ) { which ->
+            val chosen = devices[which]
+            settings.connection.savePairedPhone(chosen.address, chosen.name)
+            if (CarPlayBackgroundSession.hasSession()) {
+                PendingReconnect.mark()
             }
-            .setNeutralButton("去配对新 iPhone") { _, _ ->
-                openSystemBluetoothSettings()
+            refreshWorkbenchStatus()
+            settingsPane.refresh()
+            runCatching { dialogRef?.dismiss() }
+            if (launchAfterSelect) {
+                launchProjectionStage(wireless = true, skipPermissionPrompt = true)
             }
-            .setNegativeButton("取消", null)
-            .create()
-            .also(::showTrackedDialog)
+        }
+
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "选择已配对的 iPhone",
+            subtitle = "使用遥控器上下键选择目标 iPhone 并按确认键绑定",
+            icon = TvIconGlyph.PHONE,
+            badgeText = "${devices.size} 台设备",
+            bodyView = listView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "去配对新 iPhone",
+                    kind = TvPlayButtonKind.SECONDARY,
+                    icon = TvIconGlyph.BLUETOOTH,
+                ) {
+                    openSystemBluetoothSettings()
+                },
+            ),
+        )
+        dialogRef = handle.dialog
+        showTrackedDialog(handle.dialog)
     }
 
     private fun showLanWifiConfigDialog(launchAfterSave: Boolean) {
         val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
         val palette = TvColorScheme.resolve(this)
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val padH = (24 * density).toInt()
-            val padV = (12 * density).toInt()
-            setPadding(padH, padV, padH, padV)
-        }
-        val detectedSsid = LanNetworkLink.detectConnectedWifiSsid(this).orEmpty()
-        val ssidInput = EditText(this).apply {
-            hint = "家庭路由器 Wi-Fi 名称 (SSID)"
-            setText(settings.connection.existingWifiSsid.ifBlank { detectedSsid })
-            setTextColor(palette.textPrimary)
-            setHintTextColor(palette.textSecondary)
-            isSingleLine = true
-        }
-        val passLabel = TextView(this).apply {
-            text = "家庭路由器 Wi-Fi 密码（若无密码可留空）："
-            setTextColor(palette.textSecondary)
-            setPadding(0, (10 * density).toInt(), 0, (4 * density).toInt())
-        }
-        val passInput = EditText(this).apply {
-            hint = "WPA2 Wi-Fi 密码"
-            setText(settings.connection.existingWifiPassphrase)
-            setTextColor(palette.textPrimary)
-            setHintTextColor(palette.textSecondary)
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        container.addView(ssidInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        container.addView(passLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        container.addView(passInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        appDialogBuilder(this)
-            .setTitle("配置家庭局域网 Wi-Fi 或改用免配置直连")
-            .setMessage(
-                "无线 CarPlay 蓝牙握手时需将路由器 Wi-Fi 名称告知 iPhone。\n" +
-                    "• 推荐使用「Wi-Fi Direct 5GHz 直连」，无需填写任何路由器信息即可自动建联。\n" +
-                    "• 若使用「家庭局域网模式」，请在下方填写 iPhone 所连的路由器 Wi-Fi 名称与密码。",
+        val bodyColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val tipCard = TvModalDialog.createSubCard(this, palette).apply {
+            addView(
+                TextView(this@TvWorkbenchActivity).apply {
+                    text = "无线 CarPlay 蓝牙握手时需将路由器 Wi-Fi 信息告知 iPhone：\n" +
+                        "• 推荐使用「Wi-Fi Direct 5GHz 直连」，无需填写任何路由器密码即可自动建联。\n" +
+                        "• 若使用「家庭局域网模式」，请在下方填写 iPhone 所连的路由器名称与密码。"
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setLineSpacing(0f, 1.3f)
+                },
             )
-            .setView(container)
-            .setPositiveButton("保存并启动局域网投屏") { _, _ ->
-                val ssid = ssidInput.text?.toString()?.trim().orEmpty()
-                val pass = passInput.text?.toString().orEmpty()
-                if (ssid.isNotBlank() || pass.isNotBlank()) {
-                    settings.connection.saveExistingWifiCredentials(ssid, pass)
+        }
+        bodyColumn.addView(
+            tipCard,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) },
+        )
+
+        fun createStyledInput(
+            initial: String,
+            hintText: String,
+            password: Boolean,
+        ): EditText {
+            fun boxBg(focused: Boolean) = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(if (focused) palette.surfaceCardElevated else palette.subtleSurface)
+                setStroke(
+                    if (focused) dp(2) else dp(1),
+                    if (focused) palette.focusRing else palette.outline,
+                )
+            }
+            return EditText(this).apply {
+                setText(initial)
+                hint = hintText
+                setTextColor(palette.textPrimary)
+                setHintTextColor(palette.textSecondary)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+                isSingleLine = true
+                imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                inputType = if (password) {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                } else {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 }
-                refreshWorkbenchStatus()
-                settingsPane.refresh()
-                if (launchAfterSave) {
-                    openStageActivity(wireless = true)
+                background = boxBg(false)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                setOnFocusChangeListener { _, hasFocus ->
+                    background = boxBg(hasFocus)
                 }
             }
-            .setNeutralButton("改用 Wi-Fi Direct 直连（推荐）") { _, _ ->
-                settings.connection.wirelessHotspotMode = TvWirelessMode.WIFI_DIRECT
-                refreshWorkbenchStatus()
-                settingsPane.refresh()
-                if (launchAfterSave) {
-                    launchProjectionStage(wireless = true)
-                }
-            }
-            .setNegativeButton("取消", null)
-            .create()
-            .also(::showTrackedDialog)
+        }
+
+        val detectedSsid = LanNetworkLink.detectConnectedWifiSsid(this).orEmpty()
+        val ssidInput = createStyledInput(
+            initial = settings.connection.existingWifiSsid.ifBlank { detectedSsid },
+            hintText = "家庭路由器 Wi-Fi 名称 (SSID)",
+            password = false,
+        )
+        val passInput = createStyledInput(
+            initial = settings.connection.existingWifiPassphrase,
+            hintText = "WPA2 Wi-Fi 密码（若为开放网络可留空）",
+            password = true,
+        )
+
+        val formCard = TvModalDialog.createSubCard(this, palette).apply {
+            addView(
+                TextView(this@TvWorkbenchActivity).apply {
+                    text = "路由器 Wi-Fi 名称 (SSID)"
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(0, 0, 0, dp(5))
+                },
+            )
+            addView(
+                ssidInput,
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) },
+            )
+            addView(
+                TextView(this@TvWorkbenchActivity).apply {
+                    text = "路由器 Wi-Fi 密码 (WPA2)"
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(0, 0, 0, dp(5))
+                },
+            )
+            addView(passInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        bodyColumn.addView(formCard, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "配置家庭局域网 Wi-Fi",
+            subtitle = "填写路由器凭据或一键切换至免配置 Wi-Fi Direct 直连",
+            icon = TvIconGlyph.LAN,
+            badgeText = "LAN 模式",
+            bodyView = bodyColumn,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "改用 Wi-Fi Direct 直连（推荐）",
+                    kind = TvPlayButtonKind.SECONDARY,
+                    icon = TvIconGlyph.WIFI,
+                ) {
+                    settings.connection.wirelessHotspotMode = TvWirelessMode.WIFI_DIRECT
+                    refreshWorkbenchStatus()
+                    settingsPane.refresh()
+                    if (launchAfterSave) {
+                        launchProjectionStage(wireless = true)
+                    }
+                },
+                TvModalDialog.ActionSpec(
+                    label = "保存并启动投屏",
+                    kind = TvPlayButtonKind.PRIMARY,
+                    icon = TvIconGlyph.PLAY,
+                ) {
+                    val ssid = ssidInput.text?.toString()?.trim().orEmpty()
+                    val pass = passInput.text?.toString().orEmpty()
+                    if (ssid.isNotBlank() || pass.isNotBlank()) {
+                        settings.connection.saveExistingWifiCredentials(ssid, pass)
+                    }
+                    refreshWorkbenchStatus()
+                    settingsPane.refresh()
+                    if (launchAfterSave) {
+                        openStageActivity(wireless = true)
+                    }
+                },
+            ),
+        )
+        showTrackedDialog(handle.dialog)
     }
 
     @SuppressLint("MissingPermission")
@@ -700,20 +894,51 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     private fun openSystemBluetoothSettings() {
         val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
-        val options = arrayOf(
-            "开启本机蓝牙可见（推荐：让 iPhone 在蓝牙设置中直接搜到「$btName」）",
-            "打开电视系统蓝牙设置（进入系统蓝牙界面配对）",
+        val palette = TvColorScheme.resolve(this)
+        val items = listOf(
+            TvModalDialog.OptionItem(
+                title = "开启本机蓝牙可见（推荐）",
+                subtitle = "让 iPhone 在「设置 → 蓝牙」底部直接搜到「$btName」并完成配对",
+                badgeText = "一键广播",
+                selected = true,
+                icon = TvIconGlyph.RADAR,
+            ),
+            TvModalDialog.OptionItem(
+                title = "打开电视系统蓝牙设置",
+                subtitle = "进入 Android TV 系统原生蓝牙界面管理或配对设备",
+                badgeText = "系统设置",
+                selected = false,
+                icon = TvIconGlyph.BLUETOOTH,
+            ),
         )
-        appDialogBuilder(this)
-            .setTitle("电视与 iPhone 蓝牙配对")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> requestBluetoothDiscoverable(launchStageAfter = false)
-                    1 -> launchSystemBluetoothSettings()
-                }
+        var dialogRef: Dialog? = null
+        val listView = TvModalDialog.createOptionListView(
+            context = this,
+            items = items,
+            palette = palette,
+        ) { which ->
+            runCatching { dialogRef?.dismiss() }
+            when (which) {
+                0 -> requestBluetoothDiscoverable(launchStageAfter = false)
+                1 -> launchSystemBluetoothSettings()
             }
-            .setNegativeButton("取消", null)
-            .show()
+        }
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "电视与 iPhone 蓝牙配对",
+            subtitle = "本机蓝牙标识：$btName",
+            icon = TvIconGlyph.BLUETOOTH,
+            badgeText = "蓝牙向导",
+            bodyView = listView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "关闭",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+            ),
+        )
+        dialogRef = handle.dialog
+        showTrackedDialog(handle.dialog)
     }
 
     private fun requestBluetoothDiscoverable(launchStageAfter: Boolean) {
@@ -875,66 +1100,297 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         val release = checkResult.release ?: return
         val installed = TvLanOtaManager.currentAppVersion(this)
         val sizeText = LanOtaProtocol.formatFileSize(release.fileSize)
-        val changelogText = release.changelog.ifBlank { "性能优化与稳定性改进" }
-        val mandatoryHint = if (checkResult.forceUpdate) "\n\n【重要提示】该版本为强制更新版本，请立即完成升级。" else ""
-        val message = buildString {
-            append("发现新版本：v${release.versionName} (Build ${release.versionCode})\n")
-            append("当前版本：v${installed.versionName} (Build ${installed.versionCode})\n")
-            append("更新通道：${release.channel} · 安装包大小：$sizeText\n")
-            if (!release.publishedAt.isNullOrBlank()) {
-                append("发布时间：${release.publishedAt}\n")
-            }
-            append("\n更新说明：\n$changelogText")
-            append(mandatoryHint)
+        val rawChangelog = release.changelog.ifBlank { "性能优化与连接稳定性加固" }
+        val formattedChangelog = formatChangelogForTv(rawChangelog)
+        val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        val palette = TvColorScheme.resolve(this)
+
+        val bodyColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
 
-        val builder = appDialogBuilder(this)
-            .setTitle("发现 TVPlay 内网 OTA 更新")
-            .setMessage(message)
-            .setCancelable(!checkResult.forceUpdate)
-            .setPositiveButton("立即下载并升级") { _, _ ->
-                startOtaDownloadAndInstall(checkResult)
+        // 1. Version Upgrade Comparison Bento Card
+        val versionCard = TvModalDialog.createSubCard(this, palette).apply {
+            val row = LinearLayout(this@TvWorkbenchActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
-        if (!checkResult.forceUpdate) {
-            builder.setNegativeButton("稍后提醒", null)
+            fun buildVersionBlock(
+                caption: String,
+                versionStr: String,
+                buildStr: String,
+                highlighted: Boolean,
+            ): LinearLayout = LinearLayout(this@TvWorkbenchActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = caption
+                        setTextColor(palette.textSecondary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    },
+                )
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = versionStr
+                        setTextColor(if (highlighted) palette.success else palette.textPrimary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                        setPadding(0, dp(2), 0, dp(1))
+                    },
+                )
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = buildStr
+                        setTextColor(if (highlighted) palette.cyanAccent else palette.textSecondary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+                    },
+                )
+            }
+
+            val arrowBadge = TextView(this@TvWorkbenchActivity).apply {
+                text = "UPGRADE  →"
+                setTextColor(palette.cyanAccent)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                setPadding(dp(12), dp(5), dp(12), dp(5))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 999f * density
+                    setColor(ColorUtils.setAlphaComponent(palette.accent, if (palette.night) 0x26 else 0x16))
+                    setStroke(dp(1), ColorUtils.setAlphaComponent(palette.cyanAccent, 0x66))
+                }
+            }
+
+            row.addView(
+                buildVersionBlock(
+                    caption = "当前安装版本",
+                    versionStr = "v${installed.versionName}",
+                    buildStr = "Build ${installed.versionCode}",
+                    highlighted = false,
+                ),
+            )
+            row.addView(
+                arrowBadge,
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginStart = dp(12)
+                    marginEnd = dp(16)
+                },
+            )
+            row.addView(
+                buildVersionBlock(
+                    caption = "最新可用版本",
+                    versionStr = "v${release.versionName}",
+                    buildStr = "Build ${release.versionCode} · ${release.channel}",
+                    highlighted = true,
+                ),
+            )
+            addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+            // Spec Metadata Chips Row
+            val chipsRow = LinearLayout(this@TvWorkbenchActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(10), 0, 0)
+            }
+            fun addSpecChip(textValue: String) {
+                val chip = TextView(this@TvWorkbenchActivity).apply {
+                    text = textValue
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = 999f * density
+                        setColor(palette.badgeSurface)
+                        setStroke(dp(1), palette.badgeOutline)
+                    }
+                }
+                chipsRow.addView(
+                    chip,
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                        marginEnd = dp(8)
+                    },
+                )
+            }
+            addSpecChip("安装包 · $sizeText")
+            addSpecChip("断点续传 · HTTP Range")
+            if (!release.sha256.isNullOrBlank()) {
+                addSpecChip("SHA-256 · ${release.sha256.take(8)}…")
+            }
+            if (!release.publishedAt.isNullOrBlank()) {
+                addSpecChip("发布于 ${release.publishedAt}")
+            }
+            addView(chipsRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
-        showTrackedDialog(builder.create())
+        bodyColumn.addView(
+            versionCard,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) },
+        )
+
+        // 2. Release Notes / Changelog Card
+        val notesCard = TvModalDialog.createSubCard(this, palette).apply {
+            val sectionHeader = LinearLayout(this@TvWorkbenchActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 0, 0, dp(8))
+                addView(
+                    View(this@TvWorkbenchActivity).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = dp(2).toFloat()
+                            setColor(palette.accent)
+                        }
+                    },
+                    LinearLayout.LayoutParams(dp(4), dp(13)).apply { marginEnd = dp(8) },
+                )
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = "版本更新说明 (RELEASE NOTES)"
+                        setTextColor(palette.accent)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                        letterSpacing = 0.04f
+                    },
+                )
+            }
+            addView(sectionHeader, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+            val scrollBox = ScrollView(this@TvWorkbenchActivity).apply {
+                isVerticalScrollBarEnabled = true
+                isFocusable = false
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = formattedChangelog
+                        setTextColor(palette.textPrimary)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setLineSpacing(0f, 1.38f)
+                    },
+                    FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+            }
+            val maxNotesHeight = (resources.displayMetrics.heightPixels * 0.28f).toInt().coerceAtLeast(dp(110))
+            addView(
+                scrollBox,
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    if (formattedChangelog.lines().size > 5 || formattedChangelog.length > 180) {
+                        height = maxNotesHeight
+                    }
+                },
+            )
+        }
+        bodyColumn.addView(notesCard, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        if (checkResult.forceUpdate) {
+            val mandatoryBanner = TvModalDialog.createSubCard(this, palette, isWarning = true).apply {
+                addView(
+                    TextView(this@TvWorkbenchActivity).apply {
+                        text = "重要提示：该版本包含关键协议与安全升级，属于强制更新版本，请立即完成升级。"
+                        setTextColor(palette.warningText)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    },
+                )
+            }
+            bodyColumn.addView(
+                mandatoryBanner,
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) },
+            )
+        }
+
+        val actions = buildList {
+            if (!checkResult.forceUpdate) {
+                add(
+                    TvModalDialog.ActionSpec(
+                        label = "稍后提醒",
+                        kind = TvPlayButtonKind.SECONDARY,
+                    ),
+                )
+            }
+            add(
+                TvModalDialog.ActionSpec(
+                    label = "立即下载并升级",
+                    kind = TvPlayButtonKind.PRIMARY,
+                    icon = TvIconGlyph.CLOUD_OTA,
+                ) {
+                    startOtaDownloadAndInstall(checkResult)
+                },
+            )
+        }
+
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "发现 TVPlay 软件更新",
+            subtitle = "飞牛 OS 局域网 OTA 升级中心 · 零感静默校验安装",
+            icon = TvIconGlyph.CLOUD_OTA,
+            badgeText = if (checkResult.forceUpdate) "强制更新" else "NEW v${release.versionName}",
+            badgeIsWarning = checkResult.forceUpdate,
+            cancelable = !checkResult.forceUpdate,
+            bodyView = bodyColumn,
+            actions = actions,
+        )
+        showTrackedDialog(handle.dialog)
+    }
+
+    private fun formatChangelogForTv(raw: String): String {
+        val trimmed = raw.trim()
+        // Split inline numbered items ("1. xxx；2. yyy") into clean bulleted lines for 10-foot TV legibility
+        val parts = trimmed
+            .replace(Regex("(?<=[:：])\\s*(?=1\\.)"), "\n")
+            .split(Regex("[；;\\n]+\\s*"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        return if (parts.size > 1) {
+            parts.joinToString("\n") { line ->
+                if (line.matches(Regex("^\\d+\\..*"))) "• $line" else line
+            }
+        } else {
+            trimmed
+        }
     }
 
     private fun startOtaDownloadAndInstall(checkResult: LanOtaCheckResult) {
         val release = checkResult.release ?: return
         val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
         val palette = TvColorScheme.resolve(this)
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val padH = (24 * density).toInt()
-            val padV = (16 * density).toInt()
-            setPadding(padH, padV, padH, padV)
-        }
+
         val statusText = TextView(this).apply {
             text = "正在连接内网 OTA 服务器下载 v${release.versionName}..."
             setTextColor(palette.textPrimary)
-            setPadding(0, 0, 0, (12 * density).toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, 0, 0, dp(12))
         }
-        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            isIndeterminate = false
-            max = 100
-            progress = 0
-        }
+        val progressBar = TvGlassProgressBar(this, palette)
         val detailText = TextView(this).apply {
-            text = "0% · 支持 HTTP Range 断点续传与 SHA-256 完整性校验"
+            text = "0%  ·  支持 HTTP Range 断点续传与 SHA-256 完整性校验"
             setTextColor(palette.textSecondary)
-            setPadding(0, (8 * density).toInt(), 0, 0)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+            setPadding(0, dp(10), 0, 0)
         }
-        container.addView(statusText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        container.addView(progressBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        container.addView(detailText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        val progressDialog = appDialogBuilder(this)
-            .setTitle("正在下载 TVPlay v${release.versionName}")
-            .setView(container)
-            .setCancelable(false)
-            .create()
+        val progressCard = TvModalDialog.createSubCard(this, palette).apply {
+            addView(statusText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(progressBar, LinearLayout.LayoutParams(MATCH_PARENT, dp(14)))
+            addView(detailText, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        val progressHandle = TvModalDialog.create(
+            context = this,
+            title = "正在下载 TVPlay v${release.versionName}",
+            subtitle = "局域网高速传输 · 校验通过后将自动拉起系统安装",
+            icon = TvIconGlyph.CLOUD_OTA,
+            badgeText = "0%",
+            cancelable = false,
+            bodyView = progressCard,
+        )
+        val progressDialog = progressHandle.dialog
         showTrackedDialog(progressDialog)
 
         val appContext = applicationContext
@@ -944,6 +1400,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                     runOnUiThread {
                         if (isFinishing || isDestroyed || !progressDialog.isShowing) return@runOnUiThread
                         progressBar.progress = progress.percent
+                        progressHandle.rightBadgeView.text = "${progress.percent}%"
                         val downloadedStr = LanOtaProtocol.formatFileSize(progress.downloadedBytes)
                         val totalStr = if (progress.totalBytes > 0L) {
                             LanOtaProtocol.formatFileSize(progress.totalBytes)
@@ -951,8 +1408,8 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                             "未知大小"
                         }
                         val resumeTag = if (progress.resumedFromBytes > 0L) "（已断点续传）" else ""
-                        statusText.text = "正在下载安装包 $resumeTag..."
-                        detailText.text = "${progress.percent}% ($downloadedStr / $totalStr)"
+                        statusText.text = "正在高速下载更新包 $resumeTag..."
+                        detailText.text = "$downloadedStr / $totalStr  ·  SHA-256 完整性保护"
                     }
                 }
             }.onSuccess { apkFile ->
@@ -994,15 +1451,40 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     runCatching { progressDialog.dismiss() }
-                    appDialogBuilder(this)
-                        .setTitle("内网 OTA 更新下载失败")
-                        .setMessage("原因：${error.message ?: error.javaClass.simpleName}\n\n已保留已下载分片，可点击重试继续断点续传。")
-                        .setPositiveButton("断点续传重试") { _, _ ->
-                            startOtaDownloadAndInstall(checkResult)
-                        }
-                        .setNegativeButton("取消", null)
-                        .create()
-                        .also(::showTrackedDialog)
+                    val errorCard = TvModalDialog.createSubCard(this, palette, isWarning = true).apply {
+                        addView(
+                            TextView(this@TvWorkbenchActivity).apply {
+                                text = "中断原因：${error.message ?: error.javaClass.simpleName}\n\n" +
+                                    "已自动保留当前已下载的数据分片，点击「断点续传重试」即可从断点位置继续下载。"
+                                setTextColor(palette.textPrimary)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                                setLineSpacing(0f, 1.35f)
+                            },
+                        )
+                    }
+                    val retryHandle = TvModalDialog.create(
+                        context = this,
+                        title = "内网 OTA 更新下载中断",
+                        subtitle = "已保存分片缓存 · 支持 HTTP Range 断点续传",
+                        icon = TvIconGlyph.CLOUD_OTA,
+                        badgeText = "可续传",
+                        badgeIsWarning = true,
+                        bodyView = errorCard,
+                        actions = listOf(
+                            TvModalDialog.ActionSpec(
+                                label = "取消",
+                                kind = TvPlayButtonKind.SECONDARY,
+                            ),
+                            TvModalDialog.ActionSpec(
+                                label = "断点续传重试",
+                                kind = TvPlayButtonKind.PRIMARY,
+                                icon = TvIconGlyph.REFRESH,
+                            ) {
+                                startOtaDownloadAndInstall(checkResult)
+                            },
+                        ),
+                    )
+                    showTrackedDialog(retryHandle.dialog)
                 }
             }
         }

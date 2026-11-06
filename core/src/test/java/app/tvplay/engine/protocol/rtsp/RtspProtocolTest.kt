@@ -482,4 +482,79 @@ class RtspProtocolTest {
             }
         }
     }
+
+    @Test
+    fun screenStreamReplacementAndCleanPeerEofDoNotKillActiveRtspControlSession() {
+        val screenActiveState = mutableMapOf<Int, Boolean>()
+        val sink = object : MediaSink {
+            override fun onScreenStreamActive(type: Int, active: Boolean) {
+                screenActiveState[type] = active
+            }
+        }
+        val engine = CarPlayMediaEngine(sink = sink, microphoneEnabled = false)
+        val config = TvStreamServerConfig(
+            deviceName = "TVPlay",
+            deviceId = "02:11:22:33:44:55",
+            btMac = "02:11:22:33:44:55",
+            sourceVersion = "950.7.1",
+            main = TvDisplaySpec(widthPixels = 1920, heightPixels = 1080),
+        )
+
+        java.net.ServerSocket(0, 2, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
+            val client = java.net.Socket("127.0.0.1", server.localPort)
+            val peer = server.accept()
+            try {
+                var sessionEndedCalled = false
+                val session = AirPlaySession(
+                    socket = peer,
+                    config = config,
+                    identity = AccessoryIdentity.generate(),
+                    pairings = app.tvplay.engine.auth.PairingRegistry(),
+                    mfi = null,
+                    listener = object : AirPlaySessionListener {
+                        override fun onSessionEnded(session: RtspControlSession) {
+                            sessionEndedCalled = true
+                        }
+                    },
+                    media = engine,
+                )
+                val sharedField = session.pairVerify.javaClass.getDeclaredField("sharedSecret").apply {
+                    isAccessible = true
+                }
+                sharedField.set(session.pairVerify, ByteArray(32) { (it + 5).toByte() })
+
+                val screenDesc = mapOf<String, Any?>(
+                    "shk" to ByteArray(32) { 0x44 },
+                    "streamConnectionID" to 301L,
+                )
+                val port1 = engine.onScreen(session, 110, screenDesc)
+                assertNotNull(port1)
+                session.activeStreams.add(110)
+
+                // Re-SETUP of stream 110 on the same session replaces port1 with port2 without closing session
+                val port2 = engine.onScreen(session, 110, screenDesc)
+                assertNotNull(port2)
+                assertFalse("Replacing screen stream on same session must not close session", session.isClosed)
+                assertFalse(sessionEndedCalled)
+
+                // Connect to port2 and close cleanly (simulating iOS closing stream 110 TCP socket during TEARDOWN/renegotiation)
+                java.net.Socket("127.0.0.1", port2!!).use { screenClient ->
+                    screenClient.getOutputStream().flush()
+                }
+                val deadline = System.currentTimeMillis() + 2_000L
+                while (screenActiveState[110] != false && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(20)
+                }
+                assertEquals(false, screenActiveState[110])
+                assertFalse("Clean peer EOF on screen stream must not kill active RtspControlSession", session.isClosed)
+                assertFalse(sessionEndedCalled)
+
+                session.close()
+                assertTrue(session.isClosed)
+            } finally {
+                runCatching { client.close() }
+                runCatching { peer.close() }
+            }
+        }
+    }
 }

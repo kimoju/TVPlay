@@ -139,6 +139,8 @@ class TvStageActivity : Activity() {
     private var firstFrameRendered = false
     private val isProjectionVisible: Boolean
         get() = streamingActive && firstFrameRendered
+    private val hasLiveAirPlaySession: Boolean
+        get() = activeAirPlaySession?.isClosed == false
     private var sessionHevc = false
     private var vpnPromptedThisSession = false
     private var permissionsPromptedThisSession = false
@@ -1218,13 +1220,13 @@ class TvStageActivity : Activity() {
                 reconnectAttempts = 0
                 cancelScheduledReconnect()
             } else if (status is CarPlayStatus.ControlEnded) {
-                if (!isProjectionVisible) {
+                if (!isProjectionVisible && !hasLiveAirPlaySession) {
                     streamingActive = false
                     firstFrameRendered = false
                     scheduleAutoReconnect(3_500L)
                 }
             } else if (status is CarPlayStatus.Failed) {
-                if (!isProjectionVisible) {
+                if (!isProjectionVisible && !hasLiveAirPlaySession) {
                     streamingActive = false
                     firstFrameRendered = false
                     if (
@@ -1287,7 +1289,7 @@ class TvStageActivity : Activity() {
         cancelScheduledReconnect()
         val task = Runnable {
             reconnectRunnable = null
-            if (!isFinishing && !isDestroyed && !isProjectionVisible) {
+            if (!isFinishing && !isDestroyed && !isProjectionVisible && !hasLiveAirPlaySession) {
                 reconnectNow()
             }
         }

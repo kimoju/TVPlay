@@ -806,28 +806,18 @@ class TvSessionEngine(
 
         override fun onSessionEnded(session: AirPlaySession) {
             val currentActive = activeSession
-            if (currentActive != null && currentActive !== session) {
+            if (currentActive !== session) {
                 debugLog("Non-active AirPlay connection ended peer=${session.host}; keeping live session")
                 return
             }
-            if (currentActive === session) {
-                activeSession = null
-                if (config.transport == TvTransportMode.WIRELESS) {
-                    val tunnel = wirelessTunnelChannel
-                    wirelessTunnelChannel = null
-                    if (tunnel != null) {
-                        closeBestEffort("tunneled iAP2 link") { tunnel.close() }
-                    }
-                    closeBluetoothBootstrapTransport()
-                }
-                synchronized(albumReplayLock) { initialArtworkReplay = null }
-                synchronized(playbackStatus) {
-                    val wasPlaying = playbackStatus.playing
-                    playbackStatus.clearAll()?.let { it to wasPlaying }
-                }?.let { (cleared, wasPlaying) ->
-                    nowPlayingListener?.invoke(cleared)
-                    if (wasPlaying) playbackListener?.invoke(false)
-                }
+            activeSession = null
+            synchronized(albumReplayLock) { initialArtworkReplay = null }
+            synchronized(playbackStatus) {
+                val wasPlaying = playbackStatus.playing
+                playbackStatus.clearAll()?.let { it to wasPlaying }
+            }?.let { (cleared, wasPlaying) ->
+                nowPlayingListener?.invoke(cleared)
+                if (wasPlaying) playbackListener?.invoke(false)
             }
             debugLog("AirPlay session ended peer=${session.host}")
             uiListener?.onSessionEnded(session)
@@ -1693,7 +1683,7 @@ class TvSessionEngine(
         val hasActiveWifiConnection = activeSession != null ||
             wirelessTunnelChannel != null ||
             wirelessConnectionProof.hasRenderedFrame(generation)
-        if (hasActiveWifiConnection && wirelessHandoffRequested.compareAndSet(false, true)) {
+        if (wirelessHandoffRequested.compareAndSet(false, true) && hasActiveWifiConnection) {
             armWirelessHandoffWatchdog(generation)
         }
         maybeCompleteWirelessHandoff()
@@ -1750,7 +1740,7 @@ class TvSessionEngine(
                         onIncoming = ::onRouteFrame,
                         onProgress = { message -> debugLog("iAP tunnel $message") },
                     )
-                    if (closed || generation != wirelessGeneration.get()) return@execute
+                    if (closed || generation != wirelessGeneration.get() || wirelessTunnelChannel !== channel) return@execute
                     if (activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation)) {
                         debugLog("tunneled iAP2 control ended (${result.terminal}) while AirPlay session is active; preserving session")
                         if (wirelessActiveReported.compareAndSet(false, true)) {
@@ -1766,7 +1756,7 @@ class TvSessionEngine(
                             onStatus(CarPlayStatus.Failed("Wireless iAP2 tunnel closed"))
                     }
                 } catch (error: Throwable) {
-                    if (!closed && generation == wirelessGeneration.get()) {
+                    if (!closed && generation == wirelessGeneration.get() && wirelessTunnelChannel === channel) {
                         if (activeSession != null || wirelessConnectionProof.hasRenderedFrame(generation)) {
                             debugLog("tunneled iAP2 control failed while AirPlay session is active; preserving session: ${error.message}")
                             if (wirelessActiveReported.compareAndSet(false, true)) {
@@ -1783,6 +1773,7 @@ class TvSessionEngine(
                         }
                     }
                 } finally {
+                    closeBestEffort("tunneled iAP2 link") { channel.close() }
                     if (wirelessTunnelChannel === channel) wirelessTunnelChannel = null
                 }
             }
@@ -1821,6 +1812,10 @@ class TvSessionEngine(
                 }
                 wirelessConnectionProof.activate(generation, session)
                 sessionListener.onSessionActive(session)
+                if (wirelessHandoffRequested.get() && !wirelessActiveReported.get()) {
+                    armWirelessHandoffWatchdog(generation)
+                    maybeCompleteWirelessHandoff()
+                }
             }
 
             override fun onSessionEnded(session: AirPlaySession) {
@@ -1854,6 +1849,7 @@ class TvSessionEngine(
             if (closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get() ||
                 wirelessFailureReported.get()) return
             wirelessTunnelReady.set(true)
+            wirelessHandoffRequested.compareAndSet(false, true)
         }
         wirelessConnectionProof.authenticated(generation)
         debugLog("wireless iAP2 tunnel ready; handoffRequested=${wirelessHandoffRequested.get()}")

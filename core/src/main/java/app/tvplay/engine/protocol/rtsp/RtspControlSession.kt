@@ -322,7 +322,7 @@ class RtspControlSession(
                 eventCipher = null
             }
             safeClose(socket)
-            if (!hasActiveMediaStreams() && !mainFrameRendered) {
+            if (activeStreams.isEmpty() && !mainFrameRendered) {
                 close()
             }
             false
@@ -696,7 +696,12 @@ class RtspControlSession(
             "timingPort" to openTiming(peerTimingPort),
             "eventPort" to openEvent(),
         )
-        if (dict["keepAliveLowPower"] == true || dict["keepAliveLowPower"] == 1L) {
+        if (
+            dict["keepAliveLowPower"] == true ||
+            dict["keepAliveLowPower"] == 1L ||
+            dict["keepAliveSendStatsAsBody"] == true ||
+            dict["keepAliveSendStatsAsBody"] == 1L
+        ) {
             response["keepAlivePort"] = openKeepAlive()
         }
         response["enabledFeatures"] = setupEnabledFeatures(config, dict["features"] as? List<*>)
@@ -811,6 +816,13 @@ class RtspControlSession(
     fun hasActiveMediaStreams(): Boolean =
         activeStreams.any { it != STREAM_TYPE_DATA }
 
+    internal fun onStreamClosedByPeer(type: Int) {
+        if (type == STREAM_TYPE_MAIN_SCREEN) {
+            mainScreenToken = null
+        }
+        activeStreams.remove(type)
+    }
+
     private fun openTiming(peerPort: Int): Int {
         val port = ntp.listen()
         if (peerPort > 0) peerAddress?.let { ntp.start(it, peerPort) }
@@ -818,6 +830,9 @@ class RtspControlSession(
     }
 
     private fun openKeepAlive(): Int {
+        keepAliveSocket?.let { existing ->
+            if (!existing.isClosed) return existing.localPort
+        }
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
@@ -831,16 +846,19 @@ class RtspControlSession(
 
     private fun runKeepAlive(socket: DatagramSocket) {
         val buffer = ByteArray(512)
-        while (!closed.get()) {
+        while (!closed.get() && !socket.isClosed) {
             try {
                 socket.receive(DatagramPacket(buffer, buffer.size))
             } catch (_: Exception) {
-                if (closed.get()) return
+                if (closed.get() || socket.isClosed) return
             }
         }
     }
 
     private fun openEvent(): Int {
+        eventServer?.let { existing ->
+            if (!existing.isClosed) return existing.localPort
+        }
         val server = ServerSocket(0, 50, InetAddress.getByName("::"))
         eventServer = server
         spawnEvent("airplay-event-accept") { acceptEvent(server) }
@@ -877,7 +895,7 @@ class RtspControlSession(
                 if (shared == null) {
                     Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
                     safeClose(socket)
-                    if (!hasActiveMediaStreams() && !mainFrameRendered) {
+                    if (activeStreams.isEmpty() && !mainFrameRendered) {
                         close()
                     }
                     return
@@ -905,7 +923,7 @@ class RtspControlSession(
         } catch (error: Exception) {
             if (!closed.get()) {
                 Log.e(TAG, "airplay event accept failed", error)
-                if (!hasActiveMediaStreams() && !mainFrameRendered) {
+                if (activeStreams.isEmpty() && !mainFrameRendered) {
                     close()
                 }
             }
@@ -962,9 +980,6 @@ class RtspControlSession(
                 }
             }
             safeClose(socket)
-            if (!closed.get() && !hasActiveMediaStreams() && !mainFrameRendered) {
-                close()
-            }
         }
     }
 

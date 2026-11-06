@@ -86,6 +86,13 @@ class ScreenStream(
     private fun accept(bound: ServerSocket) {
         try {
             val accepted = bound.acceptFrom(expectedPeer) { onDiagnostic("Video: rejected sender outside the control session") }
+            runCatching {
+                accepted.tcpNoDelay = true
+                accepted.keepAlive = true
+                if (accepted.receiveBufferSize < VIDEO_RECEIVE_BUFFER_BYTES) {
+                    accepted.receiveBufferSize = VIDEO_RECEIVE_BUFFER_BYTES
+                }
+            }
             socket = accepted
             safeClose(bound)
             run(accepted)
@@ -165,6 +172,7 @@ class ScreenStream(
         const val OP_VIDEO_FRAME = 0
         const val OP_VIDEO_CONFIG = 1
         const val MAX_BODY = 8 * 1024 * 1024
+        const val VIDEO_RECEIVE_BUFFER_BYTES = 2 * 1024 * 1024
     }
 }
 
@@ -629,6 +637,10 @@ class BufferedAudioStream(
                     log("Buffered audio: rejected sender outside the control session")
                     false
                 } else {
+                    runCatching {
+                        socket.tcpNoDelay = true
+                        socket.keepAlive = true
+                    }
                     client = socket
                     true
                 }
@@ -948,6 +960,9 @@ class CarPlayMediaEngine(
         val peer = session.remoteAddress ?: return null
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
+        streams.keys.filter { it.type == type }.forEach { existingKey ->
+            streams.remove(existingKey)?.close()
+        }
         val screen = ScreenStream(key, peer, session::logDebug)
         sink.setVideoDiagnosticHandler(type) {
             if (type == STREAM_TYPE_MAIN_SCREEN && streams[streamKey] === screen && it == "first frame rendered") {
@@ -968,16 +983,18 @@ class CarPlayMediaEngine(
                         TAG,
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
-                    if (streams.remove(streamKey, screen) && streams.keys.none { it.type == type }) {
+                    val removedCurrent = streams.remove(streamKey, screen)
+                    if (!removedCurrent) return
+                    session.onStreamClosedByPeer(type)
+                    if (streams.keys.none { it.type == type }) {
                         sink.onScreenStreamActive(type, false)
                     }
-                    session.close()
+                    if (cause != null && !session.hasActiveMediaStreams()) {
+                        session.close()
+                    }
                 }
             },
         )
-        streams.keys.filter { it.type == type && it != streamKey }.forEach { staleKey ->
-            streams.remove(staleKey)?.close()
-        }
         streams.put(streamKey, screen)?.close()
         sink.onScreenStreamActive(type, true)
         return port
@@ -1998,6 +2015,8 @@ class IapTunnel(
             accepted.tcpNoDelay = true
             accepted.keepAlive = true
             socket = accepted
+            servers.toList().forEach(::safeClose)
+            servers.clear()
             readCounter.set(0)
             peerConnected.countDown()
             listener.onOpen(accepted.remoteSocketAddress?.toString())
@@ -2130,6 +2149,7 @@ class AirPlayIapTunnelStream(
                         "${cause?.message ?: "no detail"}",
                 )
                 val shouldCloseSession = markFailed(cause)
+                tunnel.close()
                 if (shouldCloseSession && !session.hasActiveMediaStreams()) {
                     session.close()
                 }

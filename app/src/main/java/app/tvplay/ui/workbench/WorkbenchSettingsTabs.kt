@@ -109,6 +109,7 @@ class WorkbenchSettingsTabs(
     var onChooseIphoneClicked: (() -> Unit)? = null
     var onPairBluetoothClicked: (() -> Unit)? = null
     var onResetWirelessHotspotClicked: (() -> Unit)? = null
+    var onFullResetClicked: (() -> Unit)? = null
     var onSaveDiagnosticLogClicked: (() -> Unit)? = null
     var onCheckOtaUpdateClicked: (() -> Unit)? = null
     var onDiscoverOtaServerClicked: (() -> Unit)? = null
@@ -377,21 +378,21 @@ class WorkbenchSettingsTabs(
                     val optionItems = listOf(
                         TvModalDialog.OptionItem(
                             title = "无线 · Wi-Fi Direct 5GHz 直连（推荐）",
-                            subtitle = "免填路由器密码，电视与 iPhone 自动建立 5GHz 高速点对点通道",
+                            subtitle = "免填路由器密码，电视与手机自动建立 5GHz 高速点对点通道",
                             badgeText = if (checkedIndex == 0) "当前模式" else "点击切换",
                             selected = checkedIndex == 0,
                             icon = TvIconGlyph.WIFI,
                         ),
                         TvModalDialog.OptionItem(
                             title = "无线 · 家庭局域网模式",
-                            subtitle = "电视与 iPhone 连接同一台家庭路由器（Wi-Fi 或千兆网线）",
+                            subtitle = "电视与手机连接同一台家庭路由器（Wi-Fi 或千兆网线）",
                             badgeText = if (checkedIndex == 1) "当前模式" else "点击切换",
                             selected = checkedIndex == 1,
                             icon = TvIconGlyph.LAN,
                         ),
                         TvModalDialog.OptionItem(
                             title = "USB 有线数据线直连",
-                            subtitle = "使用 Lightning / USB-C 数据线直连电视 USB 接口",
+                            subtitle = "使用 USB-C / Lightning 数据线直连电视 USB 接口",
                             badgeText = if (checkedIndex == 2) "当前模式" else "点击切换",
                             selected = checkedIndex == 2,
                             icon = TvIconGlyph.USB,
@@ -409,7 +410,7 @@ class WorkbenchSettingsTabs(
                     }
                     val handle = TvModalDialog.create(
                         context = context,
-                        title = "选择 CarPlay 连接模式",
+                        title = "选择投屏连接模式",
                         subtitle = "使用遥控器上下键选择目标链路模式并按确认键生效",
                         icon = TvIconGlyph.RADAR,
                         badgeText = "3 种链路",
@@ -430,34 +431,48 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("蓝牙配对与目标 iPhone"))
-        val phoneAddress = settings.connection.pairedPhoneAddress
-        val phoneSubtitle = if (phoneAddress != null) {
-            "已绑定：${settings.connection.pairedPhoneName} ($phoneAddress)"
+        if (settings.connection.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK) {
+            addView(sectionHeader("安卓车联蓝牙向导与防抢占"))
+            addView(
+                actionCard(
+                    title = "蓝牙防抢占与车联广播刷新",
+                    subtitle = "安卓手机无需配对电视系统蓝牙；如电视误跳蓝牙音乐，可点击一键断开占用并刷新弹窗广播",
+                    buttonLabel = "车联蓝牙向导",
+                    icon = TvIconGlyph.BLUETOOTH,
+                    onClick = { onPairBluetoothClicked?.invoke() },
+                ),
+                cardLayoutParams(),
+            )
         } else {
-            "自动识别已配对的 iPhone（可点击手动指定设备）"
-        }
-        addView(
-            actionCard(
-                title = "目标 iPhone 设备",
-                subtitle = phoneSubtitle,
-                buttonLabel = "选择 iPhone",
-                icon = TvIconGlyph.PHONE,
-                onClick = { onChooseIphoneClicked?.invoke() },
-            ),
-            cardLayoutParams(),
-        )
+            addView(sectionHeader("蓝牙配对与目标设备"))
+            val phoneAddress = settings.connection.pairedPhoneAddress
+            val phoneSubtitle = if (phoneAddress != null) {
+                "已绑定：${settings.connection.pairedPhoneName} ($phoneAddress)"
+            } else {
+                "自动识别已配对的 iPhone（安卓车联直接通过 BLE 0xFCFB 发现，无需在此指定）"
+            }
+            addView(
+                actionCard(
+                    title = "目标 iPhone 设备",
+                    subtitle = phoneSubtitle,
+                    buttonLabel = "选择 iPhone",
+                    icon = TvIconGlyph.PHONE,
+                    onClick = { onChooseIphoneClicked?.invoke() },
+                ),
+                cardLayoutParams(),
+            )
 
-        addView(
-            actionCard(
-                title = "电视系统蓝牙配对",
-                subtitle = "开启本机蓝牙可见或进入系统设置与新 iPhone 配对",
-                buttonLabel = "打开蓝牙设置",
-                icon = TvIconGlyph.BLUETOOTH,
-                onClick = { onPairBluetoothClicked?.invoke() },
-            ),
-            cardLayoutParams(),
-        )
+            addView(
+                actionCard(
+                    title = "电视蓝牙配对与车联向导",
+                    subtitle = "开启本机蓝牙可见与 iPhone 配对，或清理安卓蓝牙音乐抢占",
+                    buttonLabel = "打开蓝牙向导",
+                    icon = TvIconGlyph.BLUETOOTH,
+                    onClick = { onPairBluetoothClicked?.invoke() },
+                ),
+                cardLayoutParams(),
+            )
+        }
 
         addView(sectionHeader("无线传输通道（电视端专属优化）"))
         val wirelessModes = listOf(
@@ -490,7 +505,7 @@ class WorkbenchSettingsTabs(
                 addView(
                     textFieldCard(
                         title = "家庭路由器 Wi-Fi 名称 (SSID)",
-                        subtitle = "填写 iPhone 与电视共同连接的路由器 Wi-Fi 名称（无线握手时下发给 iPhone）",
+                        subtitle = "填写手机与电视共同连接的路由器 Wi-Fi 名称（无线握手时下发给手机）",
                         initialValue = settings.connection.existingWifiSsid,
                         hint = "填写家庭路由器 Wi-Fi 名称",
                         secret = false,
@@ -584,14 +599,26 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "iPhone 蓝牙连上时自动进入投屏",
-                subtitle = "检测到已配对 iPhone 蓝牙连接时自动开启 CarPlay 舞台",
+                title = "手机蓝牙连上时自动进入投屏",
+                subtitle = "检测到已配对手机蓝牙连接时自动开启全屏投屏舞台",
                 checked = settings.connection.connectOnPhoneBluetooth,
                 icon = TvIconGlyph.BLUETOOTH,
             ) { enabled ->
                 settings.connection.connectOnPhoneBluetooth = enabled
                 onSettingChanged?.invoke()
             },
+            cardLayoutParams(),
+        )
+
+        addView(sectionHeader("完全重置与恢复出厂状态"))
+        addView(
+            actionCard(
+                title = "完全重置所有连接与设置",
+                subtitle = "一键清除所有配对记录、认证密钥、P2P 组网缓存与自定义参数，并重新生成 6 位连接码",
+                buttonLabel = "完全重置",
+                icon = TvIconGlyph.SHIELD_MFI,
+                onClick = { onFullResetClicked?.invoke() },
+            ),
             cardLayoutParams(),
         )
     }
@@ -657,7 +684,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "60 FPS 高帧率投屏",
-                subtitle = "向 iPhone 请求 60 帧/秒流畅画面（关闭则为 30 FPS）",
+                subtitle = "向手机请求 60 帧/秒流畅画面（关闭则为 30 FPS）",
                 checked = settings.display.frameRate60Enabled,
                 icon = TvIconGlyph.FPS_GAUGE,
             ) { enabled ->
@@ -671,7 +698,7 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "渲染画布分辨率缩放",
-                subtitle = "调整 CarPlay 相对于电视物理屏幕的渲染分辨率比例",
+                subtitle = "调整投屏画面相对于电视物理屏幕的渲染分辨率比例",
                 options = listOf(75, 85, 100, 115, 130).map { it to "$it%" },
                 current = settings.display.displayScalePercent,
                 icon = TvIconGlyph.DISPLAY,
@@ -684,7 +711,7 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "界面图标与字体密度 (DPI)",
-                subtitle = "针对客厅 3 米观看距离放大或缩小 CarPlay 侧边栏与图标",
+                subtitle = "针对客厅 3 米观看距离放大或缩小车机侧边栏与图标",
                 options = UiDensityScale.presets.map { it to "$it%" },
                 current = settings.display.uiDensityPercent,
                 icon = TvIconGlyph.SLIDERS,
@@ -696,8 +723,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             cycleCard(
-                title = "CarPlay 屏幕物理尺寸预设",
-                subtitle = "模拟不同物理尺寸以控制 CarPlay 分屏卡片与小组件布局",
+                title = "车机屏幕物理尺寸预设",
+                subtitle = "模拟不同物理尺寸以控制车机分屏卡片与小组件布局",
                 options = CarPlayPhysicalSizePreset.entries.map { preset ->
                     preset to when (preset) {
                         CarPlayPhysicalSizePreset.LARGE -> "大图标紧凑布局 (${preset.widthMillimeters} mm)"
@@ -730,7 +757,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "允许壁纸延伸至安全区外",
-                subtitle = "保留控件安全边距的同时，让 CarPlay 背景壁纸铺满整块屏幕",
+                subtitle = "保留控件安全边距的同时，让投屏背景壁纸铺满整块屏幕",
                 checked = settings.display.safeAreaDrawOutside,
                 icon = TvIconGlyph.SPARKLES,
             ) { drawOutside ->
@@ -743,8 +770,8 @@ class WorkbenchSettingsTabs(
         addView(sectionHeader("深浅色外观与实时帧率显示"))
         addView(
             cycleCard(
-                title = "CarPlay 日间 / 夜间外观",
-                subtitle = "控制 CarPlay 地图与界面采用深色或浅色主题",
+                title = "投屏日间 / 夜间外观",
+                subtitle = "控制车机地图与界面采用深色或浅色主题",
                 options = listOf(
                     CarPlayNightMode.NIGHT to "始终深色（推荐）",
                     CarPlayNightMode.SYSTEM to "跟随系统时间",
@@ -778,7 +805,7 @@ class WorkbenchSettingsTabs(
         addView(
             cycleCard(
                 title = "等待连接画面背景色",
-                subtitle = "等待 iPhone 投屏期间的全屏空间背景配色",
+                subtitle = "等待手机投屏期间的全屏空间背景配色",
                 options = listOf(
                     WaitingScreenColorPreset.DARK to "深空微光（默认）",
                     WaitingScreenColorPreset.OLED_BLACK to "OLED 纯黑（防烧屏）",
@@ -835,7 +862,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "自动管理 Android 音频焦点",
-                subtitle = "CarPlay 播放音乐、Siri 或导航播报时自动向电视系统申请焦点",
+                subtitle = "投屏播放音乐、语音助手或导航播报时自动向电视系统申请焦点",
                 checked = settings.audio.audioFocusEnabled,
                 icon = TvIconGlyph.AUDIO,
             ) { enabled ->
@@ -847,7 +874,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "静音空闲时自动释放音频焦点",
-                subtitle = "CarPlay 暂停播放后释放焦点，方便电视后台其他应用恢复发声",
+                subtitle = "投屏暂停播放后释放焦点，方便电视后台其他应用恢复发声",
                 checked = settings.audio.audioFocusAutoYield,
                 icon = TvIconGlyph.AUDIO,
             ) { enabled ->
@@ -859,7 +886,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "转发遥控器媒体键时不抢占焦点",
-                subtitle = "适合一边看 CarPlay 画面、一边用电视本地应用听歌的场景",
+                subtitle = "适合一边看投屏画面、一边用电视本地应用听歌的场景",
                 checked = settings.audio.disableMediaKeyAudioFocus,
                 icon = TvIconGlyph.SLIDERS,
             ) { enabled ->
@@ -869,11 +896,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("Siri 语音助手与麦克风输入"))
+        addView(sectionHeader("语音助手与麦克风输入"))
         addView(
             toggleCard(
                 title = "启用电视 / 遥控器语音麦克风",
-                subtitle = "将蓝牙语音遥控器或 USB 麦克风音频路由至 CarPlay Siri 与通话",
+                subtitle = "将蓝牙语音遥控器或 USB 麦克风音频路由至车载语音助手与通话",
                 checked = settings.audio.microphoneEnabled,
                 icon = TvIconGlyph.MIC,
             ) { enabled ->
@@ -885,7 +912,7 @@ class WorkbenchSettingsTabs(
         addView(
             toggleCard(
                 title = "启用高容量主音频缓冲通道",
-                subtitle = "开启 AirPlay 主媒体流缓冲模式以提升抗抖动能力",
+                subtitle = "开启主媒体流缓冲模式以提升抗抖动能力",
                 checked = settings.audio.mainBufferedAudio,
                 icon = TvIconGlyph.AUDIO,
             ) { enabled ->
@@ -896,8 +923,8 @@ class WorkbenchSettingsTabs(
         )
         addView(
             toggleCard(
-                title = "保持声音在 iPhone / 外部蓝牙音箱播放",
-                subtitle = "禁用电视端音频解码输出，让声音直接从 iPhone 或蓝牙音响发出",
+                title = "保持声音在手机 / 外部蓝牙音箱播放",
+                subtitle = "禁用电视端音频解码输出，让声音直接从手机或外部音响发出",
                 checked = settings.audio.disableAudioOutput,
                 icon = TvIconGlyph.PHONE,
             ) { disabled ->
@@ -978,11 +1005,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("接收端设备标识与离线 MFi"))
+        addView(sectionHeader("接收端设备标识与离线认证"))
         addView(
             textFieldCard(
                 title = "广播厂商名称 (Manufacturer)",
-                subtitle = "iAP2 握手时向 iPhone 展示的接收端厂商标识",
+                subtitle = "握手时向手机展示的接收端厂商标识",
                 initialValue = settings.identity.manufacturer,
                 hint = "TVPlay",
                 secret = false,
@@ -996,7 +1023,7 @@ class WorkbenchSettingsTabs(
         addView(
             textFieldCard(
                 title = "广播设备型号 (Model)",
-                subtitle = "iAP2 握手时向 iPhone 展示的接收端型号标识",
+                subtitle = "握手时向手机展示的接收端型号标识",
                 initialValue = settings.identity.model,
                 hint = "TVPlay",
                 secret = false,
@@ -1008,11 +1035,11 @@ class WorkbenchSettingsTabs(
             cardLayoutParams(),
         )
 
-        addView(sectionHeader("连接诊断与日志导出"))
+        addView(sectionHeader("连接诊断与重置恢复"))
         addView(
             toggleCard(
                 title = "记录详细会话诊断日志",
-                subtitle = "记录脱敏后的 RTSP / iAP2 / 解码器状态事件以便排查连接问题",
+                subtitle = "记录脱敏后的 RTSP / BLE / 解码器状态事件以便排查连接问题",
                 checked = settings.identity.debugLogsEnabled,
                 icon = TvIconGlyph.LOG_FILE,
             ) { enabled ->
@@ -1028,6 +1055,16 @@ class WorkbenchSettingsTabs(
                 buttonLabel = "导出日志",
                 icon = TvIconGlyph.LOG_FILE,
                 onClick = { onSaveDiagnosticLogClicked?.invoke() },
+            ),
+            cardLayoutParams(),
+        )
+        addView(
+            actionCard(
+                title = "完全重置所有连接与设置",
+                subtitle = "清除所有已配对手机、认证密钥、P2P 组网缓存与自定义参数，恢复初始状态",
+                buttonLabel = "完全重置",
+                icon = TvIconGlyph.SHIELD_MFI,
+                onClick = { onFullResetClicked?.invoke() },
             ),
             cardLayoutParams(),
         )

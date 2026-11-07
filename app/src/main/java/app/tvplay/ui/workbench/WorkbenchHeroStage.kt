@@ -73,10 +73,10 @@ class WorkbenchHeroStage(
         val btName = TvPlayBluetooth.localName(context) ?: "本机电视蓝牙"
         val pairedAddress = settings.connection.pairedPhoneAddress
         val pairedSummary = when {
-            pairedAddress != null -> settings.connection.pairedPhoneName
             projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK -> "小米/vivo/OPPO"
             projectionProtocol == TvProjectionProtocol.ANDROID_AUTO -> "Android Auto"
             projectionProtocol == TvProjectionProtocol.HUAWEI_HICAR -> "华为鸿蒙手机"
+            pairedAddress != null -> settings.connection.pairedPhoneName
             projectionProtocol == TvProjectionProtocol.AUTO -> "iPhone / 安卓"
             else -> "已配对 iPhone"
         }
@@ -342,10 +342,11 @@ class WorkbenchHeroStage(
             },
         )
         titleCol.addView(space(dp(2)))
-        val subtitleLine = if (model.wirelessEnabled) {
-            "${model.wirelessModeLabel} · 蓝牙：${model.bluetoothDeviceName}"
-        } else {
-            "${model.wirelessModeLabel} · 插入数据线自动唤醒"
+        val subtitleLine = when {
+            !model.wirelessEnabled -> "${model.wirelessModeLabel} · 插入数据线自动唤醒"
+            model.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK ->
+                "${model.wirelessModeLabel} · 车联连接码：${model.carLinkPinCode}"
+            else -> "${model.wirelessModeLabel} · 蓝牙：${model.bluetoothDeviceName}"
         }
         titleCol.addView(
             label(subtitleLine, 12f, palette.secondaryText).apply {

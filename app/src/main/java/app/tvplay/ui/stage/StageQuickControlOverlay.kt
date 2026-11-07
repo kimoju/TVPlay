@@ -13,6 +13,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.graphics.ColorUtils
+import app.tvplay.config.TvPreferencesStore
+import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.remote.CarPlayNightMode
 import app.tvplay.ui.theme.HeroBentoCardDrawable
@@ -50,11 +52,24 @@ object StageQuickControlOverlay {
         onCycleNightMode: () -> Unit,
         onReconnectNow: () -> Unit,
         onDisconnectAndExit: () -> Unit,
+        onFullReset: (() -> Unit)? = null,
         initialFocusIndex: Int = 0,
     ): View {
         val density = context.resources.displayMetrics.density
         fun dp(value: Int): Int = (value * density).roundToInt().coerceAtLeast(1)
         val palette = TvColorScheme.DARK
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(context) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
+        val appearancePrefix = when (protocol) {
+            TvProjectionProtocol.ICCOA_CARLINK -> "车联日夜外观"
+            TvProjectionProtocol.AUTO -> "车机日夜外观"
+            else -> "CarPlay 外观"
+        }
+        val reconnectLabel = when (protocol) {
+            TvProjectionProtocol.ICCOA_CARLINK -> "立即重新广播并连接手机"
+            TvProjectionProtocol.AUTO -> "立即重新连接手机"
+            else -> "立即重新连接 iPhone"
+        }
 
         val overlay = FrameLayout(context).apply {
             setBackgroundColor(Color.parseColor("#DC05080F"))
@@ -237,11 +252,14 @@ object StageQuickControlOverlay {
             action = onToggleFpsCounter,
         )
         addMenuButton(
-            "CarPlay 外观  ·  ${nightModeLabel(carPlayNightMode)}",
+            "$appearancePrefix  ·  ${nightModeLabel(carPlayNightMode)}",
             glyph = TvIconGlyph.MOON,
             action = onCycleNightMode,
         )
-        addMenuButton("立即重新连接 iPhone", glyph = TvIconGlyph.REFRESH, action = onReconnectNow)
+        addMenuButton(reconnectLabel, glyph = TvIconGlyph.REFRESH, action = onReconnectNow)
+        if (onFullReset != null) {
+            addMenuButton("完全重置所有连接与设置", glyph = TvIconGlyph.SHIELD_MFI, danger = true, action = onFullReset)
+        }
         addMenuButton("断开连接并退出投屏", glyph = TvIconGlyph.POWER, danger = true, action = onDisconnectAndExit)
 
         if (buttons.isNotEmpty()) {

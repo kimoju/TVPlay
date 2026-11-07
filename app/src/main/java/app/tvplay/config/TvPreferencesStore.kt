@@ -1114,4 +1114,19 @@ object TvPreferencesStore {
         prefs(context).edit().putString(KEY_CARLINK_PIN_CODE, generated).apply()
         return generated
     }
+
+    /**
+     * Resets all stored settings, pairings (Apple HomeKit, Lockdown, ICCOA CarLink peer auth),
+     * wireless hotspot cache, display overrides, picture adjustments, and custom icons back to
+     * factory defaults, and generates a fresh accessory identity and 6-digit CarLink PIN code.
+     */
+    fun resetAllToDefaults(context: Context): String {
+        prefs(context).edit().clear().commit()
+        diplayPrefs(context).edit().clear().commit()
+        context.getSharedPreferences("carplay_wireless", Context.MODE_PRIVATE).edit().clear().commit()
+        clearCustomAirPlayIcon(context)
+        CarLinkAuthCipher.clearPeerAuthRecords()
+        loadIdentity(context)
+        return refreshCarLinkPinCode(context)
+    }
 }

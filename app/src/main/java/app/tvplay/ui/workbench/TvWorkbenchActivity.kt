@@ -42,11 +42,13 @@ import app.tvplay.config.WirelessPermissions
 import app.tvplay.engine.network.BluetoothRadioCheck
 import app.tvplay.engine.network.LanNetworkLink
 import app.tvplay.engine.network.UsbTunnelVpnService
+import app.tvplay.engine.network.WifiDirectGroupLink
 import app.tvplay.engine.session.TvWirelessMode
 import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.DiagnosticExportStore
 import app.tvplay.runtime.LanOtaCheckResult
 import app.tvplay.runtime.LanOtaProtocol
+import app.tvplay.runtime.LastConnectionProblem
 import app.tvplay.runtime.PendingReconnect
 import app.tvplay.runtime.ThemeModeDiagnostics
 import app.tvplay.runtime.TvBluetoothSinkGuard
@@ -321,6 +323,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             onChooseIphoneClicked = { showChooseIphoneDialog(launchAfterSelect = false) }
             onPairBluetoothClicked = { openSystemBluetoothSettings() }
             onResetWirelessHotspotClicked = { resetWirelessHotspotGroup() }
+            onFullResetClicked = { confirmFullReset() }
             onSaveDiagnosticLogClicked = { exportDiagnosticReport() }
             onCheckOtaUpdateClicked = { checkOtaUpdate(manual = true) }
             onDiscoverOtaServerClicked = { discoverOtaServerManually() }
@@ -934,18 +937,26 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
     private fun openSystemBluetoothSettings() {
         val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+        val carLinkPin = settings.connection.carLinkPinCode
         val palette = TvColorScheme.resolve(this)
         val items = listOf(
             TvModalDialog.OptionItem(
-                title = "开启本机蓝牙可见（推荐）",
-                subtitle = "让 iPhone 在「设置 → 蓝牙」底部直接搜到「$btName」并完成配对",
-                badgeText = "一键广播",
+                title = "断开蓝牙音乐占用并开启安卓车联（推荐）",
+                subtitle = "关闭电视自带蓝牙音箱(A2DP)抢占，立即进入投屏舞台广播（连接码：$carLinkPin）",
+                badgeText = "安卓车联",
                 selected = true,
+                icon = TvIconGlyph.PHONE,
+            ),
+            TvModalDialog.OptionItem(
+                title = "开启本机蓝牙可见（仅限 iPhone 配对）",
+                subtitle = "让 iPhone 在「设置 → 蓝牙」底部直接搜到「$btName」并完成配对（安卓请勿在此配对）",
+                badgeText = "iPhone",
+                selected = false,
                 icon = TvIconGlyph.RADAR,
             ),
             TvModalDialog.OptionItem(
                 title = "打开电视系统蓝牙设置",
-                subtitle = "进入 Android TV 系统原生蓝牙界面管理或配对设备",
+                subtitle = "进入 Android TV 系统蓝牙界面（如安卓手机已配对，建议取消配对以免误跳蓝牙音乐）",
                 badgeText = "系统设置",
                 selected = false,
                 icon = TvIconGlyph.BLUETOOTH,
@@ -959,16 +970,20 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         ) { which ->
             runCatching { dialogRef?.dismiss() }
             when (which) {
-                0 -> requestBluetoothDiscoverable(launchStageAfter = false)
-                1 -> launchSystemBluetoothSettings()
+                0 -> {
+                    TvBluetoothSinkGuard.suppressA2dpSink(this)
+                    openStageActivity(wireless = true)
+                }
+                1 -> requestBluetoothDiscoverable(launchStageAfter = false)
+                2 -> launchSystemBluetoothSettings()
             }
         }
         val handle = TvModalDialog.create(
             context = this,
-            title = "电视与 iPhone 蓝牙配对",
-            subtitle = "本机蓝牙标识：$btName",
+            title = "蓝牙与车联连接向导",
+            subtitle = "本机蓝牙标识：$btName · 安卓连接码：$carLinkPin",
             icon = TvIconGlyph.BLUETOOTH,
-            badgeText = "蓝牙向导",
+            badgeText = "连接向导",
             bodyView = listView,
             actions = listOf(
                 TvModalDialog.ActionSpec(
@@ -978,6 +993,60 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             ),
         )
         dialogRef = handle.dialog
+        showTrackedDialog(handle.dialog)
+    }
+
+    private fun confirmFullReset() {
+        val palette = TvColorScheme.resolve(this)
+        val density = resources.displayMetrics.density
+        val descView = TextView(this).apply {
+            text = "将彻底清除所有已保存的 iPhone / 安卓 CarLink 配对记录、认证密钥、Wi-Fi Direct 残留组网、画面与音频自定义设置，并重新生成全新的车机身份标识与 6 位连接码。"
+            setTextColor(palette.textSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setLineSpacing(0f, 1.3f)
+            val pad = (8 * density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "确认完全重置所有连接与设置？",
+            subtitle = "恢复至首次安装时的干净初始状态",
+            icon = TvIconGlyph.SHIELD_MFI,
+            badgeText = "恢复出厂",
+            bodyView = descView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "立即完全重置",
+                    kind = TvPlayButtonKind.DANGER,
+                    icon = TvIconGlyph.REFRESH,
+                ) {
+                    val performReset = {
+                        val newPin = settings.resetAllToDefaults()
+                        LastConnectionProblem.clear(this)
+                        PendingReconnect.clear()
+                        resetWirelessHotspotGroup()
+                        refreshWorkbenchStatus()
+                        settingsPane.refresh()
+                        Toast.makeText(
+                            this,
+                            "已完成完全重置，新 6 位连接码：$newPin",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    if (CarPlayBackgroundSession.hasSession()) {
+                        CarPlayBackgroundSession.stop {
+                            performReset()
+                        }
+                    } else {
+                        performReset()
+                    }
+                },
+            ),
+        )
         showTrackedDialog(handle.dialog)
     }
 

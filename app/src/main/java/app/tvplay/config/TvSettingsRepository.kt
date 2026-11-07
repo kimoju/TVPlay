@@ -425,4 +425,6 @@ class TvSettingsRepository(private val context: Context) {
             get() = TvPreferencesStore.loadOtaAutoCheck(context)
             set(value) = TvPreferencesStore.saveOtaAutoCheck(context, value)
     }
+
+    fun resetAllToDefaults(): String = TvPreferencesStore.resetAllToDefaults(context)
 }

@@ -41,6 +41,7 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -49,8 +50,10 @@ import app.tvplay.config.MfiAssetInstaller
 import app.tvplay.config.TvDeviceCapabilities
 import app.tvplay.config.TvPlayBluetooth
 import app.tvplay.config.TvPreferencesStore
+import app.tvplay.engine.network.WifiDirectGroupLink
 import app.tvplay.engine.session.TvProjectionProtocol
 import app.tvplay.engine.session.isNonPhoneBluetoothAccessory
+import app.tvplay.ui.theme.TvQrCodeRenderer
 import java.util.concurrent.Executors
 import app.tvplay.config.VideoSurfaceType
 import app.tvplay.config.WaitingScreenColorPreset
@@ -599,6 +602,7 @@ class TvStageActivity : Activity() {
             onDisconnectClicked = ::disconnectAndExit,
             onBluetoothSettingsClicked = ::openBluetoothSettings,
             onSwitchModeClicked = ::openConnectionModePicker,
+            onQrGuideClicked = ::openQrPairingDialog,
         )
         rootFrame.addView(
             waitingBindings.stageOverlay,
@@ -917,10 +921,15 @@ class TvStageActivity : Activity() {
             }
         }
         runCatching {
+            val fgLabel = when (TvPreferencesStore.loadProjectionProtocol(this)) {
+                TvProjectionProtocol.ICCOA_CARLINK -> "等待安卓手机连接"
+                TvProjectionProtocol.AUTO -> "等待手机连接"
+                else -> getString(R.string.waiting_for_iphone)
+            }
             TvSessionForegroundService.startOrUpdate(
                 this,
                 wirelessEnabled,
-                getString(R.string.waiting_for_iphone),
+                fgLabel,
             )
         }
         controller.start()
@@ -1073,11 +1082,17 @@ class TvStageActivity : Activity() {
                 reconnectAttempts = 0
                 cancelScheduledReconnect()
                 streamingActive = true
+                val proto = TvPreferencesStore.loadProjectionProtocol(this@TvStageActivity)
                 if (!firstFrameRendered) {
-                    waitingBindings.stageStatusView.text = "iPhone 已建立 AirPlay 会话，正在启动视频解码与画面渲染..."
+                    waitingBindings.stageStatusView.text = if (proto == TvProjectionProtocol.ICCOA_CARLINK) {
+                        "手机已建立车联会话，正在启动视频解码与画面渲染..."
+                    } else {
+                        "iPhone 已建立 AirPlay 会话，正在启动视频解码与画面渲染..."
+                    }
                 }
                 if (!isFinishing && !isDestroyed) {
-                    TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, "iPhone")
+                    val peerLabel = if (proto == TvProjectionProtocol.ICCOA_CARLINK) "安卓手机" else "iPhone"
+                    TvSessionForegroundService.startOrUpdate(this@TvStageActivity, wirelessEnabled, peerLabel)
                 }
                 refreshOverlayVisibility()
             }
@@ -1255,6 +1270,7 @@ class TvStageActivity : Activity() {
                 wirelessHotspotMode = wirelessMode,
                 existingWifiSsid = lanSsid,
             )
+            updateWaitingQrPreview(status, wirelessEnabled)
 
             if (status is CarPlayStatus.Failed) {
                 LastConnectionProblem.follow(this, status, status.startupFailure)
@@ -1747,6 +1763,228 @@ class TvStageActivity : Activity() {
         }
     }
 
+    private fun updateWaitingQrPreview(status: CarPlayStatus?, wirelessEnabled: Boolean) {
+        val qrCard = waitingBindings.qrCardView ?: return
+        val qrImg = waitingBindings.qrImageView ?: return
+        val qrCaption = waitingBindings.qrCaptionView ?: return
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(this) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
+        if (!wirelessEnabled || !protocol.enablesCarLink) {
+            qrCard.visibility = View.GONE
+            return
+        }
+        qrCard.visibility = View.VISIBLE
+        val pin = runCatching { TvPreferencesStore.loadCarLinkPinCode(this) }.getOrDefault("864209")
+        val hotspot = sessionEngine?.currentHotspotInfo()
+        val ssid = when {
+            status is CarPlayStatus.HotspotReady && status.ssid.isNotBlank() -> status.ssid
+            hotspot != null && hotspot.ssid.isNotBlank() -> hotspot.ssid
+            else -> TvPreferencesStore.loadExistingWifiSsid(this)
+        }
+        val psk = when {
+            status is CarPlayStatus.HotspotReady && status.passphrase.isNotBlank() -> status.passphrase
+            hotspot != null && hotspot.passphrase.isNotBlank() -> hotspot.passphrase
+            else -> TvPreferencesStore.loadExistingWifiPassphrase(this)
+        }
+        val payload = if (ssid.isNotBlank()) {
+            TvQrCodeRenderer.buildWifiQrPayload(ssid, psk)
+        } else {
+            "ICCOA://TVPLAY?PIN=$pin"
+        }
+        val density = resources.displayMetrics.density
+        val bitmap = TvQrCodeRenderer.renderBitmap(
+            content = payload,
+            targetSizePx = (84 * density).toInt().coerceAtLeast(84),
+            quietZoneModules = 2,
+        )
+        if (bitmap != null) {
+            qrImg.setImageBitmap(bitmap)
+        }
+        qrCaption.text = if (ssid.isNotBlank()) "扫码连热点 · $pin" else "连接码 $pin"
+    }
+
+    private fun openQrPairingDialog() {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int): Int = (v * density).toInt().coerceAtLeast(1)
+        val palette = TvColorScheme.resolve(this)
+        val pin = runCatching { TvPreferencesStore.loadCarLinkPinCode(this) }.getOrDefault("864209")
+        val hotspot = sessionEngine?.currentHotspotInfo()
+        val ssid = hotspot?.ssid?.takeIf { it.isNotBlank() }
+            ?: (lastStatus as? CarPlayStatus.HotspotReady)?.ssid?.takeIf { it.isNotBlank() }
+            ?: TvPreferencesStore.loadExistingWifiSsid(this)
+        val psk = hotspot?.passphrase?.takeIf { it.isNotBlank() }
+            ?: (lastStatus as? CarPlayStatus.HotspotReady)?.passphrase?.takeIf { it.isNotBlank() }
+            ?: TvPreferencesStore.loadExistingWifiPassphrase(this)
+        val qrPayload = if (ssid.isNotBlank()) {
+            TvQrCodeRenderer.buildWifiQrPayload(ssid, psk)
+        } else {
+            "ICCOA://TVPLAY?PIN=$pin"
+        }
+
+        val bodyRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+        }
+
+        val qrBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(12), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(18).toFloat()
+                setColor(palette.subtleSurface)
+                setStroke(dp(1), palette.outline)
+            }
+            val qrBitmap = TvQrCodeRenderer.renderBitmap(
+                content = qrPayload,
+                targetSizePx = dp(164),
+                quietZoneModules = 2,
+            )
+            addView(
+                FrameLayout(this@TvStageActivity).apply {
+                    setPadding(dp(6), dp(6), dp(6), dp(6))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(10).toFloat()
+                        setColor(Color.WHITE)
+                    }
+                    addView(
+                        ImageView(this@TvStageActivity).apply {
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            if (qrBitmap != null) setImageBitmap(qrBitmap)
+                        },
+                        FrameLayout.LayoutParams(dp(148), dp(148), Gravity.CENTER),
+                    )
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = if (ssid.isNotBlank()) "相机/Wi-Fi 扫码连 5GHz 热点" else "等待 5GHz 热点就绪…"
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(6), 0, 0)
+                },
+            )
+        }
+
+        val infoCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, 0, 0)
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = "6 位车联连接码：$pin"
+                    setTextColor(palette.accent)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                },
+            )
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    val ssidText = if (ssid.isNotBlank()) ssid else "正在创建 DIRECT- 热点…"
+                    val pskText = if (psk.isNotBlank()) psk else "自动生成中"
+                    text = "5GHz 热点名称：$ssidText    密码：$pskText"
+                    setTextColor(palette.textPrimary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(0, dp(4), 0, dp(8))
+                },
+            )
+            addView(
+                TextView(this@TvStageActivity).apply {
+                    text = "• 方式一（自动弹窗 / 蓝牙发现）：打开小米「设置 → 更多连接 → CarWith」、vivo「Jovi InCar」或 OPPO「Car+ 车联」，点击无线连接并输入连接码「$pin」。\n" +
+                        "• 方式二（扫码辅助直连）：关于 ICCOA 扫码——部分支持应用内扫码的车型使用厂商私有云码，而通用 ICCOA 协议通过 BLE (0xFCFB) 广播配对 + Wi-Fi Direct 传输。如手机未自动切入热点，可先用手机相机/Wi-Fi 扫描左侧二维码连入车机 5GHz 热点，再打开车联输入连接码「$pin」。"
+                    setTextColor(palette.textSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setLineSpacing(0f, 1.25f)
+                },
+            )
+        }
+
+        bodyRow.addView(qrBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        bodyRow.addView(infoCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "安卓 CarLink 扫码与连接码向导",
+            subtitle = "支持小米 CarWith · vivo Jovi InCar · OPPO Car+ 无线投屏",
+            icon = TvIconGlyph.SPARKLES,
+            badgeText = "PIN $pin",
+            bodyView = bodyRow,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "关闭",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "刷新 PIN 码与广播",
+                    kind = TvPlayButtonKind.SECONDARY,
+                    icon = TvIconGlyph.REFRESH,
+                ) {
+                    val newPin = TvPreferencesStore.refreshCarLinkPinCode(this)
+                    TvBluetoothSinkGuard.suppressA2dpSink(this)
+                    reconnectAttempts = 0
+                    reconnectNow()
+                    Toast.makeText(this, "已生成新 6 位连接码：$newPin，正在重新广播", Toast.LENGTH_SHORT).show()
+                },
+                TvModalDialog.ActionSpec(
+                    label = "完全重置所有连接",
+                    kind = TvPlayButtonKind.DANGER,
+                    icon = TvIconGlyph.SHIELD_MFI,
+                ) {
+                    confirmFullReset()
+                },
+            ),
+        )
+        showTrackedDialog(handle.dialog)
+    }
+
+    private fun confirmFullReset() {
+        val palette = TvColorScheme.resolve(this)
+        val density = resources.displayMetrics.density
+        val descView = TextView(this).apply {
+            text = "将彻底清除所有已保存的 iPhone / 安卓 CarLink 配对记录、认证密钥、Wi-Fi Direct 残留组网、画面与音频自定义设置，并重新生成全新的车机身份标识与 6 位连接码。"
+            setTextColor(palette.textSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setLineSpacing(0f, 1.3f)
+            val pad = (8 * density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        val handle = TvModalDialog.create(
+            context = this,
+            title = "确认完全重置所有连接与设置？",
+            subtitle = "恢复至首次安装时的干净初始状态",
+            icon = TvIconGlyph.SHIELD_MFI,
+            badgeText = "恢复出厂",
+            bodyView = descView,
+            actions = listOf(
+                TvModalDialog.ActionSpec(
+                    label = "取消",
+                    kind = TvPlayButtonKind.SECONDARY,
+                ),
+                TvModalDialog.ActionSpec(
+                    label = "立即完全重置",
+                    kind = TvPlayButtonKind.DANGER,
+                    icon = TvIconGlyph.REFRESH,
+                ) {
+                    val newPin = TvPreferencesStore.resetAllToDefaults(this)
+                    LastConnectionProblem.clear(this)
+                    PendingReconnect.clear()
+                    Toast.makeText(
+                        this,
+                        "已完成完全重置（新连接码：$newPin），正在重启投屏服务…",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    recreate()
+                },
+            ),
+        )
+        showTrackedDialog(handle.dialog)
+    }
+
     private fun refreshOverlayVisibility() {
         val showVideo = streamingActive && firstFrameRendered
         waitingBindings.stageOverlay.visibility = if (showVideo) View.GONE else View.VISIBLE
@@ -1851,6 +2089,10 @@ class TvStageActivity : Activity() {
             onDisconnectAndExit = {
                 hideQuickControlOverlay()
                 disconnectAndExit()
+            },
+            onFullReset = {
+                hideQuickControlOverlay()
+                confirmFullReset()
             },
             initialFocusIndex = focusIndex,
         )

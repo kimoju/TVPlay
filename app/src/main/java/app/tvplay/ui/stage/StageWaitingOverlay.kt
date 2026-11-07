@@ -32,6 +32,7 @@ import app.tvplay.ui.theme.AmbientMeshBackgroundDrawable
 import app.tvplay.ui.theme.HeroBentoCardDrawable
 import app.tvplay.ui.theme.TvColorScheme
 import app.tvplay.ui.theme.TvIconGlyph
+import app.tvplay.ui.theme.TvQrCodeRenderer
 import app.tvplay.ui.theme.TvVectorIcons
 import java.util.Locale
 
@@ -48,6 +49,9 @@ class ProjectionWaitingStageBindings(
     val reconnectBannerView: LinearLayout,
     val reconnectActionView: TextView,
     val backFromProjectionButton: TextView,
+    val qrCardView: LinearLayout? = null,
+    val qrImageView: ImageView? = null,
+    val qrCaptionView: TextView? = null,
 )
 
 /**
@@ -65,6 +69,7 @@ object StageWaitingOverlay {
         onDisconnectClicked: () -> Unit,
         onBluetoothSettingsClicked: (() -> Unit)? = null,
         onSwitchModeClicked: (() -> Unit)? = null,
+        onQrGuideClicked: (() -> Unit)? = null,
     ): ProjectionWaitingStageBindings {
         val density = context.resources.displayMetrics.density
         fun dp(value: Int): Int = (value * density).toInt().coerceAtLeast(1)
@@ -190,6 +195,74 @@ object StageWaitingOverlay {
             }
         }
 
+        val qrImageView = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            val defaultQr = TvQrCodeRenderer.renderBitmap(
+                content = "ICCOA://TVPLAY?PIN=$carLinkPin",
+                targetSizePx = dp(84),
+                quietZoneModules = 2,
+            )
+            if (defaultQr != null) {
+                setImageBitmap(defaultQr)
+            }
+        }
+        val qrCaptionView = TextView(context).apply {
+            text = "连接码 $carLinkPin"
+            setTextColor(waitingColors.primaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        }
+        val qrCardView = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = if (wirelessEnabled && protocol.enablesCarLink) View.VISIBLE else View.GONE
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setColor(ColorUtils.setAlphaComponent(waitingColors.buttonFill, 0x90))
+                setStroke(dp(1), ColorUtils.setAlphaComponent(0xFF38BDF8.toInt(), 0x88))
+            }
+            if (onQrGuideClicked != null) {
+                isFocusable = true
+                isClickable = true
+                setOnClickListener { onQrGuideClicked() }
+            }
+            addView(
+                FrameLayout(context).apply {
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(8).toFloat()
+                        setColor(Color.WHITE)
+                    }
+                    addView(qrImageView, FrameLayout.LayoutParams(dp(76), dp(76), Gravity.CENTER))
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+            addView(
+                qrCaptionView,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+        }
+
+        val instructionsAndQrRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                instructionsView,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(
+                qrCardView,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(10)
+                },
+            )
+        }
+
         val helpView = TextView(context).apply {
             visibility = View.GONE
             setTextColor(waitingColors.helpText)
@@ -250,7 +323,7 @@ object StageWaitingOverlay {
             glyph = TvIconGlyph.REFRESH,
             onClick = onReconnectClicked,
         )
-        val bluetoothButton = if (onBluetoothSettingsClicked != null) {
+        val bluetoothButton = if (onBluetoothSettingsClicked != null && protocol != TvProjectionProtocol.ICCOA_CARLINK) {
             createTvButton(
                 context = context,
                 text = "电视蓝牙配对",
@@ -259,6 +332,19 @@ object StageWaitingOverlay {
                 strokeColor = waitingColors.buttonBorder,
                 glyph = TvIconGlyph.BLUETOOTH,
                 onClick = onBluetoothSettingsClicked,
+            )
+        } else {
+            null
+        }
+        val qrGuideButton = if (onQrGuideClicked != null && protocol.enablesCarLink) {
+            createTvButton(
+                context = context,
+                text = "扫码与连接码",
+                fillColor = waitingColors.buttonFill,
+                textColor = Color.WHITE,
+                strokeColor = waitingColors.buttonBorder,
+                glyph = TvIconGlyph.SPARKLES,
+                onClick = onQrGuideClicked,
             )
         } else {
             null
@@ -327,6 +413,17 @@ object StageWaitingOverlay {
                     },
                 )
             }
+            if (qrGuideButton != null) {
+                addView(
+                    qrGuideButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        rightMargin = smallPad
+                    },
+                )
+            }
             if (switchModeButton != null) {
                 addView(
                     switchModeButton,
@@ -371,7 +468,7 @@ object StageWaitingOverlay {
             addView(emblemContainer)
             addView(statusView)
             addView(
-                instructionsView,
+                instructionsAndQrRow,
                 LinearLayout.LayoutParams(dp(580), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     topMargin = dp(10)
                 },
@@ -424,6 +521,9 @@ object StageWaitingOverlay {
             reconnectBannerView = reconnectBanner,
             reconnectActionView = reconnectAction,
             backFromProjectionButton = settingsButton,
+            qrCardView = qrCardView,
+            qrImageView = qrImageView,
+            qrCaptionView = qrCaptionView,
         )
     }
 
@@ -513,16 +613,25 @@ object StageWaitingOverlay {
             .getOrDefault("864209")
         return when {
             status is CarPlayStatus.IphoneNotListed ->
-                context.getString(
-                    if (status.nonHubDeviceListed) R.string.connection_help_usb_device_not_iphone
-                    else R.string.connection_help_no_usb_device,
-                )
-            !wirelessEnabled ->
-                if (protocol.enablesCarLink) {
-                    context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an) +
-                        "\n（安卓 CarLink AOA2 有线连接码：$carLinkPin）"
+                if (protocol == TvProjectionProtocol.ICCOA_CARLINK) {
+                    "未检测到支持 AOA2 车联的安卓手机，请检查 USB 数据线并开启 USB 调试或车联权限"
                 } else {
-                    context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an)
+                    context.getString(
+                        if (status.nonHubDeviceListed) R.string.connection_help_usb_device_not_iphone
+                        else R.string.connection_help_no_usb_device,
+                    )
+                }
+            !wirelessEnabled ->
+                when (protocol) {
+                    TvProjectionProtocol.ICCOA_CARLINK ->
+                        "01  使用支持数据传输的 USB 线连接安卓手机与电视 USB 接口\n" +
+                            "02  在手机上允许 USB 配件 / CarWith / 车联访问权限\n" +
+                            "03  如手机弹出连接码验证，请输入 6 位连接码「$carLinkPin」"
+                    TvProjectionProtocol.AUTO ->
+                        context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an) +
+                            "\n（安卓 CarLink AOA2 有线连接码：$carLinkPin）"
+                    else ->
+                        context.getString(R.string.use_a_usb_data_cable_and_unlock_your_iphone_allow_trust_an)
                 }
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidHint = existingWifiSsid.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
@@ -530,7 +639,7 @@ object StageWaitingOverlay {
                     TvProjectionProtocol.ICCOA_CARLINK ->
                         "01  保持手机蓝牙与 Wi-Fi 开启（请勿在系统蓝牙中连接电视，避免触发电视蓝牙音乐）\n" +
                             "02  打开手机「设置 → 更多连接 → CarWith / Jovi InCar / Car+ 车联」点击无线连接\n" +
-                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」完成投屏"
+                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」，或点击下方「扫码与连接码」扫码直连"
                     TvProjectionProtocol.AUTO ->
                         "01  确保电视与手机连接至同一局域网 Wi-Fi$ssidHint\n" +
                             "02  iPhone 在系统蓝牙连接「$btName」；安卓请勿连系统蓝牙，直接打开「设置 → 更多连接 → CarWith/车联」\n" +
@@ -546,7 +655,7 @@ object StageWaitingOverlay {
                     TvProjectionProtocol.ICCOA_CARLINK ->
                         "01  保持手机蓝牙与 Wi-Fi 开启（请勿在系统蓝牙中配对电视，以免误入蓝牙音乐）\n" +
                             "02  打开手机「设置 → 更多连接 → CarWith / Jovi InCar / Car+ 车联」搜索连接\n" +
-                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」，自动建立 5GHz 直连投屏"
+                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」，或用右侧二维码扫码加入 5GHz 热点"
                     TvProjectionProtocol.AUTO ->
                         "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
                             "02  iPhone 连接蓝牙「$btName」；安卓请勿连系统蓝牙，直接打开「设置 → 更多连接 → CarWith/车联」\n" +
@@ -578,11 +687,42 @@ object StageWaitingOverlay {
             .getOrDefault(TvProjectionProtocol.AUTO)
         val carLinkPin = runCatching { TvPreferencesStore.loadCarLinkPinCode(context) }
             .getOrDefault("864209")
-        if (status is CarPlayStatus.WaitingForPairedIphone) {
-            when (protocol) {
-                TvProjectionProtocol.ICCOA_CARLINK ->
-                    return "安卓 CarLink 广播就绪 (BLE 0xFCFB) · 手机连接码：$carLinkPin"
-                TvProjectionProtocol.AUTO ->
+        if (protocol == TvProjectionProtocol.ICCOA_CARLINK) {
+            return when (status) {
+                CarPlayStatus.StartingHotspot ->
+                    "正在启动 5GHz Wi-Fi Direct 直连热点与 BLE 广播…"
+                is CarPlayStatus.HotspotReady ->
+                    "安卓车联热点 ${status.ssid} (${status.band}) 已就绪 · 连接码：$carLinkPin"
+                CarPlayStatus.WaitingForPairedIphone,
+                CarPlayStatus.RunningWireless ->
+                    "安卓 CarLink 广播就绪 (BLE 0xFCFB) · 手机连接码：$carLinkPin"
+                CarPlayStatus.ConnectingBluetooth ->
+                    "正在与手机进行蓝牙 BLE 车联握手…"
+                CarPlayStatus.WirelessActive,
+                CarPlayStatus.WirelessActiveFallback,
+                CarPlayStatus.RunningControl ->
+                    "正在开启全屏安卓车联画面…"
+                CarPlayStatus.ControlEnded ->
+                    "车联等待超时，正在重新刷新广播与热点…"
+                CarPlayStatus.DiscoveringIphone,
+                CarPlayStatus.WaitingForIphone ->
+                    "正在等待安卓手机通过无线或 USB 连接 · 连接码：$carLinkPin"
+                is CarPlayStatus.IphoneNotListed ->
+                    "未检测到支持 AOA2 车联的安卓手机"
+                CarPlayStatus.AttachingNetwork ->
+                    "正在启动安卓 CarLink 投屏监听服务…"
+                is CarPlayStatus.Failed ->
+                    "安卓车联连接中断，正在自动重试…"
+                else ->
+                    "正在准备安卓 CarLink 投屏服务 · 连接码：$carLinkPin"
+            }
+        }
+        if (protocol == TvProjectionProtocol.AUTO) {
+            when (status) {
+                is CarPlayStatus.HotspotReady ->
+                    return "无线热点 ${status.ssid} (${status.band}) 已就绪 · 安卓连接码：$carLinkPin"
+                CarPlayStatus.WaitingForPairedIphone,
+                CarPlayStatus.RunningWireless ->
                     return "等待 iPhone 蓝牙连接或安卓 CarLink 接入 · 连接码：$carLinkPin"
                 else -> {}
             }

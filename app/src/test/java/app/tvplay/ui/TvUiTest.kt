@@ -217,10 +217,10 @@ class TvUiTest {
         fpsHudButton.performClick()
         assertTrue(TvPreferencesStore.loadFpsCounter(stage))
 
-        // Click "CarPlay 外观" button
+        // Click night mode appearance button
         quickOverlay = quickOverlayField.get(stage) as? View
         val nightButton = collectAllViews(quickOverlay!!).filterIsInstance<TextView>().first {
-            "CarPlay 外观" in it.text.toString()
+            "外观" in it.text.toString()
         }
         nightButton.performClick()
 
@@ -721,7 +721,7 @@ class TvUiTest {
         progressBar.progress = 68
         assertEquals(68, progressBar.progress)
 
-        // Verify ICCOA CarLink protocol switcher and 6-digit PIN rotation
+        // Verify ICCOA CarLink protocol switcher, CarPlay-free Android labels, and full factory reset
         val repo = TvSettingsRepository(workbench)
         repo.connection.projectionProtocol = app.tvplay.engine.session.TvProjectionProtocol.ICCOA_CARLINK
         assertEquals(app.tvplay.engine.session.TvProjectionProtocol.ICCOA_CARLINK, repo.connection.projectionProtocol)
@@ -730,6 +730,20 @@ class TvUiTest {
         val refreshedPin = repo.connection.refreshCarLinkPinCode()
         assertEquals(6, refreshedPin.length)
         assertTrue(refreshedPin.all(Char::isDigit))
+
+        val carLinkStageText = app.tvplay.ui.stage.StageWaitingOverlay.friendlyStage(
+            context = workbench,
+            status = CarPlayStatus.RunningWireless,
+            wirelessEnabled = true,
+            wirelessHotspotMode = TvWirelessMode.WIFI_DIRECT,
+        )
+        assertFalse("ICCOA_CARLINK waiting status must not mention CarPlay: $carLinkStageText", "CarPlay" in carLinkStageText)
+        assertFalse("ICCOA_CARLINK waiting status must not mention iPhone: $carLinkStageText", "iPhone" in carLinkStageText)
+
+        val resetPin = repo.resetAllToDefaults()
+        assertEquals(6, resetPin.length)
+        assertTrue(resetPin.all(Char::isDigit))
+        assertEquals(app.tvplay.engine.session.TvProjectionProtocol.AUTO, repo.connection.projectionProtocol)
 
         workbenchController.pause().stop().destroy()
     }

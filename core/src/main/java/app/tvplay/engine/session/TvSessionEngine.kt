@@ -124,6 +124,7 @@ sealed class CarPlayStatus {
         val bssid: String,
         val address: String,
         val backend: String,
+        val passphrase: String = "",
     ) : CarPlayStatus()
     data object WaitingForPairedIphone : CarPlayStatus()
     data object ConnectingBluetooth : CarPlayStatus()
@@ -1002,6 +1003,7 @@ class TvSessionEngine(
                                     bssid = hotspotInfo.bssid ?: airPlayConfig.deviceId,
                                     address = hostAddr?.hostAddress ?: "",
                                     backend = hotspotInfo.backend.label,
+                                    passphrase = hotspotInfo.passphrase,
                                 ),
                                 generation,
                             )
@@ -1104,14 +1106,11 @@ class TvSessionEngine(
                     }
                     val freq = (liveHotspot.frequencyMHz?.takeIf { it > 0 })
                         ?: if (liveHotspot.channel >= 36) 5180 else 2412
-                    val p2pMac = liveHotspot.bssid
-                        ?.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" }
-                        ?: CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS
                     CarLinkBleSpec.ServerConnectionInfo(
                         name = carDisplayName,
                         ssid = ssid,
                         psk = psk,
-                        mac = p2pMac,
+                        mac = CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS,
                         freq = freq,
                         port = 0,
                         type = CarLinkBleSpec.WIFI_TYPE_P2P,
@@ -1413,6 +1412,8 @@ class TvSessionEngine(
     }
 
     fun requestSiri(): Boolean = invokeSiri()
+
+    fun currentHotspotInfo(): WirelessHotspotInfo? = activeHotspotInfo
 
     /** Updates CarPlay / CarLink night mode on the active control session. */
     fun setNightMode(night: Boolean): Boolean {
@@ -1792,6 +1793,7 @@ class TvSessionEngine(
                     bssid = deviceIdentifier,
                     address = hostAddressText,
                     backend = hotspotInfo.backend.label,
+                    passphrase = hotspotInfo.passphrase,
                 ),
             )
 

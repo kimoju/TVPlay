@@ -87,7 +87,7 @@ class CarLinkProtocolTest {
         assertEquals(7.toByte(), normal[2])
         assertEquals(0x02.toByte(), normal[3])
         assertEquals(0xEE.toByte(), normal[8])
-        assertEquals((-65).toByte(), normal[15])
+        assertEquals((-60).toByte(), normal[15])
 
         val info2 = CarLinkBleSpec.buildCarInfo2Payload("TVPlay")
         assertEquals(16, info2.size)

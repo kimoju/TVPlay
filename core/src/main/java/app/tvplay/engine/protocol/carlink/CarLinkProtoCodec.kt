@@ -302,6 +302,14 @@ object CarLinkProtoCodec {
 
     val DEFAULT_CAR_CERT_BYTES: ByteArray = DEFAULT_CAR_CERT_BASE64.toByteArray(Charsets.US_ASCII)
 
+    /**
+     * Certificate-bound `short_name` and `product_name` inside [DEFAULT_CAR_CERT_BASE64] (`ccd.data`).
+     * `ucar-sdk` (`UCarConnectProxy`) extracts these from `ccd.data` and uses `short_name` in BLE
+     * Scan Response `0x0002` (`ADV_CAR_INFO_2_UUID`) and `product_name` in `ServerConnectionInfo.name`.
+     */
+    const val DEFAULT_CAR_SHORT_NAME: String = "测0试1车2机3"
+    const val DEFAULT_CAR_PRODUCT_NAME: String = "测0试1车2机3 2022款"
+
     // -------------------------------------------------------------------------
     // Decoders
     // -------------------------------------------------------------------------

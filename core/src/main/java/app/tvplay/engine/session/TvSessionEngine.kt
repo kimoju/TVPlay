@@ -77,6 +77,7 @@ import app.tvplay.engine.protocol.iap2.forWirelessLink
 import app.tvplay.engine.protocol.carlink.CarLinkBleAdvertiser
 import app.tvplay.engine.protocol.carlink.CarLinkBleSpec
 import app.tvplay.engine.protocol.carlink.CarLinkControlSession
+import app.tvplay.engine.protocol.carlink.CarLinkProtoCodec
 import app.tvplay.engine.protocol.carlink.CarLinkUibcDispatcher
 import app.tvplay.engine.protocol.rtsp.AirPlayContact
 import app.tvplay.engine.protocol.rtsp.CarPlayMediaEngine
@@ -944,7 +945,7 @@ class TvSessionEngine(
             carLinkBleAdvertiser?.notifyPendingClients()
             return
         }
-        if (!config.projectionProtocol.enablesCarPlay) {
+        if (!config.projectionProtocol.enablesCarPlay || mfiProvider == null || phase != Phase.WIRELESS) {
             startStandaloneCarLinkWireless()
         }
     }
@@ -1062,7 +1063,8 @@ class TvSessionEngine(
             val advertiser = CarLinkBleAdvertiser(
                 context = appContext,
                 carIdHex12 = carMacHex12,
-                carName = config.label,
+                carName = CarLinkProtoCodec.DEFAULT_CAR_PRODUCT_NAME,
+                carShortName = CarLinkProtoCodec.DEFAULT_CAR_SHORT_NAME,
                 modelIdHex8 = config.carLinkModelId,
                 vendorDataHex4 = config.carLinkVendorData,
                 pinCodeProvider = { config.carLinkPinCode },
@@ -1081,7 +1083,7 @@ class TvSessionEngine(
                     val freq = (liveHotspot?.frequencyMHz?.takeIf { it > 0 })
                         ?: if ((liveHotspot?.channel ?: 149) >= 36) 5180 else 2412
                     CarLinkBleSpec.ServerConnectionInfo(
-                        name = config.label,
+                        name = CarLinkProtoCodec.DEFAULT_CAR_PRODUCT_NAME,
                         ssid = ssid,
                         psk = psk,
                         mac = CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS,
@@ -2008,6 +2010,10 @@ class TvSessionEngine(
             if (handoffInProgress && error !is Error) {
                 debugLog("wireless RFCOMM control ended while Wi-Fi AirPlay session is active: ${error.message}")
                 onWirelessBootstrapEndedWithActiveSession(generation)
+            } else if (config.projectionProtocol.enablesCarLink && activeHotspotInfo != null && error !is Error) {
+                debugLog("wireless CarPlay Bluetooth bring-up ended (${error.message}); keeping Wi-Fi Direct hotspot alive for CarLink")
+                onWirelessBootstrapEndedWithActiveSession(generation)
+                onStatus(CarPlayStatus.RunningWireless, generation)
             } else {
                 debugLog("wireless bring-up failed", error)
                 if (error is Error) throw error
@@ -3361,9 +3367,15 @@ class TvSessionEngine(
                 "发现多台已配对的 iPhone，请在 TVPlay 连接设置中指定目标 iPhone",
             )
         }
-        if (candidateDevices.size == 1) return candidateDevices.single()
+        if (!config.projectionProtocol.enablesCarLink && candidateDevices.size == 1) {
+            return candidateDevices.single()
+        }
         throw ConnectionFailureException(
-            if (candidateDevices.isEmpty()) ConnectionFailureCause.NO_PAIRED_IPHONE else ConnectionFailureCause.IPHONE_NOT_CHOSEN,
+            if (candidateDevices.isEmpty() || config.projectionProtocol.enablesCarLink) {
+                ConnectionFailureCause.NO_PAIRED_IPHONE
+            } else {
+                ConnectionFailureCause.IPHONE_NOT_CHOSEN
+            },
             "尚未找到已配对的 iPhone，请先与电视蓝牙配对",
         )
     }
@@ -3386,6 +3398,11 @@ class TvSessionEngine(
             if (isStaleWirelessRun(link.generation) || isWirelessSessionOrHandoffActive(link.generation)) return@Thread
             val failure = unrealBluetoothFailure(link, "silence") ?: return@Thread
             if (isStaleWirelessRun(link.generation) || isWirelessSessionOrHandoffActive(link.generation)) return@Thread
+            if (config.projectionProtocol.enablesCarLink && activeHotspotInfo != null) {
+                debugLog("unreal Bluetooth link silenced while CarLink is enabled; keeping Wi-Fi Direct hotspot alive")
+                onWirelessBootstrapEndedWithActiveSession(link.generation)
+                return@Thread
+            }
             fail(failure, link.generation)
             closeWirelessStack(generation = link.generation)
         }, "tvplay-bluetooth-link-check").apply { isDaemon = true; start() }

@@ -54,7 +54,7 @@ object CarLinkBleSpec {
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
     const val DEFAULT_PROTOCOL_VERSION = "1.5"
-    const val DEFAULT_RSSI_THRESHOLD = -65
+    const val DEFAULT_RSSI_THRESHOLD = -60
     const val ROTATION_INTERVAL_MS = 30_000L
 
     data class ClientInfo(
@@ -202,7 +202,8 @@ object CarLinkBleSpec {
 class CarLinkBleAdvertiser(
     private val context: Context,
     private val carIdHex12: String,
-    private val carName: String,
+    private val carName: String = CarLinkProtoCodec.DEFAULT_CAR_PRODUCT_NAME,
+    private val carShortName: String = CarLinkProtoCodec.DEFAULT_CAR_SHORT_NAME,
     private val modelIdHex8: String = "00010001",
     private val vendorDataHex4: String = "0000",
     private val pinCodeProvider: () -> String = { "864209" },
@@ -226,10 +227,15 @@ class CarLinkBleAdvertiser(
     }
 
     private val closed = AtomicBoolean(false)
-    private val serialCounter = AtomicInteger(1)
+    private val serialPrefs by lazy {
+        runCatching { context.getSharedPreferences("serial_num_prefs", Context.MODE_PRIVATE) }.getOrNull()
+    }
+    private val serialCounter = AtomicInteger(initSerialNumber())
     private val handler = Handler(Looper.getMainLooper())
     private val writeFragments = ConcurrentHashMap<String, PreparedWriteBuffer>()
     private val pendingClients = ConcurrentHashMap<String, BluetoothDevice>()
+    private val cccdSubscribedDevices = ConcurrentHashMap.newKeySet<String>()
+    private val clientInfoReceivedDevices = ConcurrentHashMap.newKeySet<String>()
     private val notifiedClients = ConcurrentHashMap.newKeySet<String>()
 
     private var advertiser: BluetoothLeAdvertiser? = null
@@ -237,11 +243,29 @@ class CarLinkBleAdvertiser(
     private var activeAdvertiseCallback: AdvertiseCallback? = null
     private var activeAdvertisingSetCallback: AdvertisingSetCallback? = null
 
+    private fun initSerialNumber(): Int {
+        val prefs = runCatching { context.getSharedPreferences("serial_num_prefs", Context.MODE_PRIVATE) }.getOrNull()
+        val last = prefs?.getInt("last_serial_num", 0) ?: 0
+        var next = (last + 1) and 0xFF
+        if (next == 0) next = 1
+        runCatching { prefs?.edit()?.putInt("last_serial_num", next)?.apply() }
+        return next
+    }
+
+    private fun advanceSerialNumber(): Int {
+        val next = serialCounter.updateAndGet { current ->
+            val n = (current + 1) and 0xFF
+            if (n == 0) 1 else n
+        }
+        runCatching { serialPrefs?.edit()?.putInt("last_serial_num", next)?.apply() }
+        return next
+    }
+
     private val rotateTask = object : Runnable {
         override fun run() {
             if (closed.get()) return
             if (!isSessionActiveProvider()) {
-                serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
+                advanceSerialNumber()
                 restartAdvertisingInternal()
             }
             handler.postDelayed(this, CarLinkBleSpec.ROTATION_INTERVAL_MS)
@@ -258,7 +282,7 @@ class CarLinkBleAdvertiser(
         if (btManager != null && gattServer == null) {
             startGattServer(btManager)
         }
-        serialCounter.updateAndGet { current -> (current + 1) and 0xFF }
+        advanceSerialNumber()
         handler.removeCallbacks(rotateTask)
         restartAdvertisingInternal(btManager?.adapter)
         handler.postDelayed(rotateTask, CarLinkBleSpec.ROTATION_INTERVAL_MS)
@@ -307,14 +331,12 @@ class CarLinkBleAdvertiser(
         )
         val clientInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val serverInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.SERVER_CONNECTION_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
-                BluetoothGattCharacteristic.PROPERTY_INDICATE or
-                BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
         val cccd = BluetoothGattDescriptor(
@@ -357,7 +379,7 @@ class CarLinkBleAdvertiser(
             modelIdHex8 = modelIdHex8,
             vendorDataHex4 = vendorDataHex4,
         )
-        val info2 = CarLinkBleSpec.buildCarInfo2Payload(carName)
+        val info2 = CarLinkBleSpec.buildCarInfo2Payload(carShortName)
 
         val advertiseData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
@@ -448,6 +470,8 @@ class CarLinkBleAdvertiser(
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 writeFragments.remove(device.address)
                 pendingClients.remove(device.address)
+                cccdSubscribedDevices.remove(device.address)
+                clientInfoReceivedDevices.remove(device.address)
                 notifiedClients.remove(device.address)
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onLog("CarLink BLE: phone GATT connected ${device.address}")
@@ -473,8 +497,10 @@ class CarLinkBleAdvertiser(
                 }
             }
             if (descriptor.uuid == CarLinkBleSpec.CCCD_UUID) {
-                pendingClients[device.address] = device
-                handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 60L)
+                cccdSubscribedDevices.add(device.address)
+                if (clientInfoReceivedDevices.contains(device.address)) {
+                    handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 50L)
+                }
             }
         }
 
@@ -541,13 +567,14 @@ class CarLinkBleAdvertiser(
         val jsonStr = bytes.toString(Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
         onLog("CarLink BLE: received ClientInfo from ${device.address}: $jsonStr")
         pendingClients[device.address] = device
+        clientInfoReceivedDevices.add(device.address)
         notifiedClients.remove(device.address)
         val clientInfo = runCatching { CarLinkBleSpec.parseClientInfoJson(jsonStr) }.getOrNull()
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 120L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 600L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 60L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 500L)
         handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 1500L)
     }
 
@@ -572,12 +599,14 @@ class CarLinkBleAdvertiser(
         }
         runCatching {
             characteristic.value = payload
-            val confirmed = server.notifyCharacteristicChanged(device, characteristic, true)
-            if (!confirmed) {
-                server.notifyCharacteristicChanged(device, characteristic, false)
+            // Always send GATT Notification (confirm = false) matching BluetoothLeService.sendMessageToClient
+            val sent = server.notifyCharacteristicChanged(device, characteristic, false)
+            if (sent) {
+                notifiedClients.add(device.address)
+                onLog("CarLink BLE: notified ServerConnectionInfo (${payload.size}B) to ${device.address}")
+            } else {
+                onLog("CarLink BLE: notifyCharacteristicChanged returned false for ${device.address}")
             }
-            notifiedClients.add(device.address)
-            onLog("CarLink BLE: notified ServerConnectionInfo (${payload.size}B) to ${device.address}")
         }.onFailure { e ->
             onLog("CarLink BLE: notifyServerConnectionInfo failed: ${e.message}")
         }
@@ -592,6 +621,8 @@ class CarLinkBleAdvertiser(
         gattServer = null
         writeFragments.clear()
         pendingClients.clear()
+        cccdSubscribedDevices.clear()
+        clientInfoReceivedDevices.clear()
         notifiedClients.clear()
     }
 }

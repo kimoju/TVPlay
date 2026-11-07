@@ -981,6 +981,7 @@ class CarLinkControlSession(
                     val m2Options = buildString {
                         append("OPTIONS * RTSP/1.0\r\n")
                         append("CSeq: ${clientCseq++}\r\n")
+                        append("User-Agent: stagefright/1.0 (Linux;Android 13)\r\n")
                         append("Require: org.wfa.wfd1.0\r\n")
                         append("\r\n")
                     }
@@ -1008,17 +1009,11 @@ class CarLinkControlSession(
                         if (body.isEmpty() || body.contains("wfd_uibc_capability")) {
                             append("wfd_uibc_capability: input_category_list=GENERIC;generic_cap_list=Keyboard, Mouse, SingleTouch;hidc_cap_list=none;port=none;uibc_encrypted=true\r\n")
                         }
-                        if (body.isEmpty() || body.contains("ovm_control_capability")) {
-                            append("ovm_control_capability: supported\r\n")
-                        }
                         if (body.isEmpty() || body.contains("wfd_standby_resume_capability")) {
                             append("wfd_standby_resume_capability: supported\r\n")
                         }
-                        if (body.isEmpty() || body.contains("wfd_audio_latency")) {
-                            append("wfd_audio_latency: 0\r\n")
-                        }
-                        if (body.isEmpty() || body.contains("iccoa_support_hevc")) {
-                            append("iccoa_support_hevc: ${if (hevcEnabled) "supported" else "none"}\r\n")
+                        if (hevcEnabled && (body.isEmpty() || body.contains("iccoa_support_hevc"))) {
+                            append("iccoa_support_hevc: supported\r\n")
                         }
                         if (body.isEmpty() || body.contains("iccoa_support_fusion")) {
                             append("iccoa_support_fusion: supported\r\n")
@@ -1048,11 +1043,25 @@ class CarLinkControlSession(
                     }
                     if (body.contains("wfd_uibc_capability", ignoreCase = true)) {
                         uibcEncrypted = !body.contains("uibc_encrypted=false", ignoreCase = true)
-                        val portMatch = Regex("port=(\\d+)").find(body)
+                        val uibcLine = body.lineSequence().firstOrNull { it.contains("wfd_uibc_capability", ignoreCase = true) }.orEmpty()
+                        val portMatch = Regex("port=(\\d+)").find(uibcLine)
                         val peerUibcPort = portMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
                             ?: getPeerPort(CarLinkChannelType.UIBC)
                         if (uibcOutput == null && isValidPeerHost(peerHost)) {
                             connectOutboundChannel(CarLinkChannelType.UIBC, peerHost, peerUibcPort) { handleUibcSocket(it) }
+                        }
+                    }
+                    if (body.contains("ovm_control_capability", ignoreCase = true)) {
+                        val ovmLine = body.lineSequence().firstOrNull { it.contains("ovm_control_capability", ignoreCase = true) }.orEmpty()
+                        val ovmPort = Regex("port=(\\d+)").find(ovmLine)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        if (ovmPort != null && ovmPort > 0 && isValidPeerHost(peerHost)) {
+                            connectOutboundChannel(CarLinkChannelType.SENSOR, peerHost, ovmPort) { sock ->
+                                val buf = ByteArray(1024)
+                                val ins = sock.getInputStream()
+                                while (!closed.get() && !sock.isClosed) {
+                                    if (ins.read(buf) < 0) break
+                                }
+                            }
                         }
                     }
                     val resp = buildRtspResponse(cseq = cseq)
@@ -1063,7 +1072,7 @@ class CarLinkControlSession(
                     when {
                         body.contains("wfd_trigger_method: SETUP") -> {
                             awaitingSetupResponse = true
-                            val rtpPort = boundPrimaryRtpPort
+                            val rtpPort = boundAltRtpPort.takeIf { it > 0 } ?: boundPrimaryRtpPort
                             val transportSpec = if (useTcpRtp) {
                                 "RTP/AVP/TCP;unicast;client_port=$rtpPort"
                             } else {
@@ -1072,6 +1081,7 @@ class CarLinkControlSession(
                             val setupReq = buildString {
                                 append("SETUP $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
+                                append("User-Agent: stagefright/1.0 (Linux;Android 13)\r\n")
                                 append("Transport: $transportSpec\r\n")
                                 append("\r\n")
                             }
@@ -1086,6 +1096,7 @@ class CarLinkControlSession(
                             val playReq = buildString {
                                 append("PLAY $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
+                                append("User-Agent: stagefright/1.0 (Linux;Android 13)\r\n")
                                 append("Session: $rtspSessionId\r\n")
                                 append("\r\n")
                             }
@@ -1099,6 +1110,7 @@ class CarLinkControlSession(
                             val teardownReq = buildString {
                                 append("TEARDOWN $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
+                                append("User-Agent: stagefright/1.0 (Linux;Android 13)\r\n")
                                 append("Session: $rtspSessionId\r\n")
                                 append("\r\n")
                             }
@@ -1342,8 +1354,17 @@ class CarLinkControlSession(
             payloadOffset += 4 + extWords * 4
         }
         if (payloadOffset >= len) return
+        val payloadType = packetBuf[1].toInt() and 0x7F
+        // In libovmsink.so (RtpSource.cpp), PT=96 is AAC audio, PT=97 is H.264, PT=98 is H.265, and PT=33 is MPEG2-TS.
+        // Never feed PT=96 audio frames into the video NAL assembler.
+        if (payloadType == 96) return
         val payloadLen = len - payloadOffset
         val firstByte = packetBuf[payloadOffset].toInt() and 0xFF
+        val isHevcPayload = when (payloadType) {
+            98 -> true
+            97 -> false
+            else -> hevcEnabled
+        }
         when {
             firstByte == 0x00 && payloadLen > 4 && packetBuf[payloadOffset + 1] == 0.toByte() -> {
                 // Direct Annex-B inside RTP (`wfd_av_raw_packet: true`)
@@ -1369,7 +1390,7 @@ class CarLinkControlSession(
                     rtpPacket = packetBuf,
                     length = len,
                     assembler = nalAssembler,
-                    preferHevc = hevcEnabled,
+                    preferHevc = isHevcPayload,
                 ) { accessUnit, rtpTimestamp ->
                     feedAnnexBVideoAccessUnit(accessUnit, (rtpTimestamp * 1_000_000L) / 90_000L)
                 }

@@ -178,7 +178,7 @@ class TvStageActivity : Activity() {
                 action == BluetoothDevice.ACTION_ACL_CONNECTED ||
                 action == BluetoothDevice.ACTION_BOND_STATE_CHANGED
             ) {
-                TvBluetoothSinkGuard.onBluetoothEvent(this@TvStageActivity, device, action)
+                TvBluetoothSinkGuard.onBluetoothEvent(this@TvStageActivity, device, action, intent)
             }
             if (isFinishing || isDestroyed || isProjectionVisible || streamingActive || activeAirPlaySession != null) return
             if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return

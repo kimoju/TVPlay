@@ -104,7 +104,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
                 action == BluetoothDevice.ACTION_ACL_CONNECTED ||
                 action == BluetoothDevice.ACTION_BOND_STATE_CHANGED
             ) {
-                TvBluetoothSinkGuard.onBluetoothEvent(this@TvWorkbenchActivity, device, action)
+                TvBluetoothSinkGuard.onBluetoothEvent(this@TvWorkbenchActivity, device, action, intent)
             }
         }
     }

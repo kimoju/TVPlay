@@ -1124,7 +1124,12 @@ class TvSessionEngine(
                         return@serverInfo null
                     }
                     val freq = (liveHotspot.frequencyMHz?.takeIf { it > 0 })
-                        ?: if (liveHotspot.channel >= 36) 5180 else 2412
+                        ?: when (val ch = liveHotspot.channel) {
+                            in 1..13 -> 2407 + ch * 5
+                            14 -> 2484
+                            in 36..177 -> 5000 + ch * 5
+                            else -> 5180
+                        }
                     CarLinkBleSpec.ServerConnectionInfo(
                         name = carDisplayName,
                         ssid = ssid,

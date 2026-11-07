@@ -63,7 +63,7 @@ class BluetoothAutoConnectReceiver : BroadcastReceiver() {
             intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
         }
         if (TvBluetoothSinkGuard.isSinkProfileAction(action) || action == BluetoothDevice.ACTION_ACL_CONNECTED) {
-            TvBluetoothSinkGuard.onBluetoothEvent(context, device, action)
+            TvBluetoothSinkGuard.onBluetoothEvent(context, device, action, intent)
         }
         if (action != BluetoothDevice.ACTION_ACL_CONNECTED || device == null) return
         val address = runCatching { device.address }.getOrNull()

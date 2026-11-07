@@ -698,7 +698,7 @@ class CarLinkProtocolTest {
                 val m6Req = readRtspMessage(rtspReader)
                 assertTrue(m6Req.firstLine.startsWith("SETUP rtsp://127.0.0.1/wfd1.0/streamid=0 RTSP/1.0"))
                 assertEquals(
-                    "RTP/AVP/TCP;unicast;client_port=${session.boundPrimaryRtpPort}",
+                    "RTP/AVP/TCP;unicast;client_port=${session.boundAltRtpPort}",
                     m6Req.headers["transport"],
                 )
                 val m6Cseq = m6Req.headers["cseq"] ?: "2"
@@ -707,7 +707,7 @@ class CarLinkProtocolTest {
                         "RTSP/1.0 200 OK\r\n" +
                             "CSeq: $m6Cseq\r\n" +
                             "Session: 99887766;timeout=60\r\n" +
-                            "Transport: RTP/AVP/TCP;unicast;client_port=${session.boundPrimaryRtpPort};server_port=19000\r\n\r\n"
+                            "Transport: RTP/AVP/TCP;unicast;client_port=${session.boundAltRtpPort};server_port=19000\r\n\r\n"
                         ).toByteArray(),
                 )
                 rtspOut.flush()
@@ -721,8 +721,13 @@ class CarLinkProtocolTest {
                 rtspOut.flush()
 
                 // 6. Stream H.264 video over TCP RTP (RFC 4571 2-byte length prefix) + UDP RTP fallback
-                Socket(loopback, session.boundPrimaryRtpPort).use { tcpRtpSocket ->
+                Socket(loopback, session.boundAltRtpPort).use { tcpRtpSocket ->
                     val rtpOut = tcpRtpSocket.getOutputStream()
+                    // Verify PT=96 AAC audio packet on RTP stream does not corrupt video NAL assembly
+                    writeRfc4571Packet(
+                        rtpOut,
+                        buildRtpPacket(seq = 0, timestamp = 48_000L, marker = true, payload = byteArrayOf(0x00, 0x10, 0x21, 0x20), payloadType = 96),
+                    )
                     val sps = byteArrayOf(0x67, 0x42, 0x00, 0x1F, 0xE9.toByte(), 0x01, 0x40, 0x7B, 0x20)
                     val pps = byteArrayOf(0x68, 0xCE.toByte(), 0x06, 0xE2.toByte())
                     // STAP-A (type 24) containing SPS + PPS
@@ -735,14 +740,14 @@ class CarLinkProtocolTest {
                         write(pps.size)
                         write(pps)
                     }.toByteArray()
-                    val stapARtp = buildRtpPacket(seq = 1, timestamp = 90_000L, marker = false, payload = stapAPayload)
+                    val stapARtp = buildRtpPacket(seq = 1, timestamp = 90_000L, marker = false, payload = stapAPayload, payloadType = 97)
                     writeRfc4571Packet(rtpOut, stapARtp)
 
                     // FU-A (type 28) fragmented IDR slice (start + end)
                     val idrFrag1 = byteArrayOf(0x7C, 0x85.toByte(), 0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte())
                     val idrFrag2 = byteArrayOf(0x7C, 0x45, 0xDD.toByte(), 0xEE.toByte(), 0xFF.toByte())
-                    writeRfc4571Packet(rtpOut, buildRtpPacket(seq = 2, timestamp = 90_000L, marker = false, payload = idrFrag1))
-                    writeRfc4571Packet(rtpOut, buildRtpPacket(seq = 3, timestamp = 90_000L, marker = true, payload = idrFrag2))
+                    writeRfc4571Packet(rtpOut, buildRtpPacket(seq = 2, timestamp = 90_000L, marker = false, payload = idrFrag1, payloadType = 97))
+                    writeRfc4571Packet(rtpOut, buildRtpPacket(seq = 3, timestamp = 90_000L, marker = true, payload = idrFrag2, payloadType = 97))
                     rtpOut.flush()
 
                     // Also send a single-NALU P-slice over UDP RTP to boundAltRtpPort
@@ -939,10 +944,16 @@ class CarLinkProtocolTest {
         }
     }
 
-    private fun buildRtpPacket(seq: Int, timestamp: Long, marker: Boolean, payload: ByteArray): ByteArray {
+    private fun buildRtpPacket(
+        seq: Int,
+        timestamp: Long,
+        marker: Boolean,
+        payload: ByteArray,
+        payloadType: Int = 97,
+    ): ByteArray {
         val header = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN)
         header.put(0x80.toByte())
-        header.put(((if (marker) 0x80 else 0x00) or 96).toByte())
+        header.put(((if (marker) 0x80 else 0x00) or (payloadType and 0x7F)).toByte())
         header.putShort(seq.toShort())
         header.putInt(timestamp.toInt())
         header.putInt(0x12345678)

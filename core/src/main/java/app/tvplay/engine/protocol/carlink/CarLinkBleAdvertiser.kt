@@ -235,9 +235,13 @@ class CarLinkBleAdvertiser(
     private val writeFragments = ConcurrentHashMap<String, PreparedWriteBuffer>()
     private val pendingClients = ConcurrentHashMap<String, BluetoothDevice>()
     private val cccdSubscribedDevices = ConcurrentHashMap.newKeySet<String>()
+    private val cccdPreferConfirmMap = ConcurrentHashMap<String, Boolean>()
     private val clientInfoReceivedDevices = ConcurrentHashMap.newKeySet<String>()
     private val notifiedClients = ConcurrentHashMap.newKeySet<String>()
+    private val notifiedBeforeCccdClients = ConcurrentHashMap.newKeySet<String>()
+    private val deferredHotspotClients = ConcurrentHashMap.newKeySet<String>()
     private val retriedClients = ConcurrentHashMap.newKeySet<String>()
+    private val pendingNotifyRunnables = ConcurrentHashMap<String, Runnable>()
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
@@ -324,15 +328,17 @@ class CarLinkBleAdvertiser(
     }
 
     /**
-     * Notifies any connected BLE GATT clients that were waiting for the Wi-Fi Direct / SoftAP
-     * hotspot credentials to become ready.
+     * Notifies any connected BLE GATT clients whose [notifyServerConnectionInfo] was deferred
+     * while waiting for the Wi-Fi Direct / SoftAP hotspot credentials to become ready.
      */
     fun notifyPendingClients() {
-        if (closed.get() || pendingClients.isEmpty()) return
+        if (closed.get() || deferredHotspotClients.isEmpty()) return
         handler.post {
             if (closed.get()) return@post
-            for (device in pendingClients.values.toList()) {
-                notifyServerConnectionInfo(device, force = false, preferConfirm = true)
+            for (address in deferredHotspotClients.toList()) {
+                val device = pendingClients[address] ?: continue
+                val preferConfirm = cccdPreferConfirmMap[address] ?: true
+                notifyServerConnectionInfo(device, force = false, preferConfirm = preferConfirm)
             }
         }
     }
@@ -515,11 +521,15 @@ class CarLinkBleAdvertiser(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 onLog("CarLink BLE: phone GATT disconnected ${device.address} (status=$status)")
+                pendingNotifyRunnables.remove(device.address)?.let { handler.removeCallbacks(it) }
                 writeFragments.remove(device.address)
                 pendingClients.remove(device.address)
                 cccdSubscribedDevices.remove(device.address)
+                cccdPreferConfirmMap.remove(device.address)
                 clientInfoReceivedDevices.remove(device.address)
                 notifiedClients.remove(device.address)
+                notifiedBeforeCccdClients.remove(device.address)
+                deferredHotspotClients.remove(device.address)
                 retriedClients.remove(device.address)
                 handler.post {
                     if (!closed.get() && !isSessionActiveProvider() && pendingClients.isEmpty()) {
@@ -565,9 +575,27 @@ class CarLinkBleAdvertiser(
                 }
             }
             if (descriptor.uuid == CarLinkBleSpec.CCCD_UUID) {
+                val preferConfirm = if (value != null && value.isNotEmpty()) {
+                    val flags = value[0].toInt() and 0xFF
+                    (flags and 0x02) != 0 || (flags and 0x01) == 0
+                } else {
+                    true
+                }
+                cccdPreferConfirmMap[device.address] = preferConfirm
                 cccdSubscribedDevices.add(device.address)
+                pendingNotifyRunnables.remove(device.address)?.let { handler.removeCallbacks(it) }
                 if (clientInfoReceivedDevices.contains(device.address)) {
-                    handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 40L)
+                    val forceAfterPrematureNotify = notifiedBeforeCccdClients.remove(device.address)
+                    val runnable = Runnable {
+                        pendingNotifyRunnables.remove(device.address)
+                        notifyServerConnectionInfo(
+                            device = device,
+                            force = forceAfterPrematureNotify,
+                            preferConfirm = preferConfirm,
+                        )
+                    }
+                    pendingNotifyRunnables[device.address] = runnable
+                    handler.postDelayed(runnable, 40L)
                 }
             }
         }
@@ -634,22 +662,35 @@ class CarLinkBleAdvertiser(
     private fun handleClientInfoBytes(device: BluetoothDevice, bytes: ByteArray) {
         val jsonStr = bytes.toString(Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
         onLog("CarLink BLE: received ClientInfo from ${device.address}: $jsonStr")
+        pendingNotifyRunnables.remove(device.address)?.let { handler.removeCallbacks(it) }
         pendingClients[device.address] = device
         clientInfoReceivedDevices.add(device.address)
         notifiedClients.remove(device.address)
+        notifiedBeforeCccdClients.remove(device.address)
+        deferredHotspotClients.remove(device.address)
         retriedClients.remove(device.address)
         val clientInfo = runCatching { CarLinkBleSpec.parseClientInfoJson(jsonStr) }.getOrNull()
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
         // In ucar-sdk (GattClientCallback.onServicesDiscovered), the phone writes CLIENT_INFO
-        // and calls subscribeCharacteristic(SERVER_CONNECTION_INFO), keeping GATT open while
-        // associating with the Wi-Fi Direct group owner. Send a single notification once either
-        // the CCCD descriptor write completes or after a 120ms grace window.
-        handler.postDelayed(
-            { notifyServerConnectionInfo(device, force = false, preferConfirm = true) },
-            120L,
-        )
+        // and calls subscribeCharacteristic(SERVER_CONNECTION_INFO) locally without writing CCCD,
+        // whereas other OEM implementations wait for onCharacteristicWrite before writing CCCD.
+        // If CCCD was already written, notify after 45ms; otherwise wait 220ms for an optional
+        // CCCD write (which cancels this timer and notifies 40ms after CCCD) before sending once.
+        val alreadySubscribedCccd = cccdSubscribedDevices.contains(device.address)
+        val delayMs = if (alreadySubscribedCccd) 45L else 220L
+        val runnable = Runnable {
+            pendingNotifyRunnables.remove(device.address)
+            val hasCccdNow = cccdSubscribedDevices.contains(device.address)
+            if (!hasCccdNow) {
+                notifiedBeforeCccdClients.add(device.address)
+            }
+            val preferConfirm = cccdPreferConfirmMap[device.address] ?: true
+            notifyServerConnectionInfo(device, force = false, preferConfirm = preferConfirm)
+        }
+        pendingNotifyRunnables[device.address] = runnable
+        handler.postDelayed(runnable, delayMs)
     }
 
     private fun buildServerInfoBytes(): ByteArray {
@@ -672,9 +713,11 @@ class CarLinkBleAdvertiser(
         val payload = buildServerInfoBytes()
         if (payload.isEmpty()) {
             pendingClients[device.address] = device
+            deferredHotspotClients.add(device.address)
             onLog("CarLink BLE: deferring ServerConnectionInfo until Wi-Fi P2P hotspot is ready for ${device.address}")
             return
         }
+        deferredHotspotClients.remove(device.address)
         runCatching {
             characteristic.value = payload
             val primarySent = server.notifyCharacteristicChanged(device, characteristic, preferConfirm)
@@ -701,6 +744,7 @@ class CarLinkBleAdvertiser(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         handler.removeCallbacksAndMessages(null)
+        pendingNotifyRunnables.clear()
         stopCurrentAdvertising(advertiser)
         advertiser = null
         runCatching { gattServer?.close() }
@@ -708,8 +752,11 @@ class CarLinkBleAdvertiser(
         writeFragments.clear()
         pendingClients.clear()
         cccdSubscribedDevices.clear()
+        cccdPreferConfirmMap.clear()
         clientInfoReceivedDevices.clear()
         notifiedClients.clear()
+        notifiedBeforeCccdClients.clear()
+        deferredHotspotClients.clear()
         retriedClients.clear()
     }
 }

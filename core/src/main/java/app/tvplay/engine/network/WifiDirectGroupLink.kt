@@ -836,6 +836,17 @@ class WifiDirectGroupLink(
                     // without requesting a persistent group, unlike the older two-argument API.
                     val usingRemembered = preferred?.request == selection
                     if (usingRemembered) synchronized(stateLock) { rememberedAttempt = preferred }
+                    if (config == null) {
+                        runCatching {
+                            val setDeviceNameMethod = p2pManager.javaClass.getMethod(
+                                "setDeviceName",
+                                WifiP2pManager.Channel::class.java,
+                                String::class.java,
+                                WifiP2pManager.ActionListener::class.java,
+                            )
+                            setDeviceNameMethod.invoke(p2pManager, p2pChannel, "TVPlay", null)
+                        }
+                    }
                     try {
                         if (legacyChannels) {
                             p2pManager.createGroup(p2pChannel, createActionListener(attempt, request))
@@ -1136,7 +1147,9 @@ class WifiDirectGroupLink(
             val passphrase = group.passphrase?.takeIf { it.isNotBlank() }
                 ?: credentials?.passphrase
             val interfaceName = group.getInterface()?.takeIf { it.isNotBlank() }
-            val rawFrequencyMHz = group.frequency
+            val rawFrequencyMHz = runCatching {
+                (group.javaClass.getMethod("getFrequency").invoke(group) as? Int) ?: 0
+            }.getOrDefault(0)
             val frequencyMHz = rawFrequencyMHz.takeIf { it > 0 }
                 ?: creation.frequencyMHz
                 ?: when (creation.mode) {

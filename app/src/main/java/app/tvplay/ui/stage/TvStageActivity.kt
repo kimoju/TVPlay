@@ -94,6 +94,7 @@ import app.tvplay.runtime.CarPlayBackgroundSession
 import app.tvplay.runtime.LastConnectionProblem
 import app.tvplay.runtime.PendingReconnect
 import app.tvplay.runtime.ProjectionCanvasSupport
+import app.tvplay.runtime.TvBluetoothSinkGuard
 import app.tvplay.runtime.TvDiagnosticsLogger
 import app.tvplay.runtime.TvMediaKeyRouter
 import app.tvplay.runtime.TvProjectionSessionHost
@@ -168,9 +169,17 @@ class TvStageActivity : Activity() {
     private var activeDialog: Dialog? = null
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            val action = intent.action ?: return
+            val device = extractBluetoothDevice(intent)
+            if (TvBluetoothSinkGuard.isSinkProfileAction(action) ||
+                action == BluetoothDevice.ACTION_ACL_CONNECTED ||
+                action == BluetoothDevice.ACTION_BOND_STATE_CHANGED
+            ) {
+                TvBluetoothSinkGuard.onBluetoothEvent(this@TvStageActivity, device, action)
+            }
             if (isFinishing || isDestroyed || isProjectionVisible || streamingActive || activeAirPlaySession != null) return
             if (!TvPreferencesStore.loadWirelessEnabled(this@TvStageActivity)) return
-            when (intent.action) {
+            when (action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) != BluetoothAdapter.STATE_ON) {
                         return
@@ -182,10 +191,10 @@ class TvStageActivity : Activity() {
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
                     val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
                     if (bondState != BluetoothDevice.BOND_BONDED) return
-                    handleBluetoothPeerReady(extractBluetoothDevice(intent))
+                    handleBluetoothPeerReady(device)
                 }
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
-                    handleBluetoothPeerReady(extractBluetoothDevice(intent))
+                    handleBluetoothPeerReady(device)
                 }
             }
         }
@@ -201,15 +210,27 @@ class TvStageActivity : Activity() {
 
     @SuppressLint("MissingPermission")
     private fun handleBluetoothPeerReady(device: BluetoothDevice?) {
+        TvPlayBluetooth.sanitizeSavedPhone(this)
+        val protocol = runCatching { TvPreferencesStore.loadProjectionProtocol(this) }
+            .getOrDefault(TvProjectionProtocol.AUTO)
         if (device != null) {
             val rawName = runCatching { device.name }.getOrNull()
             val majorClass = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
             if (isNonPhoneBluetoothAccessory(rawName, majorClass)) return
+            val isIphone = TvPlayBluetooth.isVerifiedIphone(device)
+            if (!isIphone && !protocol.enablesCarPlay) {
+                return
+            }
             val address = runCatching { device.address }.getOrNull()?.takeIf { it.isNotBlank() }
-            TvPlayBluetooth.sanitizeSavedPhone(this)
-            if (address != null && TvPreferencesStore.loadPairedPhoneAddress(this) == null) {
+            if (isIphone && address != null && TvPreferencesStore.loadPairedPhoneAddress(this) == null) {
                 TvPreferencesStore.savePairedPhone(this, address, rawName?.ifBlank { "我的 iPhone" } ?: "我的 iPhone")
             }
+            if (!isIphone && protocol.enablesCarLink) {
+                // Do not restart hotspot or trigger Classic Bluetooth CarPlay reconnect when an Android phone connects
+                return
+            }
+        } else if (!protocol.enablesCarPlay) {
+            return
         }
         reconnectAttempts = 0
         val engine = sessionEngine
@@ -233,11 +254,7 @@ class TvStageActivity : Activity() {
         runCatching {
             registerReceiver(
                 bluetoothStateReceiver,
-                IntentFilter().apply {
-                    addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
-                    addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-                    addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
-                },
+                TvBluetoothSinkGuard.buildIntentFilter(),
             )
             bluetoothReceiverRegistered = true
         }
@@ -311,6 +328,7 @@ class TvStageActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TvBluetoothSinkGuard.onActivityResumed(this)
         applyImmersiveFullscreen()
         if (streamingActive) {
             activeSurface?.let { surface ->
@@ -330,6 +348,7 @@ class TvStageActivity : Activity() {
     }
 
     override fun onPause() {
+        TvBluetoothSinkGuard.onActivityPaused(this)
         super.onPause()
         fpsHudOverlay.stop()
     }
@@ -1625,18 +1644,26 @@ class TvStageActivity : Activity() {
 
     private fun openBluetoothSettings() {
         val btName = TvPlayBluetooth.localName(this) ?: "本机电视蓝牙"
+        val carLinkPin = runCatching { TvPreferencesStore.loadCarLinkPinCode(this) }.getOrDefault("864209")
         val palette = TvColorScheme.resolve(this)
         val items = listOf(
             TvModalDialog.OptionItem(
-                title = "开启本机蓝牙可见（推荐）",
-                subtitle = "让 iPhone 在「设置 → 蓝牙」底部直接搜到「$btName」并完成配对",
-                badgeText = "一键广播",
+                title = "断开蓝牙音乐占用并重新广播安卓车联（推荐）",
+                subtitle = "关闭电视自带蓝牙音箱(A2DP)抢占，立即刷新 BLE 0xFCFB 弹窗广播（连接码：$carLinkPin）",
+                badgeText = "安卓车联",
                 selected = true,
+                icon = TvIconGlyph.PHONE,
+            ),
+            TvModalDialog.OptionItem(
+                title = "开启本机蓝牙可见（仅限 iPhone 配对）",
+                subtitle = "让 iPhone 在「设置 → 蓝牙」底部搜到「$btName」配对（安卓手机请勿在此配对）",
+                badgeText = "iPhone",
+                selected = false,
                 icon = TvIconGlyph.RADAR,
             ),
             TvModalDialog.OptionItem(
                 title = "打开电视系统蓝牙设置",
-                subtitle = "进入 Android TV 系统原生蓝牙界面管理或配对设备",
+                subtitle = "进入 Android TV 系统蓝牙界面（如安卓手机已配对，建议取消配对以免误跳蓝牙音乐）",
                 badgeText = "系统设置",
                 selected = false,
                 icon = TvIconGlyph.BLUETOOTH,
@@ -1650,16 +1677,25 @@ class TvStageActivity : Activity() {
         ) { which ->
             runCatching { dialogRef?.dismiss() }
             when (which) {
-                0 -> requestBluetoothDiscoverable()
-                1 -> launchSystemBluetoothSettings()
+                0 -> {
+                    TvBluetoothSinkGuard.suppressA2dpSink(this)
+                    sessionEngine?.refreshCarLinkAdvertisement()
+                    Toast.makeText(
+                        this,
+                        "已断开蓝牙音乐占用并刷新车联广播，请打开手机「设置 → 更多连接 → CarWith/车联」连接（PIN：$carLinkPin）",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                1 -> requestBluetoothDiscoverable()
+                2 -> launchSystemBluetoothSettings()
             }
         }
         val handle = TvModalDialog.create(
             context = this,
-            title = "电视与 iPhone 蓝牙配对",
-            subtitle = "本机蓝牙标识：$btName",
+            title = "蓝牙与车联向导",
+            subtitle = "安卓手机请直接在「设置 → 更多连接 → CarWith/车联」连接，无需配对系统蓝牙",
             icon = TvIconGlyph.BLUETOOTH,
-            badgeText = "蓝牙向导",
+            badgeText = "连接向导",
             bodyView = listView,
             actions = listOf(
                 TvModalDialog.ActionSpec(
@@ -1683,6 +1719,7 @@ class TvStageActivity : Activity() {
             )
             return
         }
+        TvBluetoothSinkGuard.markLaunchingExternalSettings()
         val discoverableIntent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
             putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
         }
@@ -1700,6 +1737,7 @@ class TvStageActivity : Activity() {
     }
 
     private fun launchSystemBluetoothSettings() {
+        TvBluetoothSinkGuard.markLaunchingExternalSettings()
         val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }

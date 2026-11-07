@@ -526,24 +526,36 @@ object StageWaitingOverlay {
                 }
             wirelessHotspotMode == TvWirelessMode.LAN_WIFI -> {
                 val ssidHint = existingWifiSsid.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
-                val step3 = if (protocol.enablesCarLink) {
-                    "03  iPhone 确认「使用 CarPlay 车载」；小米 CarWith / vivo / OPPO 输入连接码「$carLinkPin」"
-                } else {
-                    "03  在 iPhone 弹窗中确认「使用 CarPlay 车载」，自动进入全屏画面"
+                when (protocol) {
+                    TvProjectionProtocol.ICCOA_CARLINK ->
+                        "01  保持手机蓝牙与 Wi-Fi 开启（请勿在系统蓝牙中连接电视，避免触发电视蓝牙音乐）\n" +
+                            "02  打开手机「设置 → 更多连接 → CarWith / Jovi InCar / Car+ 车联」点击无线连接\n" +
+                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」完成投屏"
+                    TvProjectionProtocol.AUTO ->
+                        "01  确保电视与手机连接至同一局域网 Wi-Fi$ssidHint\n" +
+                            "02  iPhone 在系统蓝牙连接「$btName」；安卓请勿连系统蓝牙，直接打开「设置 → 更多连接 → CarWith/车联」\n" +
+                            "03  iPhone 确认启用 CarPlay；小米 / vivo / OPPO 在弹窗输入连接码「$carLinkPin」"
+                    else ->
+                        "01  确保电视与手机连接至同一局域网 Wi-Fi$ssidHint\n" +
+                            "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
+                            "03  在 iPhone 弹窗中确认「使用 CarPlay 车载」，自动进入全屏画面"
                 }
-                "01  确保电视与手机连接至同一局域网 Wi-Fi$ssidHint\n" +
-                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
-                    step3
             }
             else -> {
-                val step3 = if (protocol.enablesCarLink) {
-                    "03  iPhone 自动建立 5GHz CarPlay；小米 CarWith / vivo / OPPO 弹窗输入连接码「$carLinkPin」"
-                } else {
-                    "03  蓝牙握手完成后自动建立 5GHz 无线 CarPlay 通道"
+                when (protocol) {
+                    TvProjectionProtocol.ICCOA_CARLINK ->
+                        "01  保持手机蓝牙与 Wi-Fi 开启（请勿在系统蓝牙中配对电视，以免误入蓝牙音乐）\n" +
+                            "02  打开手机「设置 → 更多连接 → CarWith / Jovi InCar / Car+ 车联」搜索连接\n" +
+                            "03  在手机弹窗中输入 6 位连接码「$carLinkPin」，自动建立 5GHz 直连投屏"
+                    TvProjectionProtocol.AUTO ->
+                        "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
+                            "02  iPhone 连接蓝牙「$btName」；安卓请勿连系统蓝牙，直接打开「设置 → 更多连接 → CarWith/车联」\n" +
+                            "03  iPhone 自动建立 CarPlay；小米 / vivo / OPPO 在弹窗输入连接码「$carLinkPin」"
+                    else ->
+                        "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
+                            "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
+                            "03  蓝牙握手完成后自动建立 5GHz 无线 CarPlay 通道"
                 }
-                "01  当前处于 Wi-Fi Direct 5GHz 高速点对点直连模式\n" +
-                    "02  如未配对，点击下方「电视蓝牙配对」开启可见性，并在手机中连接「$btName」\n" +
-                    step3
             }
         }
     }

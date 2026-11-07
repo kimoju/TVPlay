@@ -1011,11 +1011,21 @@ class TvSessionEngine(
     }
 
     private fun startCarLinkSubsystem() {
-        val carMacHex12 = config.hostMac.joinToString("") { "%02X".format(it.toInt() and 0xFF) }
+        // Derive a dedicated locally-administered unicast MAC for ICCOA CarLink so that:
+        // 1) BLE 0x0001 `carId` and `GetUCarConfigResponse.carBrMac` match 100% as required by ucar-sdk;
+        // 2) The phone's CarLink stack does NOT auto-dial the TV's Classic Bluetooth A2DP Sink MAC
+        //    (which would cause the TV ROM to switch to its built-in "Bluetooth Music" speaker app).
+        val carLinkVirtualMac = config.hostMac.copyOf().also { mac ->
+            if (mac.size == 6) {
+                mac[0] = ((mac[0].toInt() or 0x02) and 0xFE).toByte()
+                mac[5] = (mac[5].toInt() xor 0x5A).toByte()
+            }
+        }
+        val carMacHex12 = carLinkVirtualMac.joinToString("") { "%02X".format(it.toInt() and 0xFF) }
         val sink = (media as? CarPlayMediaEngine)?.sink
         val session = CarLinkControlSession(
             displaySpec = airPlayConfig.main,
-            carBrMac = config.hostMac,
+            carBrMac = carLinkVirtualMac,
             pinCodeProvider = { config.carLinkPinCode },
             certBytes = config.carLinkCertBytes,
             hevcEnabled = airPlayConfig.hevc,
@@ -1097,6 +1107,15 @@ class TvSessionEngine(
                     runCatching { advertiser.start() }
                 }
             }
+        }
+    }
+
+    /** Refreshes the CarLink BLE pairing advertisement and pre-warms the Wi-Fi hotspot. */
+    fun refreshCarLinkAdvertisement() {
+        synchronized(lifecycleLock) {
+            if (closed) return
+            ensureCarLinkHotspotReady()
+            carLinkBleAdvertiser?.refreshPairingAdvertisement()
         }
     }
 
@@ -3201,6 +3220,18 @@ class TvSessionEngine(
                             attempt == MAX_RFCOMM_ATTEMPTS
                         ) {
                             logBluetoothConnectionSnapshot(device, "after-failure")
+                            val hasIap2 = runCatching {
+                                device.uuids?.any { it.uuid.toString().equals(IAP2_IPHONE_UUID, ignoreCase = true) } == true
+                            }.getOrDefault(false)
+                            val nameHasIphone = runCatching {
+                                device.name?.contains("iPhone", ignoreCase = true) == true ||
+                                    device.name?.contains("iPad", ignoreCase = true) == true
+                            }.getOrDefault(false)
+                            if (!hasIap2 && !nameHasIphone) {
+                                runCatching { device.address?.uppercase(Locale.US) }
+                                    .getOrNull()
+                                    ?.let { nonIphoneBluetoothAddresses.add(it) }
+                            }
                             if (carLinkCoexistence && !isStaleWirelessRun(generation) && adapter.isEnabled) {
                                 break
                             }
@@ -3235,6 +3266,8 @@ class TvSessionEngine(
         }
     }
 
+    private val nonIphoneBluetoothAddresses = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     private fun isKnownAndroidPhoneName(name: String?): Boolean {
         val raw = name?.trim()?.takeIf { it.isNotEmpty() } ?: return false
         val lower = raw.lowercase(Locale.US)
@@ -3253,26 +3286,35 @@ class TvSessionEngine(
         val bonded = adapter.bondedDevices.orEmpty()
         val iap2Uuid = UUID.fromString(IAP2_IPHONE_UUID)
         fun isAccessoryOrAndroidPhone(device: BluetoothDevice): Boolean {
-            val hasIap2 = runCatching {
-                device.uuids?.any { it.uuid == iap2Uuid } == true
-            }.getOrDefault(false)
+            val cachedUuids = runCatching { device.uuids }.getOrNull()
+            val hasIap2 = cachedUuids?.any { it.uuid == iap2Uuid } == true
             if (hasIap2) return false
             val name = runCatching { device.name }.getOrNull()
+            val nameHasIphone = name?.contains("iPhone", ignoreCase = true) == true ||
+                name?.contains("iPad", ignoreCase = true) == true
+            if (nameHasIphone) return false
+            val addr = runCatching { device.address?.uppercase(Locale.US) }.getOrNull()
+            if (addr != null && addr in nonIphoneBluetoothAddresses) return true
             if (isKnownAndroidPhoneName(name)) return true
+            // Any bonded phone that has already exchanged SDP UUIDs and does NOT advertise
+            // Apple's iAP2 UUID (00000000-deca-fade-deca-deafdecacafe) is an Android phone:
+            // dialing RFCOMM to it would open a Classic Bluetooth ACL link and trigger A2DP Sink!
+            if (!cachedUuids.isNullOrEmpty()) return true
             val major = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
             return isNonPhoneBluetoothAccessory(name, major)
         }
 
         val candidateDevices = bonded.filterNot(::isAccessoryOrAndroidPhone)
         val iPhones = candidateDevices.filter { device ->
-            val nameMatches = device.name?.contains("iPhone", ignoreCase = true) == true
-            val classMatches = runCatching {
-                device.bluetoothClass?.majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
-            }.getOrDefault(false)
+            val nameMatches = device.name?.contains("iPhone", ignoreCase = true) == true ||
+                device.name?.contains("iPad", ignoreCase = true) == true
             val uuidMatches = runCatching {
                 device.uuids?.any { it.uuid == iap2Uuid } == true
             }.getOrDefault(false)
-            nameMatches || classMatches || uuidMatches
+            val classMatches = !config.projectionProtocol.enablesCarLink && runCatching {
+                device.bluetoothClass?.majorDeviceClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
+            }.getOrDefault(false)
+            nameMatches || uuidMatches || classMatches
         }
 
         config.wirelessBluetoothDeviceAddress?.let { selected ->

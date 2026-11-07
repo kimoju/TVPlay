@@ -55,13 +55,17 @@ class BootAutoStartReceiver : BroadcastReceiver() {
  */
 class BluetoothAutoConnectReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != BluetoothDevice.ACTION_ACL_CONNECTED) return
+        val action = intent.action ?: return
         val device = if (Build.VERSION.SDK_INT >= 33) {
             intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-        } ?: return
+        }
+        if (TvBluetoothSinkGuard.isSinkProfileAction(action) || action == BluetoothDevice.ACTION_ACL_CONNECTED) {
+            TvBluetoothSinkGuard.onBluetoothEvent(context, device, action)
+        }
+        if (action != BluetoothDevice.ACTION_ACL_CONNECTED || device == null) return
         val address = runCatching { device.address }.getOrNull()
         val enabled = TvPreferencesStore.loadConnectOnPhoneBluetooth(context)
         val savedPhone = TvPreferencesStore.loadPairedPhoneAddress(context)

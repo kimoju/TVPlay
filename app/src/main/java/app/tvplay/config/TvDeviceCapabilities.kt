@@ -128,6 +128,29 @@ object TvPlayBluetooth {
     )
 
     @SuppressLint("MissingPermission")
+    fun isVerifiedIphone(device: android.bluetooth.BluetoothDevice): Boolean {
+        val hasIap2Uuid = runCatching {
+            device.uuids?.any { it.uuid.toString().equals(IAP2_UUID, ignoreCase = true) } == true
+        }.getOrDefault(false)
+        if (hasIap2Uuid) return true
+        val rawName = runCatching { device.name }.getOrNull().orEmpty()
+        return rawName.contains("iPhone", ignoreCase = true) || rawName.contains("iPad", ignoreCase = true)
+    }
+
+    private fun isKnownAndroidBrandName(name: String?): Boolean {
+        val lower = name?.trim()?.lowercase() ?: return false
+        if (lower.isEmpty() || lower.contains("iphone") || lower.contains("ipad")) return false
+        val brands = listOf(
+            "xiaomi", "redmi", "poco", "mi ", "mix ", "blackshark",
+            "vivo", "iqoo", "oppo", "oneplus", "realme", "find x", "reno",
+            "huawei", "honor", "harmony", "mate ", "pura ",
+            "samsung", "galaxy", "sm-", "pixel", "meizu", "motorola",
+            "nothing", "nubia", "redmagic", "lenovo", "xperia", "asus", "rog",
+        )
+        return brands.any { lower.contains(it) }
+    }
+
+    @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     fun bondedDevices(context: Context): List<PairedDevice> = runCatching {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -138,13 +161,17 @@ object TvPlayBluetooth {
             val rawName = runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() }
             val name = rawName ?: "蓝牙设备"
             val majorClass = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
-            val hasIap2Uuid = runCatching {
-                device.uuids?.any { it.uuid.toString().equals(IAP2_UUID, ignoreCase = true) } == true
-            }.getOrDefault(false)
-            val nameHasIphone = name.contains("iPhone", ignoreCase = true)
+            val cachedUuids = runCatching { device.uuids }.getOrNull()
+            val hasIap2Uuid = cachedUuids?.any {
+                it.uuid.toString().equals(IAP2_UUID, ignoreCase = true)
+            } == true
+            val nameHasIphone = name.contains("iPhone", ignoreCase = true) || name.contains("iPad", ignoreCase = true)
+            val isAndroidPhone = !nameHasIphone && !hasIap2Uuid && (
+                isKnownAndroidBrandName(rawName) || !cachedUuids.isNullOrEmpty()
+                )
             val isAccessory = !nameHasIphone && !hasIap2Uuid &&
                 app.tvplay.engine.session.isNonPhoneBluetoothAccessory(rawName, majorClass)
-            val isLikelyIphone = !isAccessory && (
+            val isLikelyIphone = !isAccessory && !isAndroidPhone && (
                 nameHasIphone ||
                     hasIap2Uuid ||
                     majorClass == android.bluetooth.BluetoothClass.Device.Major.PHONE
@@ -163,19 +190,23 @@ object TvPlayBluetooth {
     }.getOrDefault(emptyList())
 
     /**
-     * Clears any saved target phone address if it is no longer paired or if it points to a
-     * non-phone TV peripheral (such as a Bluetooth TV remote control).
+     * Clears any saved target phone address if it is no longer paired, if it points to a
+     * non-phone TV peripheral (such as a Bluetooth TV remote control), or if it is an Android phone
+     * that was previously auto-saved by mistake.
      */
     fun sanitizeSavedPhone(context: Context, bonded: List<PairedDevice> = bondedDevices(context)) {
         val savedAddress = TvPreferencesStore.loadPairedPhoneAddress(context) ?: return
         val savedName = TvPreferencesStore.loadPairedPhoneName(context)
-        if (app.tvplay.engine.session.isNonPhoneBluetoothAccessory(savedName, null)) {
+        if (
+            app.tvplay.engine.session.isNonPhoneBluetoothAccessory(savedName, null) ||
+            isKnownAndroidBrandName(savedName)
+        ) {
             TvPreferencesStore.clearPairedPhone(context)
             return
         }
         if (bonded.isEmpty()) return
         val match = bonded.firstOrNull { it.address.equals(savedAddress, ignoreCase = true) }
-        if (match == null || (match.isAccessory && !match.isLikelyIphone)) {
+        if (match == null || !match.isLikelyIphone) {
             TvPreferencesStore.clearPairedPhone(context)
         }
     }

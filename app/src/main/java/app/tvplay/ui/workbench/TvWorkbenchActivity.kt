@@ -5,6 +5,9 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Dialog
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -46,6 +49,7 @@ import app.tvplay.runtime.LanOtaCheckResult
 import app.tvplay.runtime.LanOtaProtocol
 import app.tvplay.runtime.PendingReconnect
 import app.tvplay.runtime.ThemeModeDiagnostics
+import app.tvplay.runtime.TvBluetoothSinkGuard
 import app.tvplay.runtime.TvDiagnosticsLogger
 import app.tvplay.runtime.TvLanOtaManager
 import app.tvplay.ui.stage.CarPlayScreen
@@ -84,6 +88,24 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     private var pendingChoosePhoneLaunchAfterSelect: Boolean = false
     private val themeModeDiagnostics = ThemeModeDiagnostics()
     private var activeDialog: Dialog? = null
+    private var bluetoothSinkReceiverRegistered: Boolean = false
+    private val bluetoothSinkReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val action = intent.action ?: return
+            val device = if (Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+            if (TvBluetoothSinkGuard.isSinkProfileAction(action) ||
+                action == BluetoothDevice.ACTION_ACL_CONNECTED ||
+                action == BluetoothDevice.ACTION_BOND_STATE_CHANGED
+            ) {
+                TvBluetoothSinkGuard.onBluetoothEvent(this@TvWorkbenchActivity, device, action)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = TvSettingsRepository(this)
@@ -92,6 +114,10 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         setTheme(if (appNight) R.style.Theme_TVPlay else R.style.Theme_TVPlay_Light)
         super.onCreate(savedInstanceState)
 
+        runCatching {
+            registerReceiver(bluetoothSinkReceiver, TvBluetoothSinkGuard.buildIntentFilter())
+            bluetoothSinkReceiverRegistered = true
+        }
         observeAppearance(ThemeModeDiagnostics.Source.CREATE)
         buildWorkbenchLayout()
         TvLanOtaManager.reportPendingUpgradeSuccessAsync(this)
@@ -137,11 +163,17 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
             recreate()
             return
         }
+        TvBluetoothSinkGuard.onActivityResumed(this)
         observeAppearance(ThemeModeDiagnostics.Source.RESUME)
         TvPlayBluetooth.sanitizeSavedPhone(this)
         TvLanOtaManager.resumePendingInstallIfReady(this)
         refreshWorkbenchStatus()
         settingsPane.refresh()
+    }
+
+    override fun onPause() {
+        TvBluetoothSinkGuard.onActivityPaused(this)
+        super.onPause()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -154,6 +186,10 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     }
 
     override fun onDestroy() {
+        if (bluetoothSinkReceiverRegistered) {
+            runCatching { unregisterReceiver(bluetoothSinkReceiver) }
+            bluetoothSinkReceiverRegistered = false
+        }
         runCatching { activeDialog?.dismiss() }
         activeDialog = null
         super.onDestroy()
@@ -399,16 +435,12 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
 
             val allBonded = TvPlayBluetooth.bondedDevices(this)
             TvPlayBluetooth.sanitizeSavedPhone(this, allBonded)
-            if (settings.connection.pairedPhoneAddress == null) {
+            if (settings.connection.projectionProtocol.enablesCarPlay && settings.connection.pairedPhoneAddress == null) {
                 val phoneCandidates = allBonded.filter { !it.isAccessory }
                 val likelyIphones = phoneCandidates.filter { it.isLikelyIphone }
                 when {
                     likelyIphones.size == 1 -> {
                         val single = likelyIphones.single()
-                        settings.connection.savePairedPhone(single.address, single.name)
-                    }
-                    phoneCandidates.size == 1 -> {
-                        val single = phoneCandidates.single()
                         settings.connection.savePairedPhone(single.address, single.name)
                     }
                     !settings.connection.projectionProtocol.enablesCarLink -> {
@@ -967,6 +999,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         if (launchStageAfter) {
             openStageActivity(wireless = true)
         }
+        TvBluetoothSinkGuard.markLaunchingExternalSettings()
         val discoverableIntent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
             putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
         }
@@ -986,6 +1019,7 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
     }
 
     private fun launchSystemBluetoothSettings() {
+        TvBluetoothSinkGuard.markLaunchingExternalSettings()
         val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }

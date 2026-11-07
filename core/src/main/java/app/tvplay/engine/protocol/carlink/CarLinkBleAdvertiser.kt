@@ -336,7 +336,9 @@ class CarLinkBleAdvertiser(
         )
         val serverInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.SERVER_CONNECTION_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                BluetoothGattCharacteristic.PROPERTY_INDICATE or
+                BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
         val cccd = BluetoothGattDescriptor(
@@ -499,7 +501,9 @@ class CarLinkBleAdvertiser(
             if (descriptor.uuid == CarLinkBleSpec.CCCD_UUID) {
                 cccdSubscribedDevices.add(device.address)
                 if (clientInfoReceivedDevices.contains(device.address)) {
-                    handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 50L)
+                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 40L)
+                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 250L)
+                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 700L)
                 }
             }
         }
@@ -573,9 +577,10 @@ class CarLinkBleAdvertiser(
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 60L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 500L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 1500L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 80L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 350L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 800L)
+        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 1600L)
     }
 
     private fun buildServerInfoBytes(): ByteArray {

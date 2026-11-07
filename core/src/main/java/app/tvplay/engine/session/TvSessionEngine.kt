@@ -951,11 +951,15 @@ class TvSessionEngine(
             carLinkBleAdvertiser?.notifyPendingClients()
             return
         }
-        if (!config.projectionProtocol.enablesCarPlay ||
-            config.wirelessMode != TvWirelessMode.WIFI_DIRECT ||
-            mfiProvider == null ||
-            phase != Phase.WIRELESS
-        ) {
+        val shouldStartStandalone = synchronized(wirelessResourceLock) {
+            if (!config.projectionProtocol.enablesCarPlay || wirelessFailureReported.get()) {
+                true
+            } else {
+                // Do not clobber an in-flight MFi handshake or an active runWireless() P2P bring-up.
+                phase != Phase.MFI && hotspot == null && activeHotspotInfo == null
+            }
+        }
+        if (shouldStartStandalone) {
             startStandaloneCarLinkWireless()
         }
     }
@@ -963,6 +967,9 @@ class TvSessionEngine(
     private fun startStandaloneCarLinkWireless() {
         if (!carLinkHotspotStarting.compareAndSet(false, true)) return
         val generation = synchronized(wirelessResourceLock) {
+            runCatching { hotspot?.close() }
+            hotspot = null
+            activeHotspotInfo = null
             phase = Phase.WIRELESS
             wirelessFailureReported.set(false)
             val next = wirelessGeneration.incrementAndGet()
@@ -1097,11 +1104,14 @@ class TvSessionEngine(
                     }
                     val freq = (liveHotspot.frequencyMHz?.takeIf { it > 0 })
                         ?: if (liveHotspot.channel >= 36) 5180 else 2412
+                    val p2pMac = liveHotspot.bssid
+                        ?.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" }
+                        ?: CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS
                     CarLinkBleSpec.ServerConnectionInfo(
                         name = carDisplayName,
                         ssid = ssid,
                         psk = psk,
-                        mac = CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS,
+                        mac = p2pMac,
                         freq = freq,
                         port = 0,
                         type = CarLinkBleSpec.WIFI_TYPE_P2P,
@@ -2905,7 +2915,7 @@ class TvSessionEngine(
         generation: Int,
         modeOverride: TvWirelessMode? = null,
     ): WirelessHotspotInfo {
-        val hotspotMode = modeOverride ?: if (config.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK) {
+        val hotspotMode = modeOverride ?: if (config.projectionProtocol.enablesCarLink) {
             TvWirelessMode.WIFI_DIRECT
         } else {
             config.wirelessMode

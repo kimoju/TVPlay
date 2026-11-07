@@ -1193,7 +1193,8 @@ class TvStageActivity : Activity() {
                 message.contains("first-tcp watchdog disarmed") ||
                     message.contains("wireless type-130 tunnel data stream accepted") ->
                     "iPhone 已连入电视无线网络，正在协商 RTSP 音视频流..."
-                message.contains("CarLink BLE GATT: sent ServerConnectionInfo") ->
+                message.contains("CarLink BLE: notified ServerConnectionInfo") ||
+                    message.contains("CarLink BLE GATT: sent ServerConnectionInfo") ->
                     "已向安卓手机下发 CarLink 无线凭证，等待手机发起安全认证..."
                 message.contains("CarLink AUTH: processed AuthRequest") && message.contains("result=1") -> {
                     val pin = Regex("PIN=(\\d+)").find(message)?.groupValues?.getOrNull(1).orEmpty()

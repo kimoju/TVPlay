@@ -1223,14 +1223,18 @@ class WifiDirectGroupLink(
                 continue
             }
 
-            val requestedChannel = creation.frequencyMHz
-                ?.let(WifiP2pLegacyChannels::operatingChannelFor) ?: UNKNOWN_CHANNEL
+            val actualFrequencyMHz = runCatching {
+                (group.javaClass.getMethod("getFrequency").invoke(group) as? Int)?.takeIf { it > 0 }
+            }.getOrNull() ?: creation.frequencyMHz
+            val requestedChannel = actualFrequencyMHz
+                ?.let { wifiFrequencyMhzToChannel(it) ?: WifiP2pLegacyChannels.operatingChannelFor(it) }
+                ?: UNKNOWN_CHANNEL
             return WirelessHotspotInfo(
                 ssid = networkName,
                 passphrase = passphrase,
                 security = groupSecurity(group),
                 channel = requestedChannel,
-                frequencyMHz = creation.frequencyMHz,
+                frequencyMHz = actualFrequencyMHz,
                 bssid = interfaceHardwareAddress(interfaceName)
                     ?: group.owner?.deviceAddress?.takeIf { it.isNotBlank() },
                 interfaceName = interfaceName,

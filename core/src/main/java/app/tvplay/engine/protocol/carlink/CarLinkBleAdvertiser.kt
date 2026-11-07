@@ -310,6 +310,12 @@ class CarLinkBleAdvertiser(
         if (btManager != null && gattServer == null) {
             startGattServer(btManager)
         }
+        // Never tear down the BLE advertising set while a phone is actively in the middle of a
+        // BLE GATT handshake (pendingClients is non-empty), as stopping advertising rotates the
+        // BLE Resolvable Private Address (RPA) on Android.
+        if (pendingClients.isNotEmpty()) {
+            return
+        }
         advanceSerialNumber()
         handler.removeCallbacks(rotateTask)
         restartAdvertisingInternal(btManager?.adapter)
@@ -325,7 +331,15 @@ class CarLinkBleAdvertiser(
         handler.post {
             if (closed.get()) return@post
             for (device in pendingClients.values.toList()) {
-                notifyServerConnectionInfo(device, force = true)
+                notifyServerConnectionInfo(device, force = true, preferConfirm = true)
+                handler.postDelayed(
+                    { notifyServerConnectionInfo(device, force = true, preferConfirm = false) },
+                    180L,
+                )
+                handler.postDelayed(
+                    { notifyServerConnectionInfo(device, force = true, preferConfirm = true) },
+                    450L,
+                )
             }
         }
     }
@@ -359,8 +373,7 @@ class CarLinkBleAdvertiser(
         )
         val clientInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE or
-                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val serverInfoChar = BluetoothGattCharacteristic(
@@ -620,10 +633,17 @@ class CarLinkBleAdvertiser(
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
-        // Notify once as soon as ServerConnectionInfo is available; subsequent retries
-        // only fire if ServerConnectionInfo was deferred while Wi-Fi Direct hotspot is starting.
-        for (delayMs in longArrayOf(60L, 250L, 600L, 1200L, 2200L, 3500L, 5000L, 7000L)) {
-            handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, delayMs)
+        // In ucar-sdk (GattClientCallback.onServicesDiscovered), the phone writes CLIENT_INFO
+        // BEFORE calling subscribeCharacteristic(SERVER_CONNECTION_INFO). It closes GATT as soon
+        // as it receives SERVER_CONNECTION_INFO (removing device from pendingClients). Keep
+        // retrying while the client remains connected in pendingClients so an early notification
+        // sent before local subscription never blocks subsequent deliveries.
+        val retryDelays = longArrayOf(60L, 220L, 500L, 950L, 1600L, 2500L, 3800L, 5500L)
+        for ((index, delayMs) in retryDelays.withIndex()) {
+            handler.postDelayed(
+                { notifyServerConnectionInfo(device, force = true, preferConfirm = index % 2 == 0) },
+                delayMs,
+            )
         }
     }
 
@@ -633,7 +653,11 @@ class CarLinkBleAdvertiser(
     }
 
     @Suppress("DEPRECATION")
-    fun notifyServerConnectionInfo(device: BluetoothDevice, force: Boolean = false) {
+    fun notifyServerConnectionInfo(
+        device: BluetoothDevice,
+        force: Boolean = false,
+        preferConfirm: Boolean = true,
+    ) {
         if (closed.get()) return
         if (!pendingClients.containsKey(device.address)) return
         if (!force && notifiedClients.contains(device.address)) return
@@ -648,15 +672,18 @@ class CarLinkBleAdvertiser(
         }
         runCatching {
             characteristic.value = payload
-            val sentNotify = server.notifyCharacteristicChanged(device, characteristic, false)
-            if (sentNotify) {
+            val primarySent = server.notifyCharacteristicChanged(device, characteristic, preferConfirm)
+            if (primarySent) {
                 notifiedClients.add(device.address)
-                onLog("CarLink BLE: notified ServerConnectionInfo (${payload.size}B) to ${device.address}")
+                val modeLabel = if (preferConfirm) "indicated" else "notified"
+                onLog("CarLink BLE: $modeLabel ServerConnectionInfo (${payload.size}B) to ${device.address}")
             } else {
-                val sentIndicate = server.notifyCharacteristicChanged(device, characteristic, true)
-                if (sentIndicate) {
+                val fallbackConfirm = !preferConfirm
+                val fallbackSent = server.notifyCharacteristicChanged(device, characteristic, fallbackConfirm)
+                if (fallbackSent) {
                     notifiedClients.add(device.address)
-                    onLog("CarLink BLE: indicated ServerConnectionInfo (${payload.size}B) to ${device.address}")
+                    val modeLabel = if (fallbackConfirm) "indicated" else "notified"
+                    onLog("CarLink BLE: $modeLabel ServerConnectionInfo (${payload.size}B) to ${device.address}")
                 } else {
                     onLog("CarLink BLE: notifyCharacteristicChanged returned false for ${device.address}")
                 }

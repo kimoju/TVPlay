@@ -1139,8 +1139,17 @@ class WifiDirectGroupLink(
             val rawFrequencyMHz = group.frequency
             val frequencyMHz = rawFrequencyMHz.takeIf { it > 0 }
                 ?: creation.frequencyMHz
-                ?: stationFrequency
-                ?: 5180
+                ?: when (creation.mode) {
+                    P2pCreationMode.BAND_2_GHZ,
+                    P2pCreationMode.FIXED_2_GHZ,
+                    P2pCreationMode.ALIGNED_2_GHZ,
+                    -> stationFrequency?.takeIf { it in 2412..2484 } ?: 2437
+                    P2pCreationMode.BAND_5_GHZ,
+                    P2pCreationMode.FIXED_5_GHZ,
+                    P2pCreationMode.ALIGNED_5_GHZ,
+                    -> stationFrequency?.takeIf { is5Ghz(it) } ?: 5180
+                    else -> stationFrequency ?: 5180
+                }
             val channelNumber = wifiFrequencyMhzToChannel(frequencyMHz)
                 ?: WifiP2pLegacyChannels.operatingChannelFor(frequencyMHz)
                 ?: 36
@@ -1421,7 +1430,7 @@ class WifiDirectGroupLink(
     }
 
     private fun randomCredentials(): Credentials = Credentials(
-        ssid = "$ssidPrefix${randomToken(2).uppercase()}",
+        ssid = "$ssidPrefix${randomHexToken(2).uppercase()}",
         passphrase = randomHexToken(8),
     )
 

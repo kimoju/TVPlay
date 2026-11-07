@@ -116,7 +116,19 @@ object TvBluetoothSinkGuard {
         }
     }
 
+    @SuppressLint("MissingPermission")
     fun onBluetoothEvent(context: Context, device: BluetoothDevice? = null, action: String? = null) {
+        if (action == BluetoothDevice.ACTION_ACL_CONNECTED && device != null) {
+            val isUnbondedOrBle = runCatching {
+                device.type == BluetoothDevice.DEVICE_TYPE_LE ||
+                    device.bondState != BluetoothDevice.BOND_BONDED
+            }.getOrDefault(false)
+            if (isUnbondedOrBle) {
+                // Ignore transient BLE GATT client connections (e.g. ICCOA CarLink handshake)
+                // so we never invoke Bluetooth profile policy/disconnect reflection during GATT I/O.
+                return
+            }
+        }
         val appCtx = context.applicationContext
         lastBluetoothEventNanos = System.nanoTime()
         suppressA2dpSink(appCtx, device)
@@ -181,6 +193,11 @@ object TvBluetoothSinkGuard {
                                 runCatching { devices.addAll(proxy.connectedDevices.orEmpty()) }
                                 runCatching { devices.addAll(adapter.bondedDevices.orEmpty()) }
                                 for (device in devices) {
+                                    val isLeOrUnbonded = runCatching {
+                                        device.type == BluetoothDevice.DEVICE_TYPE_LE ||
+                                            device.bondState != BluetoothDevice.BOND_BONDED
+                                    }.getOrDefault(false)
+                                    if (isLeOrUnbonded) continue
                                     val name = runCatching { device.name }.getOrNull()
                                     val major = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
                                     if (isNonPhoneBluetoothAccessory(name, major)) continue

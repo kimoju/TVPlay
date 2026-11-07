@@ -922,7 +922,12 @@ class TvSessionEngine(
             }
             return
         }
-        if (!hasRequiredUsbService()) return
+        if (!hasRequiredUsbService()) {
+            if (config.transport == TvTransportMode.WIRELESS && config.projectionProtocol.enablesCarLink) {
+                startStandaloneCarLinkWireless()
+            }
+            return
+        }
         if (config.transport == TvTransportMode.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
@@ -943,7 +948,7 @@ class TvSessionEngine(
 
     private fun ensureCarLinkHotspotReady() {
         if (closed || config.transport != TvTransportMode.WIRELESS) return
-        val liveHotspot = activeHotspotInfo
+        val liveHotspot = activeHotspotInfo?.takeIf { hotspot != null }
         val hotspotValidForCarLink = liveHotspot != null &&
             liveHotspot.backend == WirelessHotspotBackend.WIFI_P2P &&
             liveHotspot.ssid.toByteArray(Charsets.UTF_8).size in 9..32 &&
@@ -953,11 +958,17 @@ class TvSessionEngine(
             return
         }
         val shouldStartStandalone = synchronized(wirelessResourceLock) {
-            if (!config.projectionProtocol.enablesCarPlay || wirelessFailureReported.get()) {
+            if (activeSession != null || carLinkHotspotStarting.get()) {
+                false
+            } else if (hotspot != null && activeHotspotInfo == null) {
+                // A Wi-Fi Direct hotspot creation is already in flight and will notify pending BLE clients when ready.
+                false
+            } else if (!config.projectionProtocol.enablesCarPlay || wirelessFailureReported.get()) {
                 true
             } else {
-                // Do not clobber an in-flight MFi handshake or an active runWireless() P2P bring-up.
-                phase != Phase.MFI && hotspot == null && activeHotspotInfo == null
+                // Start standalone CarLink P2P hotspot whenever no valid P2P hotspot is active
+                // and MFi is not actively mid-handshake.
+                phase != Phase.MFI && (activeHotspotInfo == null || activeHotspotInfo?.backend != WirelessHotspotBackend.WIFI_P2P)
             }
         }
         if (shouldStartStandalone) {
@@ -1075,11 +1086,14 @@ class TvSessionEngine(
             onLog = ::debugLog,
         )
         carLinkSession = session
-        executor.execute {
+        Thread({
             if (!closed) {
                 runCatching { session.start() }
                     .onFailure { e -> debugLog("CarLink session start error: ${e.message}") }
             }
+        }, "CarLink-Session-Bootstrap").apply {
+            isDaemon = true
+            start()
         }
         if (config.transport == TvTransportMode.WIRELESS) {
             val carDisplayName = config.label.ifBlank { "TVPlay" }
@@ -1093,7 +1107,7 @@ class TvSessionEngine(
                 pinCodeProvider = { config.carLinkPinCode },
                 isSessionActiveProvider = { session.isActive() },
                 serverInfoProvider = serverInfo@{
-                    val liveHotspot = activeHotspotInfo ?: return@serverInfo null
+                    val liveHotspot = activeHotspotInfo?.takeIf { hotspot != null } ?: return@serverInfo null
                     if (liveHotspot.backend != WirelessHotspotBackend.WIFI_P2P) {
                         return@serverInfo null
                     }
@@ -2033,10 +2047,16 @@ class TvSessionEngine(
             if (handoffInProgress && error !is Error) {
                 debugLog("wireless RFCOMM control ended while Wi-Fi AirPlay session is active: ${error.message}")
                 onWirelessBootstrapEndedWithActiveSession(generation)
-            } else if (config.projectionProtocol.enablesCarLink && activeHotspotInfo != null && error !is Error) {
-                debugLog("wireless CarPlay Bluetooth bring-up ended (${error.message}); keeping Wi-Fi Direct hotspot alive for CarLink")
-                onWirelessBootstrapEndedWithActiveSession(generation)
-                onStatus(CarPlayStatus.RunningWireless, generation)
+            } else if (config.projectionProtocol.enablesCarLink && error !is Error) {
+                if (activeHotspotInfo != null) {
+                    debugLog("wireless CarPlay Bluetooth bring-up ended (${error.message}); keeping Wi-Fi Direct hotspot alive for CarLink")
+                    onWirelessBootstrapEndedWithActiveSession(generation)
+                    onStatus(CarPlayStatus.RunningWireless, generation)
+                } else {
+                    debugLog("wireless CarPlay bring-up failed (${error.message}); falling back to standalone CarLink Wi-Fi Direct hotspot")
+                    closeWirelessStack(generation = generation)
+                    startStandaloneCarLinkWireless()
+                }
             } else {
                 debugLog("wireless bring-up failed", error)
                 if (error is Error) throw error
@@ -3562,6 +3582,7 @@ class TvSessionEngine(
 
             val activeHotspot = hotspot
             hotspot = null
+            activeHotspotInfo = null
             if (activeHotspot != null) closeBestEffort("wireless hotspot") { activeHotspot.close() }
             releaseWifiPerformanceLock()
             wirelessRuntimeIdentification = null

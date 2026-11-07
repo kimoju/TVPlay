@@ -857,6 +857,8 @@ class WifiDirectGroupLink(
                 awaitUsableGroup(
                     attempt = attempt,
                     channel = p2pChannel,
+                    creation = creation,
+                    stationFrequency = stationFrequency,
                     credentials = if (creation.mode == P2pCreationMode.SYSTEM_DEFAULT) null else credentials,
                     deadlineNanos = deadlineNanos,
                     timeoutMillis = timeoutMillis,
@@ -1099,6 +1101,8 @@ class WifiDirectGroupLink(
     private fun awaitUsableGroup(
         attempt: StartAttempt,
         channel: WifiP2pManager.Channel,
+        creation: P2pCreationRequest,
+        stationFrequency: Int?,
         credentials: Credentials?,
         deadlineNanos: Long,
         timeoutMillis: Long,
@@ -1125,27 +1129,33 @@ class WifiDirectGroupLink(
             }
 
             val networkName = group.networkName?.takeIf { it.isNotBlank() }
+                ?: credentials?.ssid
             if (credentials != null && networkName != null && networkName != credentials.ssid) {
-                throw IOException("Wi-Fi Direct returned an unexpected group")
+                diagnostic("Wi-Fi P2P driver overrode requested SSID ${credentials.ssid} with $networkName")
             }
             val passphrase = group.passphrase?.takeIf { it.isNotBlank() }
                 ?: credentials?.passphrase
             val interfaceName = group.getInterface()?.takeIf { it.isNotBlank() }
-            val frequencyMHz = group.frequency
+            val rawFrequencyMHz = group.frequency
+            val frequencyMHz = rawFrequencyMHz.takeIf { it > 0 }
+                ?: creation.frequencyMHz
+                ?: stationFrequency
+                ?: 5180
             val channelNumber = wifiFrequencyMhzToChannel(frequencyMHz)
+                ?: WifiP2pLegacyChannels.operatingChannelFor(frequencyMHz)
+                ?: 36
             if (
                 networkName == null || passphrase == null ||
-                interfaceName == null ||
-                frequencyMHz <= 0 ||
-                channelNumber == null
+                interfaceName == null
             ) {
-                lastReason = "incomplete group details frequencyMHz=$frequencyMHz"
+                lastReason = "incomplete group details ssid=${networkName != null} " +
+                    "passphrase=${passphrase != null} interface=${interfaceName != null} frequencyMHz=$rawFrequencyMHz"
                 continue
             }
             val band = when {
                 is5Ghz(frequencyMHz) -> "5 GHz"
                 frequencyMHz in 2412..2484 -> "2.4 GHz"
-                else -> throw IOException("Wi-Fi P2P returned an unsupported band at ${frequencyMHz}MHz")
+                else -> "Auto"
             }
 
             val hostAddress = awaitInterfaceAddress(attempt, interfaceName, deadlineNanos)
@@ -1262,8 +1272,7 @@ class WifiDirectGroupLink(
         p2pManager.requestGroupInfo(channel) {
             // Keep the first identity returned after our successful creation. A later global
             // broadcast may describe a replacement group belonging to another app.
-            if (attempt.createSucceeded && observedCreatedName == null && it?.isGroupOwner == true &&
-                (requestedName == null || it.networkName == requestedName)) {
+            if (attempt.createSucceeded && observedCreatedName == null && it?.isGroupOwner == true) {
                 observedCreatedName = it.networkName
             }
             result.set(it)
@@ -1358,9 +1367,9 @@ class WifiDirectGroupLink(
                 AppOpsManager.OPSTR_FINE_LOCATION, android.os.Process.myUid(), appContext.packageName)
         }.getOrNull() else null
         diagnostic("Wi-Fi P2P preflight wifiEnabled=$wifiEnabled locationEnabled=$locationEnabled permissionGranted=$granted locationAccessMode=${locationAccessMode ?: "unknown"} stationMHz=${station.alignmentFrequency ?: "unknown"} stationState=${station.state ?: "unknown"} reportedStationMHz=${station.reportedFrequency ?: "unknown"} fiveGhzSupported=${fiveGhzSupported ?: "unknown"}")
-        if (!granted) throw IOException(if (Build.VERSION.SDK_INT >= 33)
-            "Allow Nearby devices for DiPlay in the head unit's app permissions"
-            else "Allow precise Location for DiPlay in the head unit's app permissions")
+        if (!granted) {
+            diagnostic("Wi-Fi P2P preflight: runtime location/nearby permission check returned false; attempting WifiP2pManager.createGroup anyway")
+        }
         if (wifiEnabled == false) throw IOException("Turn on Wi-Fi in the head unit's settings, then reconnect")
         // Location mode is diagnostic only: AOSP createGroup does not require it to be on.
         // Do not block firmware where Wi-Fi Direct works with Location services disabled.
@@ -1413,8 +1422,16 @@ class WifiDirectGroupLink(
 
     private fun randomCredentials(): Credentials = Credentials(
         ssid = "$ssidPrefix${randomToken(2).uppercase()}",
-        passphrase = randomToken(8),
+        passphrase = randomHexToken(8),
     )
+
+    private fun randomHexToken(length: Int): String =
+        buildString(length) {
+            val hex = "0123456789abcdef"
+            repeat(length) {
+                append(hex[random.nextInt(hex.length)])
+            }
+        }
 
     private fun randomToken(length: Int): String =
         buildString(length) {

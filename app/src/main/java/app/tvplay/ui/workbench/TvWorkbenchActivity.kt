@@ -388,10 +388,15 @@ open class TvWorkbenchActivity : Activity(), AppAppearanceOwner {
         if (!skipPermissionPrompt) {
             val missingPermissions = buildList {
                 if (wireless) {
+                    val effectiveWirelessMode = if (settings.connection.projectionProtocol.enablesCarLink) {
+                        TvWirelessMode.WIFI_DIRECT
+                    } else {
+                        settings.connection.wirelessHotspotMode
+                    }
                     addAll(
                         WirelessPermissions.missing(
                             context = this@TvWorkbenchActivity,
-                            wirelessMode = settings.connection.wirelessHotspotMode,
+                            wirelessMode = effectiveWirelessMode,
                         ),
                     )
                 } else {

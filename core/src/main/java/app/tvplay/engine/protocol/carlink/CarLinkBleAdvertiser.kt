@@ -242,6 +242,7 @@ class CarLinkBleAdvertiser(
     private var gattServer: BluetoothGattServer? = null
     private var activeAdvertiseCallback: AdvertiseCallback? = null
     private var activeAdvertisingSetCallback: AdvertisingSetCallback? = null
+    private var activeAdvertisingSet: AdvertisingSet? = null
 
     private fun initSerialNumber(): Int {
         val prefs = runCatching { context.getSharedPreferences("serial_num_prefs", Context.MODE_PRIVATE) }.getOrNull()
@@ -264,9 +265,36 @@ class CarLinkBleAdvertiser(
     private val rotateTask = object : Runnable {
         override fun run() {
             if (closed.get()) return
-            if (!isSessionActiveProvider()) {
-                advanceSerialNumber()
-                restartAdvertisingInternal()
+            if (!isSessionActiveProvider() && pendingClients.isEmpty()) {
+                val serial = advanceSerialNumber()
+                val updatedInPlace = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val advSet = activeAdvertisingSet
+                    if (advSet != null) {
+                        runCatching {
+                            val info1 = CarLinkBleSpec.buildCarInfo1Payload(
+                                carIdHex12 = carIdHex12,
+                                serialNumber = serial,
+                                modelIdHex8 = modelIdHex8,
+                                vendorDataHex4 = vendorDataHex4,
+                            )
+                            val advertiseData = AdvertiseData.Builder()
+                                .setIncludeDeviceName(false)
+                                .setIncludeTxPowerLevel(false)
+                                .addServiceUuid(ParcelUuid(CarLinkBleSpec.ADV_SERVICE_UUID))
+                                .addServiceData(ParcelUuid(CarLinkBleSpec.ADV_CAR_INFO_1_UUID), info1)
+                                .build()
+                            advSet.setAdvertisingData(advertiseData)
+                            true
+                        }.getOrDefault(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+                if (!updatedInPlace) {
+                    restartAdvertisingInternal()
+                }
             }
             handler.postDelayed(this, CarLinkBleSpec.ROTATION_INTERVAL_MS)
         }
@@ -331,7 +359,8 @@ class CarLinkBleAdvertiser(
         )
         val clientInfoChar = BluetoothGattCharacteristic(
             CarLinkBleSpec.CLIENT_INFO_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val serverInfoChar = BluetoothGattCharacteristic(
@@ -354,6 +383,7 @@ class CarLinkBleAdvertiser(
     }
 
     private fun stopCurrentAdvertising(leAdvertiser: BluetoothLeAdvertiser?) {
+        activeAdvertisingSet = null
         val setCb = activeAdvertisingSetCallback
         activeAdvertisingSetCallback = null
         if (setCb != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -418,10 +448,18 @@ class CarLinkBleAdvertiser(
                         status: Int,
                     ) {
                         if (status == ADVERTISE_SUCCESS) {
+                            activeAdvertisingSet = advertisingSet
                             onLog("CarLink BLE: advertising set 0xFCFB (serial=$serial, carId=$carIdHex12, name=$carName)")
                         } else {
+                            activeAdvertisingSet = null
                             onLog("CarLink BLE: advertising set failed status=$status, falling back to legacy advertise")
                             startLegacyAdvertising(leAdvertiser, advertiseData, scanResponse, serial)
+                        }
+                    }
+
+                    override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+                        if (activeAdvertisingSet === advertisingSet) {
+                            activeAdvertisingSet = null
                         }
                     }
                 }
@@ -470,13 +508,20 @@ class CarLinkBleAdvertiser(
     private val gattCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                onLog("CarLink BLE: phone GATT disconnected ${device.address} (status=$status)")
                 writeFragments.remove(device.address)
                 pendingClients.remove(device.address)
                 cccdSubscribedDevices.remove(device.address)
                 clientInfoReceivedDevices.remove(device.address)
                 notifiedClients.remove(device.address)
+                handler.post {
+                    if (!closed.get() && !isSessionActiveProvider() && pendingClients.isEmpty()) {
+                        restartAdvertisingInternal()
+                    }
+                }
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onLog("CarLink BLE: phone GATT connected ${device.address}")
+                pendingClients[device.address] = device
             }
         }
 
@@ -501,9 +546,7 @@ class CarLinkBleAdvertiser(
             if (descriptor.uuid == CarLinkBleSpec.CCCD_UUID) {
                 cccdSubscribedDevices.add(device.address)
                 if (clientInfoReceivedDevices.contains(device.address)) {
-                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 40L)
-                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 250L)
-                    handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 700L)
+                    handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, 40L)
                 }
             }
         }
@@ -577,10 +620,11 @@ class CarLinkBleAdvertiser(
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 80L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 350L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 800L)
-        handler.postDelayed({ notifyServerConnectionInfo(device, force = true) }, 1600L)
+        // Notify once as soon as ServerConnectionInfo is available; subsequent retries
+        // only fire if ServerConnectionInfo was deferred while Wi-Fi Direct hotspot is starting.
+        for (delayMs in longArrayOf(60L, 250L, 600L, 1200L, 2200L, 3500L, 5000L, 7000L)) {
+            handler.postDelayed({ notifyServerConnectionInfo(device, force = false) }, delayMs)
+        }
     }
 
     private fun buildServerInfoBytes(): ByteArray {
@@ -604,13 +648,18 @@ class CarLinkBleAdvertiser(
         }
         runCatching {
             characteristic.value = payload
-            // Always send GATT Notification (confirm = false) matching BluetoothLeService.sendMessageToClient
-            val sent = server.notifyCharacteristicChanged(device, characteristic, false)
-            if (sent) {
+            val sentNotify = server.notifyCharacteristicChanged(device, characteristic, false)
+            if (sentNotify) {
                 notifiedClients.add(device.address)
                 onLog("CarLink BLE: notified ServerConnectionInfo (${payload.size}B) to ${device.address}")
             } else {
-                onLog("CarLink BLE: notifyCharacteristicChanged returned false for ${device.address}")
+                val sentIndicate = server.notifyCharacteristicChanged(device, characteristic, true)
+                if (sentIndicate) {
+                    notifiedClients.add(device.address)
+                    onLog("CarLink BLE: indicated ServerConnectionInfo (${payload.size}B) to ${device.address}")
+                } else {
+                    onLog("CarLink BLE: notifyCharacteristicChanged returned false for ${device.address}")
+                }
             }
         }.onFailure { e ->
             onLog("CarLink BLE: notifyServerConnectionInfo failed: ${e.message}")

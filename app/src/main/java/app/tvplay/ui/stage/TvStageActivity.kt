@@ -682,7 +682,12 @@ class TvStageActivity : Activity() {
 
         if (!permissionsPromptedThisSession) {
             val baseMissing = if (wirelessEnabled) {
-                WirelessPermissions.missing(this, wirelessMode)
+                val effectiveWirelessMode = if (TvPreferencesStore.loadProjectionProtocol(this).enablesCarLink) {
+                    TvWirelessMode.WIFI_DIRECT
+                } else {
+                    wirelessMode
+                }
+                WirelessPermissions.missing(this, effectiveWirelessMode)
             } else {
                 WiredPermissions.missing(this)
             }

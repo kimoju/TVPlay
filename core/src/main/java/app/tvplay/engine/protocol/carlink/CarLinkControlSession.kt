@@ -131,7 +131,7 @@ class CarLinkControlSession(
         val thread = Thread(
             {
                 var attempts = 0
-                while (!closed.get() && attempts < 6) {
+                while (!closed.get() && attempts < 24) {
                     attempts++
                     val socket = runCatching {
                         Socket().apply {
@@ -235,8 +235,7 @@ class CarLinkControlSession(
                     val req = CarLinkProtoCodec.decodeAuthRequest(frame.body)
                     connectedPhoneModel = req.model.ifBlank { req.productName }.ifBlank { "Android CarLink" }
                     val pin = pinCodeProvider()
-                    val hs = handshakeSession?.takeIf { it.pinCode == pin }
-                        ?: CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin).also { handshakeSession = it }
+                    val hs = CarLinkAuthCipher.ServerHandshakeSession(pinCode = pin).also { handshakeSession = it }
                     val resp = hs.processAuthRequest(
                         request = req,
                         dayOrNightMode = 2,
@@ -302,7 +301,10 @@ class CarLinkControlSession(
         CarLinkFrameCodec.writeFrame(output, certFrame, handshakeSession?.sessionKey)
         output.flush()
         onLog("CarLink CERT: sent CarCertificate (${effectiveCertBytes.size}B)")
-        runCatching { Thread.sleep(100L) }
+        runCatching {
+            socket.soTimeout = 2_000
+            CarLinkFrameCodec.readFrame(socket.getInputStream(), handshakeSession?.sessionKey)
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -495,7 +497,7 @@ class CarLinkControlSession(
             }
             CarLinkMethodIndex.DISCONNECT -> {
                 onLog("CarLink CONTROL: phone requested Disconnect")
-                close()
+                disconnectActiveClient("phone requested Disconnect")
             }
             else -> {
                 if (frame.header.cmdDescription.messageType == CarLinkMessageType.REQ) {
@@ -513,10 +515,20 @@ class CarLinkControlSession(
 
     private fun handleVideoSocket(socket: Socket) {
         val input = socket.getInputStream()
+        val output = socket.getOutputStream()
         onLog("CarLink VIDEO connected from ${socket.inetAddress.hostAddress}")
         try {
             while (!closed.get() && !socket.isClosed) {
-                val frame = CarLinkFrameCodec.readFrame(input) ?: break
+                val sessionKey = handshakeSession?.sessionKey
+                val frame = CarLinkFrameCodec.readFrame(input, sessionKey) ?: break
+                val msgType = frame.header.cmdDescription.messageType
+                if (msgType == CarLinkMessageType.SEND_SYNC || msgType == CarLinkMessageType.REQ) {
+                    runCatching {
+                        synchronized(output) {
+                            CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
+                        }
+                    }
+                }
                 if (frame.body.isNotEmpty()) {
                     feedAnnexBVideoAccessUnit(
                         data = frame.body,
@@ -559,10 +571,20 @@ class CarLinkControlSession(
 
     private fun handleMediaSocket(socket: Socket) {
         val input = socket.getInputStream()
+        val output = socket.getOutputStream()
         onLog("CarLink MEDIA connected from ${socket.inetAddress.hostAddress}")
         try {
             while (!closed.get() && !socket.isClosed) {
-                val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
+                val sessionKey = handshakeSession?.sessionKey
+                val frame = CarLinkFrameCodec.readFrame(input, sessionKey) ?: break
+                val msgType = frame.header.cmdDescription.messageType
+                if (msgType == CarLinkMessageType.SEND_SYNC || msgType == CarLinkMessageType.REQ) {
+                    runCatching {
+                        synchronized(output) {
+                            CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), sessionKey)
+                        }
+                    }
+                }
                 if (frame.body.isNotEmpty()) {
                     val sink = mediaSink ?: continue
                     if (!audioConfigured) {
@@ -1098,6 +1120,32 @@ class CarLinkControlSession(
         ).apply { isDaemon = true }
         workerThreads += rtpThread
         rtpThread.start()
+    }
+
+    /**
+     * Closes only the active peer sockets and resets stream state without tearing down the
+     * listening [serverSockets] or [rtpUdpSockets], so the receiver remains ready for subsequent
+     * connections.
+     */
+    fun disconnectActiveClient(reason: String = "disconnected") {
+        val hadControl = controlOutput != null
+        controlOutput = null
+        uibcOutput = null
+        val socketsToClose = activeSockets.toList()
+        activeSockets.clear()
+        socketsToClose.forEach { s -> runCatching { s.close() } }
+        if (videoConfigured) {
+            videoConfigured = false
+            runCatching { mediaSink?.onScreenStreamActive(MAIN_SCREEN_TYPE, false) }
+        }
+        if (audioConfigured) {
+            audioConfigured = false
+            runCatching { mediaSink?.onAudioStopped(audioStreamId) }
+        }
+        if (hadControl) {
+            onLog("CarLink session ended ($reason)")
+            onSessionDisconnected()
+        }
     }
 
     override fun close() {

@@ -1073,6 +1073,11 @@ class TvSessionEngine(
                 if (!closed && activeSession == null) {
                     onStatus(CarPlayStatus.ControlEnded)
                 }
+                mainHandler.post {
+                    if (!closed) {
+                        carLinkBleAdvertiser?.refreshPairingAdvertisement()
+                    }
+                }
             },
             onMusicMetadata = { music ->
                 val metadata = TvNowPlayingMetadata(

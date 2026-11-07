@@ -237,6 +237,7 @@ class CarLinkBleAdvertiser(
     private val cccdSubscribedDevices = ConcurrentHashMap.newKeySet<String>()
     private val clientInfoReceivedDevices = ConcurrentHashMap.newKeySet<String>()
     private val notifiedClients = ConcurrentHashMap.newKeySet<String>()
+    private val retriedClients = ConcurrentHashMap.newKeySet<String>()
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
@@ -331,15 +332,7 @@ class CarLinkBleAdvertiser(
         handler.post {
             if (closed.get()) return@post
             for (device in pendingClients.values.toList()) {
-                notifyServerConnectionInfo(device, force = true, preferConfirm = true)
-                handler.postDelayed(
-                    { notifyServerConnectionInfo(device, force = true, preferConfirm = false) },
-                    180L,
-                )
-                handler.postDelayed(
-                    { notifyServerConnectionInfo(device, force = true, preferConfirm = true) },
-                    450L,
-                )
+                notifyServerConnectionInfo(device, force = false, preferConfirm = true)
             }
         }
     }
@@ -527,6 +520,7 @@ class CarLinkBleAdvertiser(
                 cccdSubscribedDevices.remove(device.address)
                 clientInfoReceivedDevices.remove(device.address)
                 notifiedClients.remove(device.address)
+                retriedClients.remove(device.address)
                 handler.post {
                     if (!closed.get() && !isSessionActiveProvider() && pendingClients.isEmpty()) {
                         restartAdvertisingInternal()
@@ -535,6 +529,20 @@ class CarLinkBleAdvertiser(
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onLog("CarLink BLE: phone GATT connected ${device.address}")
                 pendingClients[device.address] = device
+            }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS &&
+                pendingClients.containsKey(device.address) &&
+                retriedClients.add(device.address)
+            ) {
+                onLog("CarLink BLE: notification status=$status for ${device.address}, scheduling single fallback")
+                notifiedClients.remove(device.address)
+                handler.postDelayed(
+                    { notifyServerConnectionInfo(device, force = false, preferConfirm = false) },
+                    80L,
+                )
             }
         }
 
@@ -629,22 +637,19 @@ class CarLinkBleAdvertiser(
         pendingClients[device.address] = device
         clientInfoReceivedDevices.add(device.address)
         notifiedClients.remove(device.address)
+        retriedClients.remove(device.address)
         val clientInfo = runCatching { CarLinkBleSpec.parseClientInfoJson(jsonStr) }.getOrNull()
         if (clientInfo != null) {
             onClientConnected(device, clientInfo)
         }
         // In ucar-sdk (GattClientCallback.onServicesDiscovered), the phone writes CLIENT_INFO
-        // BEFORE calling subscribeCharacteristic(SERVER_CONNECTION_INFO). It closes GATT as soon
-        // as it receives SERVER_CONNECTION_INFO (removing device from pendingClients). Keep
-        // retrying while the client remains connected in pendingClients so an early notification
-        // sent before local subscription never blocks subsequent deliveries.
-        val retryDelays = longArrayOf(60L, 220L, 500L, 950L, 1600L, 2500L, 3800L, 5500L)
-        for ((index, delayMs) in retryDelays.withIndex()) {
-            handler.postDelayed(
-                { notifyServerConnectionInfo(device, force = true, preferConfirm = index % 2 == 0) },
-                delayMs,
-            )
-        }
+        // and calls subscribeCharacteristic(SERVER_CONNECTION_INFO), keeping GATT open while
+        // associating with the Wi-Fi Direct group owner. Send a single notification once either
+        // the CCCD descriptor write completes or after a 120ms grace window.
+        handler.postDelayed(
+            { notifyServerConnectionInfo(device, force = false, preferConfirm = true) },
+            120L,
+        )
     }
 
     private fun buildServerInfoBytes(): ByteArray {
@@ -705,5 +710,6 @@ class CarLinkBleAdvertiser(
         cccdSubscribedDevices.clear()
         clientInfoReceivedDevices.clear()
         notifiedClients.clear()
+        retriedClients.clear()
     }
 }

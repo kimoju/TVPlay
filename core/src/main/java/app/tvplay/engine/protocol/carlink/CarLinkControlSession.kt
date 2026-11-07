@@ -7,10 +7,10 @@ import app.tvplay.engine.protocol.rtsp.AudioFormat
 import app.tvplay.engine.protocol.rtsp.AudioStreamId
 import app.tvplay.engine.protocol.rtsp.MediaSink
 import app.tvplay.engine.protocol.rtsp.VideoCodec
-import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
-import java.io.InputStreamReader
+import java.io.EOFException
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -20,13 +20,14 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * ICCOA CarLink multi-channel session host (`AUTH 57209`, `CERT 57249`, `CONTROL 57219`,
- * `VIDEO 57259`, `MEDIA 57229`, `UIBC 4321`, `RTSP 7236`, `RTP 15550`).
+ * `VIDEO 57259`, `MEDIA 57229`, `UIBC 4321`, `RTSP 7236`, `RTP 19000 / 15550`).
  *
  * Bridges Xiaomi HyperOS CarWith, vivo Jovi InCar, and OPPO/OnePlus/Realme Car+ video, audio,
  * and touch/remote events directly into TVPlay's hardware-accelerated [MediaSink]
@@ -43,6 +44,11 @@ class CarLinkControlSession(
     private val onSessionDisconnected: () -> Unit = {},
     private val onMusicMetadata: (CarLinkProtoCodec.NotifyMusicInfoMsg) -> Unit = {},
     private val onLog: (String) -> Unit = {},
+    private val allowLoopbackPeer: Boolean = false,
+    private val channelPortOverrides: Map<CarLinkChannelType, Int> = emptyMap(),
+    private val peerPortOverrides: Map<CarLinkChannelType, Int> = emptyMap(),
+    private val wfdRtpPort: Int = WFD_RTP_PORT,
+    private val wfdAltRtpPort: Int = CarLinkChannelType.RTP.port,
 ) : Closeable {
     private val closed = AtomicBoolean(false)
     private val seqCounter = AtomicInteger(1)
@@ -50,6 +56,15 @@ class CarLinkControlSession(
     private val activeSockets = CopyOnWriteArrayList<Socket>()
     private val workerThreads = CopyOnWriteArrayList<Thread>()
     private val rtpUdpSockets = CopyOnWriteArrayList<DatagramSocket>()
+    private val boundChannelPorts = ConcurrentHashMap<CarLinkChannelType, Int>()
+
+    @Volatile
+    var boundPrimaryRtpPort: Int = wfdRtpPort
+        private set
+
+    @Volatile
+    var boundAltRtpPort: Int = wfdAltRtpPort
+        private set
 
     @Volatile
     private var handshakeSession: CarLinkAuthCipher.ServerHandshakeSession? = null
@@ -62,6 +77,12 @@ class CarLinkControlSession(
 
     @Volatile
     private var uibcOutput: OutputStream? = null
+
+    @Volatile
+    private var uibcEncrypted: Boolean = true
+
+    @Volatile
+    private var tcpRtpConnected = AtomicBoolean(false)
 
     @Volatile
     private var videoConfigured = false
@@ -85,6 +106,18 @@ class CarLinkControlSession(
 
     fun isActive(): Boolean = !closed.get() && (controlOutput != null || videoConfigured)
 
+    fun getBoundPort(channel: CarLinkChannelType): Int =
+        boundChannelPorts[channel] ?: channelPortOverrides[channel] ?: channel.port
+
+    private fun getPeerPort(channel: CarLinkChannelType): Int =
+        peerPortOverrides[channel] ?: channel.port
+
+    private fun isValidPeerHost(host: String): Boolean {
+        if (host.isBlank()) return false
+        if (allowLoopbackPeer) return true
+        return host != "127.0.0.1" && host != "localhost"
+    }
+
     fun start(bindAddress: InetAddress? = null) {
         if (closed.get()) return
         startTcpChannel(CarLinkChannelType.AUTH, bindAddress) { socket -> handleAuthSocket(socket) }
@@ -95,31 +128,38 @@ class CarLinkControlSession(
         startTcpChannel(CarLinkChannelType.MEDIA, bindAddress) { socket -> handleMediaSocket(socket) }
         startTcpChannel(CarLinkChannelType.UIBC, bindAddress) { socket -> handleUibcSocket(socket) }
         startTcpChannel(CarLinkChannelType.RTSP, bindAddress) { socket -> handleWfdRtspSocket(socket) }
-        startRtpUdpReceiver(bindAddress, WFD_RTP_PORT)
-        startRtpUdpReceiver(bindAddress, CarLinkChannelType.RTP.port)
+        boundPrimaryRtpPort = startRtpReceivers(bindAddress, wfdRtpPort)
+        if (wfdAltRtpPort != wfdRtpPort || wfdAltRtpPort == 0) {
+            boundAltRtpPort = startRtpReceivers(bindAddress, wfdAltRtpPort)
+        } else {
+            boundAltRtpPort = boundPrimaryRtpPort
+        }
         onLog(
             "CarLink session listeners started on ports " +
-                "AUTH=${CarLinkChannelType.AUTH.port}, CERT=${CarLinkChannelType.CERT.port}, " +
-                "CONTROL=${CarLinkChannelType.CONTROL.port}, SENSOR=${CarLinkChannelType.SENSOR.port}, " +
-                "VIDEO=${CarLinkChannelType.VIDEO.port}, MEDIA=${CarLinkChannelType.MEDIA.port}, " +
-                "UIBC=${CarLinkChannelType.UIBC.port}, RTSP=${CarLinkChannelType.RTSP.port}, " +
-                "RTP=$WFD_RTP_PORT/${CarLinkChannelType.RTP.port}",
+                "AUTH=${getBoundPort(CarLinkChannelType.AUTH)}, CERT=${getBoundPort(CarLinkChannelType.CERT)}, " +
+                "CONTROL=${getBoundPort(CarLinkChannelType.CONTROL)}, SENSOR=${getBoundPort(CarLinkChannelType.SENSOR)}, " +
+                "VIDEO=${getBoundPort(CarLinkChannelType.VIDEO)}, MEDIA=${getBoundPort(CarLinkChannelType.MEDIA)}, " +
+                "UIBC=${getBoundPort(CarLinkChannelType.UIBC)}, RTSP=${getBoundPort(CarLinkChannelType.RTSP)}, " +
+                "RTP=$boundPrimaryRtpPort/$boundAltRtpPort (TCP+UDP)",
         )
     }
 
     /**
      * Initiates outbound TCP client channels (`startUCarChannel(peerAddress)` in `UCarAdapter`)
-     * to the phone's `CONTROL (57219)`, `CERT (57249)`, `MEDIA (57229)`, `SENSOR (57239)`,
-     * `UIBC (4321)`, and `RTSP (7236)` servers after `AuthConfirm`.
+     * to the phone's `CERT (57249)`, `CONTROL (57219)`, `SENSOR (57239)`, `MEDIA (57229)`,
+     * and `RTSP (7236)` servers after `AuthConfirm`.
+     *
+     * Note: `UIBC (4321)` is connected during WFD RTSP M4 (`SET_PARAMETER` with
+     * `wfd_uibc_capability`), matching `CastManager` and `libovmsink.so`.
      */
-    fun connectToPeer(peerAddress: String, wfdPort: Int = CarLinkChannelType.RTSP.port) {
-        if (closed.get() || peerAddress.isBlank()) return
-        connectOutboundChannel(CarLinkChannelType.CERT, peerAddress, CarLinkChannelType.CERT.port) { handleCertSocket(it) }
-        connectOutboundChannel(CarLinkChannelType.CONTROL, peerAddress, CarLinkChannelType.CONTROL.port) { handleControlSocket(it) }
-        connectOutboundChannel(CarLinkChannelType.SENSOR, peerAddress, CarLinkChannelType.SENSOR.port) { handleSensorSocket(it) }
-        connectOutboundChannel(CarLinkChannelType.MEDIA, peerAddress, CarLinkChannelType.MEDIA.port) { handleMediaSocket(it) }
-        connectOutboundChannel(CarLinkChannelType.UIBC, peerAddress, CarLinkChannelType.UIBC.port) { handleUibcSocket(it) }
-        connectOutboundChannel(CarLinkChannelType.RTSP, peerAddress, wfdPort) { handleWfdRtspSocket(it) }
+    fun connectToPeer(peerAddress: String, wfdPort: Int = getPeerPort(CarLinkChannelType.RTSP)) {
+        if (closed.get() || !isValidPeerHost(peerAddress)) return
+        val effectiveWfdPort = peerPortOverrides[CarLinkChannelType.RTSP] ?: wfdPort
+        connectOutboundChannel(CarLinkChannelType.CERT, peerAddress, getPeerPort(CarLinkChannelType.CERT)) { handleCertSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.CONTROL, peerAddress, getPeerPort(CarLinkChannelType.CONTROL)) { handleControlSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.SENSOR, peerAddress, getPeerPort(CarLinkChannelType.SENSOR)) { handleSensorSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.MEDIA, peerAddress, getPeerPort(CarLinkChannelType.MEDIA)) { handleMediaSocket(it) }
+        connectOutboundChannel(CarLinkChannelType.RTSP, peerAddress, effectiveWfdPort) { handleWfdRtspSocket(it) }
     }
 
     private fun connectOutboundChannel(
@@ -172,15 +212,17 @@ class CarLinkControlSession(
         bindAddress: InetAddress?,
         handler: (Socket) -> Unit,
     ) {
+        val targetPort = channelPortOverrides[channel] ?: channel.port
         val server = runCatching {
             ServerSocket().apply {
                 reuseAddress = true
-                bind(InetSocketAddress(bindAddress, channel.port))
+                bind(InetSocketAddress(bindAddress, targetPort))
             }
         }.onFailure { e ->
-            onLog("CarLink ${channel.name} bind(${channel.port}) failed: ${e.message}")
+            onLog("CarLink ${channel.name} bind($targetPort) failed: ${e.message}")
         }.getOrNull() ?: return
 
+        boundChannelPorts[channel] = server.localPort
         serverSockets += server
         val acceptThread = Thread(
             {
@@ -263,11 +305,11 @@ class CarLinkControlSession(
                     }.getOrDefault(CarLinkProtoCodec.AuthConfirmMsg())
                     val fallbackIp = socket.inetAddress?.hostAddress.orEmpty()
                     val (peerIp, peerWfdPort) = handshakeSession?.parseAuthConfirmEndpoint(confirm, fallbackIp)
-                        ?: (fallbackIp to CarLinkChannelType.RTSP.port)
+                        ?: (fallbackIp to getPeerPort(CarLinkChannelType.RTSP))
                     val ack = CarLinkFrameCodec.buildAckFrame(frame.header)
                     CarLinkFrameCodec.writeFrame(output, ack)
                     onLog("CarLink AUTH: received AuthConfirm, peer=$peerIp:$peerWfdPort")
-                    if (peerIp.isNotEmpty() && peerIp != "127.0.0.1" && peerIp != "localhost") {
+                    if (isValidPeerHost(peerIp)) {
                         connectToPeer(peerIp, peerWfdPort)
                     }
                 }
@@ -283,6 +325,7 @@ class CarLinkControlSession(
     // -------------------------------------------------------------------------
 
     private fun handleCertSocket(socket: Socket) {
+        val input = socket.getInputStream()
         val output = socket.getOutputStream()
         onLog("CarLink CERT connected with ${socket.inetAddress.hostAddress}")
         val effectiveCertBytes = if (certBytes.isNotEmpty()) certBytes else CarLinkProtoCodec.DEFAULT_CAR_CERT_BYTES
@@ -298,12 +341,18 @@ class CarLinkControlSession(
             format = CarLinkDataFormat.PB3,
             messageType = CarLinkMessageType.SEND,
         )
-        CarLinkFrameCodec.writeFrame(output, certFrame, handshakeSession?.sessionKey)
-        output.flush()
+        synchronized(output) {
+            CarLinkFrameCodec.writeFrame(output, certFrame, handshakeSession?.sessionKey)
+        }
         onLog("CarLink CERT: sent CarCertificate (${effectiveCertBytes.size}B)")
-        runCatching {
-            socket.soTimeout = 2_000
-            CarLinkFrameCodec.readFrame(socket.getInputStream(), handshakeSession?.sessionKey)
+        while (!closed.get() && !socket.isClosed) {
+            val frame = CarLinkFrameCodec.readFrame(input, handshakeSession?.sessionKey) ?: break
+            val msgType = frame.header.cmdDescription.messageType
+            if (msgType == CarLinkMessageType.REQ || msgType == CarLinkMessageType.SEND_SYNC) {
+                synchronized(output) {
+                    CarLinkFrameCodec.writeFrame(output, CarLinkFrameCodec.buildAckFrame(frame.header), handshakeSession?.sessionKey)
+                }
+            }
         }
     }
 
@@ -424,13 +473,13 @@ class CarLinkControlSession(
             CarLinkMethodIndex.GET_PORT_REQUEST -> {
                 val req = CarLinkProtoCodec.decodeGetPortRequest(payload)
                 val targetPort = when (req.type) {
-                    1 -> CarLinkChannelType.VIDEO.port
-                    2 -> CarLinkChannelType.MEDIA.port
-                    3 -> CarLinkChannelType.UIBC.port
-                    4 -> CarLinkChannelType.SENSOR.port
-                    5 -> CarLinkChannelType.RTSP.port
-                    6 -> CarLinkChannelType.RTP.port
-                    else -> CarLinkChannelType.VIDEO.port
+                    1 -> getBoundPort(CarLinkChannelType.VIDEO)
+                    2 -> getBoundPort(CarLinkChannelType.MEDIA)
+                    3 -> getBoundPort(CarLinkChannelType.UIBC)
+                    4 -> getBoundPort(CarLinkChannelType.SENSOR)
+                    5 -> getBoundPort(CarLinkChannelType.RTSP)
+                    6 -> boundAltRtpPort
+                    else -> getBoundPort(CarLinkChannelType.VIDEO)
                 }
                 val respBytes = CarLinkProtoCodec.encodeGetPortResponse(
                     CarLinkProtoCodec.GetPortResponseMsg(result = 0, port = targetPort),
@@ -458,14 +507,14 @@ class CarLinkControlSession(
                         fps = displaySpec.fps,
                         isSupportP2P = true,
                         isSupportSoftAP = false,
-                        isDataTransMode = true,
+                        isDataTransMode = false,
                         default5GChannel = 149,
                         isSupportCamera = false,
                         isSupportMic = true,
                         isSupportLowLatencyDecodingMode = true,
                         isSupportVoiceWaken = false,
-                        sdkVersion = "1.5.0",
-                        workModes = negotiatedWorkModes,
+                        sdkVersion = UCAR_SDK_VERSION,
+                        workModes = 9,
                         isSupportPOINav = true,
                         isSupportRotation = false,
                         isSupportHomeKey = true,
@@ -484,7 +533,7 @@ class CarLinkControlSession(
                     messageType = CarLinkMessageType.RES,
                 )
                 synchronized(output) { CarLinkFrameCodec.writeFrame(output, reply, sessionKey) }
-                onLog("CarLink CONTROL: sent GetUCarConfigResponse (${displaySpec.widthPixels}x${displaySpec.heightPixels}@${displaySpec.fps})")
+                onLog("CarLink CONTROL: sent GetUCarConfigResponse (${displaySpec.widthPixels}x${displaySpec.heightPixels}@${displaySpec.fps}, isDataTransMode=false)")
             }
             CarLinkMethodIndex.NOTIFY_MUSIC_INFO -> {
                 val music = CarLinkProtoCodec.decodeNotifyMusicInfo(payload)
@@ -634,7 +683,8 @@ class CarLinkControlSession(
             displayHeight = displaySpec.heightPixels,
             pointers = pointers,
         )
-        val wire = CarLinkUibcDispatcher.encodeWirePayload(json, handshakeSession?.sessionKey)
+        val key = if (uibcEncrypted) handshakeSession?.sessionKey else null
+        val wire = CarLinkUibcDispatcher.encodeWirePayload(json, key)
         return runCatching {
             synchronized(out) {
                 out.write(wire)
@@ -650,7 +700,8 @@ class CarLinkControlSession(
         val uibcOut = uibcOutput
         if (uibcOut != null) {
             val json = CarLinkUibcDispatcher.buildKeyJson(action, mapped, metaState)
-            val wire = CarLinkUibcDispatcher.encodeWirePayload(json, handshakeSession?.sessionKey)
+            val key = if (uibcEncrypted) handshakeSession?.sessionKey else null
+            val wire = CarLinkUibcDispatcher.encodeWirePayload(json, key)
             sentUibc = runCatching {
                 synchronized(uibcOut) {
                     uibcOut.write(wire)
@@ -801,24 +852,71 @@ class CarLinkControlSession(
     // 7. Wi-Fi Display RTSP 1.0 (7236) & RTP (19000 / 15550) Sink (`libovmsink.so`)
     // -------------------------------------------------------------------------
 
+    private fun readRtspLineOrInterleaved(
+        input: InputStream,
+        interleavedAssembler: ByteArrayOutputStream,
+    ): String? {
+        val lineBuf = ByteArrayOutputStream(128)
+        while (true) {
+            val b = input.read()
+            if (b < 0) {
+                return if (lineBuf.size() > 0) lineBuf.toString(Charsets.UTF_8.name()).trimEnd('\r') else null
+            }
+            if (lineBuf.size() == 0 && b == '$'.code) {
+                val channel = input.read()
+                val lenHi = input.read()
+                val lenLo = input.read()
+                if (channel < 0 || lenHi < 0 || lenLo < 0) return null
+                val len = ((lenHi and 0xFF) shl 8) or (lenLo and 0xFF)
+                val payload = ByteArray(len)
+                readExact(input, payload, len)
+                if (channel == 0 && len > 12) {
+                    processRtpPacket(payload, len, interleavedAssembler)
+                }
+                continue
+            }
+            if (b == '\n'.code) {
+                return lineBuf.toString(Charsets.UTF_8.name()).trimEnd('\r')
+            }
+            lineBuf.write(b)
+        }
+    }
+
+    private fun readExact(input: InputStream, target: ByteArray, length: Int) {
+        var offset = 0
+        while (offset < length) {
+            val read = input.read(target, offset, length - offset)
+            if (read < 0) throw EOFException("Unexpected EOF while reading $length bytes")
+            offset += read
+        }
+    }
+
     private fun handleWfdRtspSocket(socket: Socket) {
-        val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+        val input = socket.getInputStream()
         val output = socket.getOutputStream()
-        val peerHost = socket.inetAddress?.hostAddress.orEmpty().ifBlank { "localhost" }
+        val peerHost = socket.inetAddress?.hostAddress.orEmpty().ifBlank { "127.0.0.1" }
         onLog("CarLink WFD RTSP connected with $peerHost:${socket.port}")
         var clientCseq = 1
         var rtspSessionId = "12345678"
+        var presentationUrl = "rtsp://$peerHost/wfd1.0/streamid=0"
+        var useTcpRtp = true
         var awaitingSetupResponse = false
         var playSent = false
+        val interleavedAssembler = ByteArrayOutputStream(256 * 1024)
 
         while (!closed.get() && !socket.isClosed) {
-            val requestLine = reader.readLine() ?: break
+            val requestLine = runCatching {
+                readRtspLineOrInterleaved(input, interleavedAssembler)
+            }.getOrNull() ?: break
             if (requestLine.isBlank()) continue
             var cseq = "1"
             var contentLength = 0
             var sessionHeader = ""
+            var transportHeader = ""
             while (true) {
-                val header = reader.readLine() ?: break
+                val header = runCatching {
+                    readRtspLineOrInterleaved(input, interleavedAssembler)
+                }.getOrNull() ?: break
                 if (header.isEmpty()) break
                 val colon = header.indexOf(':')
                 if (colon > 0) {
@@ -828,18 +926,14 @@ class CarLinkControlSession(
                         "cseq" -> cseq = value
                         "content-length" -> contentLength = value.toIntOrNull() ?: 0
                         "session" -> sessionHeader = value.substringBefore(';').trim()
+                        "transport" -> transportHeader = value
                     }
                 }
             }
             val body = if (contentLength > 0) {
-                val chars = CharArray(contentLength)
-                var readTotal = 0
-                while (readTotal < contentLength) {
-                    val n = reader.read(chars, readTotal, contentLength - readTotal)
-                    if (n < 0) break
-                    readTotal += n
-                }
-                String(chars, 0, readTotal)
+                val bytes = ByteArray(contentLength)
+                runCatching { readExact(input, bytes, contentLength) }.onFailure { break }
+                String(bytes, Charsets.UTF_8)
             } else {
                 ""
             }
@@ -854,7 +948,7 @@ class CarLinkControlSession(
                     awaitingSetupResponse = false
                     playSent = true
                     val playReq = buildString {
-                        append("PLAY rtsp://$peerHost/wfd1.0/streamid=0 RTSP/1.0\r\n")
+                        append("PLAY $presentationUrl RTSP/1.0\r\n")
                         append("CSeq: ${clientCseq++}\r\n")
                         append("Session: $rtspSessionId\r\n")
                         append("\r\n")
@@ -863,7 +957,13 @@ class CarLinkControlSession(
                         output.write(playReq.toByteArray(Charsets.UTF_8))
                         output.flush()
                     }
-                    onLog("CarLink WFD RTSP: sent M7 PLAY (session=$rtspSessionId)")
+                    onLog("CarLink WFD RTSP: sent M7 PLAY (session=$rtspSessionId, transport=$transportHeader)")
+
+                    val serverPortMatch = Regex("server_port=(\\d+)").find(transportHeader)
+                    val peerRtpServerPort = serverPortMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                    if (useTcpRtp && peerRtpServerPort > 0 && isValidPeerHost(peerHost)) {
+                        maybeConnectOutboundTcpRtp(peerHost, peerRtpServerPort)
+                    }
                 }
                 continue
             }
@@ -874,7 +974,7 @@ class CarLinkControlSession(
                     val resp = buildRtspResponse(
                         cseq = cseq,
                         extraHeaders = listOf(
-                            "Public: org.wfa.wfd1.0, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER, SET_PARAMETER",
+                            "Public: org.wfa.wfd1.0, GET_PARAMETER, SET_PARAMETER",
                         ),
                     )
                     // Reply 200 OK to M1 OPTIONS and immediately send M2 OPTIONS * RTSP/1.0 (WifiDisplaySink::onOptionsRequest)
@@ -891,18 +991,19 @@ class CarLinkControlSession(
                     }
                 }
                 "GET_PARAMETER" -> {
+                    val rtpPort = boundPrimaryRtpPort
                     val wfdParams = buildString {
                         if (body.isEmpty() || body.contains("wfd_car_display_mode")) {
-                            append("wfd_car_display_mode: mode=0;display=${displaySpec.widthPixels}:${displaySpec.heightPixels};dpi=160;fps=${displaySpec.fps}\r\n")
+                            append("wfd_car_display_mode: mode=0;display=${displaySpec.widthPixels}:${displaySpec.heightPixels};dpi=320;fps=${displaySpec.fps}\r\n")
                         }
                         if (body.isEmpty() || body.contains("wfd_video_formats")) {
                             append("wfd_video_formats: 00 00 02 04 0001FFFF 1FFFFFFF 00000FFF 00 0000 0000 00 none none\r\n")
                         }
                         if (body.isEmpty() || body.contains("wfd_audio_codecs")) {
-                            append("wfd_audio_codecs: LPCM 00000003 00, AAC 0000000F 00\r\n")
+                            append("wfd_audio_codecs: AAC 0000000F 00\r\n")
                         }
                         if (body.isEmpty() || body.contains("wfd_client_rtp_ports")) {
-                            append("wfd_client_rtp_ports: RTP/AVP/UDP;unicast $WFD_RTP_PORT 0 mode=play\r\n")
+                            append("wfd_client_rtp_ports: RTP/AVP/TCP;unicast $rtpPort 0 mode=play\r\n")
                         }
                         if (body.isEmpty() || body.contains("wfd_uibc_capability")) {
                             append("wfd_uibc_capability: input_category_list=GENERIC;generic_cap_list=Keyboard, Mouse, SingleTouch;hidc_cap_list=none;port=none;uibc_encrypted=true\r\n")
@@ -931,13 +1032,26 @@ class CarLinkControlSession(
                         output.write(resp.toByteArray(Charsets.UTF_8))
                         output.flush()
                     }
-                    onLog("CarLink WFD RTSP: replied M3 GET_PARAMETER (${displaySpec.widthPixels}x${displaySpec.heightPixels}@${displaySpec.fps}, rtp=$WFD_RTP_PORT)")
+                    onLog("CarLink WFD RTSP: replied M3 GET_PARAMETER (${displaySpec.widthPixels}x${displaySpec.heightPixels}@${displaySpec.fps}, rtpPort=$rtpPort)")
                 }
                 "SET_PARAMETER" -> {
-                    if (body.contains("wfd_uibc_capability")) {
+                    if (body.contains("wfd_presentation_URL", ignoreCase = true)) {
+                        val urlMatch = Regex("rtsp://\\S+").find(body)
+                        if (urlMatch != null) {
+                            presentationUrl = urlMatch.value
+                        }
+                    }
+                    if (body.contains("RTP/AVP/UDP", ignoreCase = true)) {
+                        useTcpRtp = false
+                    } else if (body.contains("RTP/AVP/TCP", ignoreCase = true)) {
+                        useTcpRtp = true
+                    }
+                    if (body.contains("wfd_uibc_capability", ignoreCase = true)) {
+                        uibcEncrypted = !body.contains("uibc_encrypted=false", ignoreCase = true)
                         val portMatch = Regex("port=(\\d+)").find(body)
-                        val peerUibcPort = portMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: CarLinkChannelType.UIBC.port
-                        if (uibcOutput == null && peerHost != "localhost" && peerHost != "127.0.0.1") {
+                        val peerUibcPort = portMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                            ?: getPeerPort(CarLinkChannelType.UIBC)
+                        if (uibcOutput == null && isValidPeerHost(peerHost)) {
                             connectOutboundChannel(CarLinkChannelType.UIBC, peerHost, peerUibcPort) { handleUibcSocket(it) }
                         }
                     }
@@ -949,22 +1063,28 @@ class CarLinkControlSession(
                     when {
                         body.contains("wfd_trigger_method: SETUP") -> {
                             awaitingSetupResponse = true
+                            val rtpPort = boundPrimaryRtpPort
+                            val transportSpec = if (useTcpRtp) {
+                                "RTP/AVP/TCP;unicast;client_port=$rtpPort"
+                            } else {
+                                "RTP/AVP/UDP;unicast;client_port=$rtpPort-${rtpPort + 1}"
+                            }
                             val setupReq = buildString {
-                                append("SETUP rtsp://$peerHost/wfd1.0/streamid=0 RTSP/1.0\r\n")
+                                append("SETUP $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
-                                append("Transport: RTP/AVP/UDP;unicast;client_port=$WFD_RTP_PORT-${WFD_RTP_PORT + 1}\r\n")
+                                append("Transport: $transportSpec\r\n")
                                 append("\r\n")
                             }
                             synchronized(output) {
                                 output.write(setupReq.toByteArray(Charsets.UTF_8))
                                 output.flush()
                             }
-                            onLog("CarLink WFD RTSP: sent M6 SETUP (client_port=$WFD_RTP_PORT-${WFD_RTP_PORT + 1})")
+                            onLog("CarLink WFD RTSP: sent M6 SETUP ($transportSpec)")
                         }
                         body.contains("wfd_trigger_method: PLAY") -> {
                             playSent = true
                             val playReq = buildString {
-                                append("PLAY rtsp://$peerHost/wfd1.0/streamid=0 RTSP/1.0\r\n")
+                                append("PLAY $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
                                 append("Session: $rtspSessionId\r\n")
                                 append("\r\n")
@@ -977,7 +1097,7 @@ class CarLinkControlSession(
                         }
                         body.contains("wfd_trigger_method: TEARDOWN") -> {
                             val teardownReq = buildString {
-                                append("TEARDOWN rtsp://$peerHost/wfd1.0/streamid=0 RTSP/1.0\r\n")
+                                append("TEARDOWN $presentationUrl RTSP/1.0\r\n")
                                 append("CSeq: ${clientCseq++}\r\n")
                                 append("Session: $rtspSessionId\r\n")
                                 append("\r\n")
@@ -991,10 +1111,11 @@ class CarLinkControlSession(
                     }
                 }
                 "SETUP" -> {
+                    val rtpPort = boundPrimaryRtpPort
                     val resp = buildRtspResponse(
                         cseq = cseq,
                         extraHeaders = listOf(
-                            "Transport: RTP/AVP/UDP;unicast;client_port=$WFD_RTP_PORT-${WFD_RTP_PORT + 1};server_port=19000-19001",
+                            "Transport: RTP/AVP/TCP;unicast;client_port=$rtpPort;server_port=$rtpPort",
                             "Session: $rtspSessionId;timeout=60",
                         ),
                     )
@@ -1054,72 +1175,206 @@ class CarLinkControlSession(
         }
     }
 
-    private fun startRtpUdpReceiver(bindAddress: InetAddress?, port: Int) {
+    /**
+     * Binds both a TCP `ServerSocket` (for RFC 4571 2-byte length-prefixed RTP over TCP as used by
+     * `libovmsink.so` `ANetworkSession::createTCPDatagramSession`) and a UDP `DatagramSocket` on
+     * the same port so both `RTP/AVP/TCP` and `RTP/AVP/UDP` phones work seamlessly.
+     */
+    private fun startRtpReceivers(bindAddress: InetAddress?, requestedPort: Int): Int {
+        var actualPort = requestedPort
+        val tcpServer = runCatching {
+            ServerSocket().apply {
+                reuseAddress = true
+                receiveBufferSize = 4 * 1024 * 1024
+                bind(InetSocketAddress(bindAddress, requestedPort))
+            }
+        }.onFailure { e ->
+            onLog("CarLink RTP TCP bind($requestedPort) failed: ${e.message}")
+        }.getOrNull()
+
+        if (tcpServer != null) {
+            actualPort = tcpServer.localPort
+            serverSockets += tcpServer
+            val acceptThread = Thread(
+                {
+                    while (!closed.get() && !tcpServer.isClosed) {
+                        val client = runCatching { tcpServer.accept() }.getOrNull() ?: break
+                        if (closed.get()) {
+                            runCatching { client.close() }
+                            break
+                        }
+                        runCatching {
+                            client.tcpNoDelay = true
+                            client.keepAlive = true
+                            client.receiveBufferSize = 4 * 1024 * 1024
+                        }
+                        activeSockets += client
+                        val clientThread = Thread(
+                            {
+                                try {
+                                    handleTcpRtpSocket(client)
+                                } catch (e: Exception) {
+                                    if (!closed.get()) {
+                                        onLog("CarLink RTP TCP socket ($actualPort) closed: ${e.message}")
+                                    }
+                                } finally {
+                                    activeSockets.remove(client)
+                                    runCatching { client.close() }
+                                }
+                            },
+                            "carlink-rtp-tcp-client-$actualPort",
+                        ).apply { isDaemon = true }
+                        workerThreads += clientThread
+                        clientThread.start()
+                    }
+                },
+                "carlink-rtp-tcp-accept-$actualPort",
+            ).apply { isDaemon = true }
+            workerThreads += acceptThread
+            acceptThread.start()
+        }
+
         val udp = runCatching {
             DatagramSocket(null).apply {
                 reuseAddress = true
                 receiveBufferSize = 4 * 1024 * 1024
-                bind(InetSocketAddress(bindAddress, port))
+                bind(InetSocketAddress(bindAddress, actualPort))
             }
         }.onFailure { e ->
-            onLog("CarLink RTP UDP bind($port) failed: ${e.message}")
-        }.getOrNull() ?: return
+            onLog("CarLink RTP UDP bind($actualPort) failed: ${e.message}")
+        }.getOrNull()
 
-        rtpUdpSockets += udp
-        val rtpThread = Thread(
-            {
-                val packetBuf = ByteArray(65535)
-                val packet = DatagramPacket(packetBuf, packetBuf.size)
-                val nalAssembler = ByteArrayOutputStream(256 * 1024)
-                while (!closed.get() && !udp.isClosed) {
-                    val received = runCatching {
-                        udp.receive(packet)
-                        true
-                    }.getOrDefault(false)
-                    if (!received) break
-                    val len = packet.length
-                    if (len <= 12) continue
-                    val csrcCount = packetBuf[0].toInt() and 0x0F
-                    val payloadOffset = 12 + csrcCount * 4
-                    if (payloadOffset >= len) continue
-                    val payloadLen = len - payloadOffset
-                    val firstByte = packetBuf[payloadOffset].toInt() and 0xFF
-                    when {
-                        firstByte == 0x00 && payloadLen > 4 && packetBuf[payloadOffset + 1] == 0.toByte() -> {
-                            // Direct Annex-B inside RTP (`wfd_av_raw_packet: true`)
-                            val annexB = packetBuf.copyOfRange(payloadOffset, len)
-                            feedAnnexBVideoAccessUnit(annexB)
-                        }
-                        firstByte == 0x47 && payloadLen >= 188 -> {
-                            // MPEG-TS over RTP (standard WFD transport stream)
-                            CarLinkMpegTsExtractor.extractAnnexB(
-                                tsPayload = packetBuf,
-                                offset = payloadOffset,
-                                length = payloadLen,
-                                assembler = nalAssembler,
-                                marker = (packetBuf[1].toInt() and 0x80) != 0,
-                            ) { accessUnit ->
-                                feedAnnexBVideoAccessUnit(accessUnit)
-                            }
-                        }
-                        else -> {
-                            // RFC 6184 H.264 / RFC 7798 H.265 RTP packetization
-                            CarLinkRtpH264Depacketizer.depacketize(
-                                rtpPacket = packetBuf,
-                                length = len,
-                                assembler = nalAssembler,
-                                preferHevc = hevcEnabled,
-                            ) { accessUnit, rtpTimestamp ->
-                                feedAnnexBVideoAccessUnit(accessUnit, (rtpTimestamp * 1_000_000L) / 90_000L)
-                            }
-                        }
+        if (udp != null) {
+            if (actualPort == 0) actualPort = udp.localPort
+            rtpUdpSockets += udp
+            val rtpThread = Thread(
+                {
+                    val packetBuf = ByteArray(65535)
+                    val packet = DatagramPacket(packetBuf, packetBuf.size)
+                    val nalAssembler = ByteArrayOutputStream(256 * 1024)
+                    while (!closed.get() && !udp.isClosed) {
+                        val received = runCatching {
+                            udp.receive(packet)
+                            true
+                        }.getOrDefault(false)
+                        if (!received) break
+                        processRtpPacket(packetBuf, packet.length, nalAssembler)
                     }
+                },
+                "carlink-rtp-udp-$actualPort",
+            ).apply { isDaemon = true }
+            workerThreads += rtpThread
+            rtpThread.start()
+        }
+
+        return actualPort
+    }
+
+    private fun maybeConnectOutboundTcpRtp(peerHost: String, serverPort: Int) {
+        val thread = Thread(
+            {
+                try {
+                    Thread.sleep(300L)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                if (closed.get() || tcpRtpConnected.get() || videoConfigured) return@Thread
+                val socket = runCatching {
+                    Socket().apply {
+                        tcpNoDelay = true
+                        keepAlive = true
+                        receiveBufferSize = 4 * 1024 * 1024
+                        connect(InetSocketAddress(peerHost, serverPort), 1_500)
+                    }
+                }.getOrNull() ?: return@Thread
+                activeSockets += socket
+                try {
+                    handleTcpRtpSocket(socket)
+                } catch (_: Exception) {
+                } finally {
+                    activeSockets.remove(socket)
+                    runCatching { socket.close() }
                 }
             },
-            "carlink-rtp-udp-$port",
+            "carlink-rtp-tcp-outbound",
         ).apply { isDaemon = true }
-        workerThreads += rtpThread
-        rtpThread.start()
+        workerThreads += thread
+        thread.start()
+    }
+
+    private fun handleTcpRtpSocket(socket: Socket) {
+        tcpRtpConnected.set(true)
+        onLog("CarLink RTP TCP connected with ${socket.inetAddress?.hostAddress}:${socket.port}")
+        val input = socket.getInputStream()
+        val nalAssembler = ByteArrayOutputStream(256 * 1024)
+        var packetBuf = ByteArray(65536)
+        try {
+            while (!closed.get() && !socket.isClosed) {
+                val lenHi = input.read()
+                if (lenHi < 0) break
+                val lenLo = input.read()
+                if (lenLo < 0) break
+                val len = ((lenHi and 0xFF) shl 8) or (lenLo and 0xFF)
+                if (len <= 0) continue
+                if (len > packetBuf.size) {
+                    packetBuf = ByteArray(len)
+                }
+                readExact(input, packetBuf, len)
+                processRtpPacket(packetBuf, len, nalAssembler)
+            }
+        } finally {
+            tcpRtpConnected.set(false)
+        }
+    }
+
+    private fun processRtpPacket(
+        packetBuf: ByteArray,
+        len: Int,
+        nalAssembler: ByteArrayOutputStream,
+    ) {
+        if (len <= 12) return
+        val csrcCount = packetBuf[0].toInt() and 0x0F
+        val hasExtension = (packetBuf[0].toInt() and 0x10) != 0
+        var payloadOffset = 12 + csrcCount * 4
+        if (hasExtension && payloadOffset + 4 <= len) {
+            val extWords = ((packetBuf[payloadOffset + 2].toInt() and 0xFF) shl 8) or
+                (packetBuf[payloadOffset + 3].toInt() and 0xFF)
+            payloadOffset += 4 + extWords * 4
+        }
+        if (payloadOffset >= len) return
+        val payloadLen = len - payloadOffset
+        val firstByte = packetBuf[payloadOffset].toInt() and 0xFF
+        when {
+            firstByte == 0x00 && payloadLen > 4 && packetBuf[payloadOffset + 1] == 0.toByte() -> {
+                // Direct Annex-B inside RTP (`wfd_av_raw_packet: true`)
+                val annexB = packetBuf.copyOfRange(payloadOffset, len)
+                val timestamp = ByteBuffer.wrap(packetBuf, 4, 4).order(ByteOrder.BIG_ENDIAN).int.toLong() and 0xFFFFFFFFL
+                feedAnnexBVideoAccessUnit(annexB, (timestamp * 1_000_000L) / 90_000L)
+            }
+            firstByte == 0x47 && payloadLen >= 188 -> {
+                // MPEG-TS over RTP (standard WFD transport stream)
+                CarLinkMpegTsExtractor.extractAnnexB(
+                    tsPayload = packetBuf,
+                    offset = payloadOffset,
+                    length = payloadLen,
+                    assembler = nalAssembler,
+                    marker = (packetBuf[1].toInt() and 0x80) != 0,
+                ) { accessUnit ->
+                    feedAnnexBVideoAccessUnit(accessUnit)
+                }
+            }
+            else -> {
+                // RFC 6184 H.264 / RFC 7798 H.265 RTP packetization
+                CarLinkRtpH264Depacketizer.depacketize(
+                    rtpPacket = packetBuf,
+                    length = len,
+                    assembler = nalAssembler,
+                    preferHevc = hevcEnabled,
+                ) { accessUnit, rtpTimestamp ->
+                    feedAnnexBVideoAccessUnit(accessUnit, (rtpTimestamp * 1_000_000L) / 90_000L)
+                }
+            }
+        }
     }
 
     /**
@@ -1131,6 +1386,7 @@ class CarLinkControlSession(
         val hadControl = controlOutput != null
         controlOutput = null
         uibcOutput = null
+        tcpRtpConnected.set(false)
         val socketsToClose = activeSockets.toList()
         activeSockets.clear()
         socketsToClose.forEach { s -> runCatching { s.close() } }
@@ -1152,6 +1408,7 @@ class CarLinkControlSession(
         if (!closed.compareAndSet(false, true)) return
         controlOutput = null
         uibcOutput = null
+        tcpRtpConnected.set(false)
         rtpUdpSockets.forEach { s -> runCatching { s.close() } }
         rtpUdpSockets.clear()
         serverSockets.forEach { s -> runCatching { s.close() } }
@@ -1170,6 +1427,7 @@ class CarLinkControlSession(
 
     companion object {
         const val WFD_RTP_PORT = 19000
+        const val UCAR_SDK_VERSION = "v1.5.3-202401092110-支持方控"
     }
 }
 

@@ -419,6 +419,104 @@ object CarLinkProtoCodec {
         return AuthConfirmMsg(cipher = cipher)
     }
 
+    fun decodeCarCertificate(data: ByteArray): CarCertificateMsg {
+        var content = ByteArray(0)
+        parseFields(
+            data = data,
+            onVarint = { _, _ -> },
+            onBytes = { field, bytes -> if (field == 1) content = bytes },
+        )
+        return CarCertificateMsg(content = content)
+    }
+
+    fun decodeGetUCarConfigResponse(data: ByteArray): GetUCarConfigResponseMsg {
+        var carBrMac = ByteArray(0)
+        var screenWidth = 0
+        var screenHeight = 0
+        var dpi = 0
+        var videoDisplayWidth = 0
+        var videoDisplayHeight = 0
+        var fps = 0
+        var isSupportP2P = false
+        var isSupportSoftAP = false
+        var isDataTransMode = false
+        var default5GChannel = 0
+        var isSupportCamera = false
+        var isSupportMic = false
+        var isSupportLowLatencyDecodingMode = false
+        var isSupportVoiceWaken = false
+        var carCustomField = ByteArray(0)
+        var sdkVersion = ""
+        var workModes = 0
+        var isSupportPOINav = false
+        var isSupportRotation = false
+        var isSupportHomeKey = false
+        var isSupportBackKey = false
+        var isSupportHevc = false
+        var realDpi = 0
+        parseFields(
+            data = data,
+            onVarint = { field, value ->
+                when (field) {
+                    2 -> screenWidth = value.toInt()
+                    3 -> screenHeight = value.toInt()
+                    4 -> dpi = value.toInt()
+                    5 -> videoDisplayWidth = value.toInt()
+                    6 -> videoDisplayHeight = value.toInt()
+                    7 -> fps = value.toInt()
+                    8 -> isSupportP2P = value != 0L
+                    9 -> isSupportSoftAP = value != 0L
+                    10 -> isDataTransMode = value != 0L
+                    11 -> default5GChannel = value.toInt()
+                    12 -> isSupportCamera = value != 0L
+                    13 -> isSupportMic = value != 0L
+                    14 -> isSupportLowLatencyDecodingMode = value != 0L
+                    15 -> isSupportVoiceWaken = value != 0L
+                    18 -> workModes = value.toInt()
+                    19 -> isSupportPOINav = value != 0L
+                    20 -> isSupportRotation = value != 0L
+                    21 -> isSupportHomeKey = value != 0L
+                    22 -> isSupportBackKey = value != 0L
+                    23 -> isSupportHevc = value != 0L
+                    24 -> realDpi = value.toInt()
+                }
+            },
+            onBytes = { field, bytes ->
+                when (field) {
+                    1 -> carBrMac = bytes
+                    16 -> carCustomField = bytes
+                    17 -> sdkVersion = bytes.toString(Charsets.UTF_8)
+                }
+            },
+        )
+        return GetUCarConfigResponseMsg(
+            carBrMac = carBrMac,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            dpi = dpi,
+            videoDisplayWidth = videoDisplayWidth,
+            videoDisplayHeight = videoDisplayHeight,
+            fps = fps,
+            isSupportP2P = isSupportP2P,
+            isSupportSoftAP = isSupportSoftAP,
+            isDataTransMode = isDataTransMode,
+            default5GChannel = default5GChannel,
+            isSupportCamera = isSupportCamera,
+            isSupportMic = isSupportMic,
+            isSupportLowLatencyDecodingMode = isSupportLowLatencyDecodingMode,
+            isSupportVoiceWaken = isSupportVoiceWaken,
+            carCustomField = carCustomField,
+            sdkVersion = sdkVersion,
+            workModes = workModes,
+            isSupportPOINav = isSupportPOINav,
+            isSupportRotation = isSupportRotation,
+            isSupportHomeKey = isSupportHomeKey,
+            isSupportBackKey = isSupportBackKey,
+            isSupportHevc = isSupportHevc,
+            realDpi = realDpi,
+        )
+    }
+
     fun decodeGetPortRequest(data: ByteArray): GetPortRequestMsg {
         var type = 0
         parseFields(

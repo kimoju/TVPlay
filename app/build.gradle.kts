@@ -22,8 +22,8 @@ android {
         applicationId = "app.tvplay"
         minSdk = 24
         targetSdk = 37
-        versionCode = 65
-        versionName = "1.4.1"
+        versionCode = 66
+        versionName = "1.4.2"
     }
 
     customAuthenticationAssets?.let { sourceSets.getByName("main").assets.directories.add(it.path) }

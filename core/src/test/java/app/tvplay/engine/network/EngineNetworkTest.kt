@@ -90,4 +90,15 @@ class EngineNetworkTest {
         val sliceFrame = EthernetIpv6Codec.build(srcMac, dstMac, oversizedBuffer, 0, ipv6Payload.size)
         org.junit.Assert.assertArrayEquals(frame, sliceFrame)
     }
+
+    @Test
+    fun p2pOwnershipGeneratesIccoaCompatible16CharSsidPrefix() {
+        val prefix = P2pOwnership.prefix("app.tvplay", "scope-123")
+        assertTrue(prefix.startsWith("DIRECT-vs-"))
+        assertEquals(14, prefix.length)
+        val candidateSsid = "${prefix}A9"
+        assertEquals(16, candidateSsid.toByteArray(Charsets.UTF_8).size)
+        assertTrue(P2pOwnership.canReclaim(isOwner = true, ssid = candidateSsid, recorded = null, prefix = prefix))
+        assertFalse(P2pOwnership.canReclaim(isOwner = true, ssid = "${prefix}A999", recorded = null, prefix = prefix))
+    }
 }

@@ -185,13 +185,13 @@ internal object P2pOwnership {
     fun prefix(packageName: String, scopedId: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("$packageName:$scopedId".toByteArray(Charsets.UTF_8))
-        return "DIRECT-dp" + digest.take(6).joinToString("") { "%02x".format(it.toInt() and 255) } + "-"
+        return "DIRECT-vs-" + digest.take(2).joinToString("") { "%02X".format(it.toInt() and 255) }
     }
 
     fun canReclaim(isOwner: Boolean, ssid: String?, recorded: String?, prefix: String): Boolean =
         isOwner && !ssid.isNullOrBlank() &&
             (ssid == recorded || (ssid.startsWith(prefix) &&
-                ssid.removePrefix(prefix).matches(Regex("[A-Za-z0-9]{4}"))))
+                ssid.removePrefix(prefix).matches(Regex("[A-Za-z0-9]{2}"))))
 }
 
 class P2pResetRequiredException : IOException("An existing Wi-Fi Direct connection needs a reset")
@@ -274,10 +274,12 @@ internal object P2pStartupRecovery {
             ?.takeIf { fiveGhz || it.frequencyMHz!! !in 5150..5895 }
         val rememberedSwitches = stationOnFiveGhz && remembered != null &&
             remembered.frequencyMHz!! in 5150..5895 && remembered.frequencyMHz != stationFrequency
-        // The default API does not pin a channel. A cached success cannot prove it will avoid
-        // hopping beside the current 5 GHz station, so keep it behind explicit channels there.
+        // The default API does not pin a channel or SSID. A cached success cannot prove it will avoid
+        // hopping beside the current 5 GHz station, and on API 29+ band requests keep our 16-char SSID.
         if (preferred?.mode == P2pCreationMode.SYSTEM_DEFAULT && preferred.frequencyMHz == null &&
-            !stationOnFiveGhz) add(preferred)
+            !stationOnFiveGhz && !bandRequests) add(preferred)
+        else if (preferred?.mode == P2pCreationMode.BAND_5_GHZ && fiveGhz && bandRequests && !stationOnFiveGhz) add(preferred)
+        else if (preferred?.mode == P2pCreationMode.BAND_2_GHZ && bandRequests) add(preferred)
         else if (remembered != null && !rememberedSwitches) channel(remembered.mode, remembered.frequencyMHz!!)
         if (aligned24) channel(P2pCreationMode.ALIGNED_2_GHZ, requireNotNull(stationFrequency))
         if (aligned5) channel(P2pCreationMode.ALIGNED_5_GHZ, requireNotNull(stationFrequency))
@@ -288,8 +290,22 @@ internal object P2pStartupRecovery {
         // 2.4 GHz comes first (see above). The platform enforces regulatory limits.
         if (aligned24 || stationOnFiveGhz) { twoGhz(); fiveGhzChannels() } else { fiveGhzChannels(); twoGhz() }
         if (rememberedSwitches) channel(remembered!!.mode, remembered.frequencyMHz!!)
+        // Before falling back to SYSTEM_DEFAULT (which ignores our custom 16-char SSID), try API 29+
+        // band-only requests so the driver chooses the channel while keeping our custom SSID.
+        if (bandRequests) {
+            fun addBand(mode: P2pCreationMode) {
+                if (none { it.mode == mode }) add(P2pCreationRequest(mode))
+            }
+            if (aligned24 || stationOnFiveGhz) {
+                addBand(P2pCreationMode.BAND_2_GHZ)
+                if (fiveGhz) addBand(P2pCreationMode.BAND_5_GHZ)
+            } else {
+                if (fiveGhz) addBand(P2pCreationMode.BAND_5_GHZ)
+                addBand(P2pCreationMode.BAND_2_GHZ)
+            }
+        }
         // Some vendors only implement the default-configuration API. Use it last, after every
-        // explicit-frequency option has been rejected, never before the 2.4 GHz attempts.
+        // explicit-frequency and band option has been rejected, never before the 2.4 GHz attempts.
         if (none { it.mode == P2pCreationMode.SYSTEM_DEFAULT }) add(P2pCreationRequest(P2pCreationMode.SYSTEM_DEFAULT))
     }
 
@@ -386,6 +402,8 @@ internal class P2pConfigurationMemory(context: Context) {
         val requested = fields[1].toInt()
         val request = when (fields[0]) {
             "system" -> if (requested == 0) P2pCreationRequest(P2pCreationMode.SYSTEM_DEFAULT) else return null
+            "band5" -> P2pCreationRequest(P2pCreationMode.BAND_5_GHZ)
+            "band2" -> P2pCreationRequest(P2pCreationMode.BAND_2_GHZ)
             "frequency" -> P2pStartupRecovery.rememberedFrequency(requested) ?: return null
             else -> return null
         }
@@ -395,7 +413,12 @@ internal class P2pConfigurationMemory(context: Context) {
     }.getOrNull()
 
     fun remember(request: P2pCreationRequest, actualMHz: Int, stationMHz: Int?): Boolean {
-        val kind = if (request.mode == P2pCreationMode.SYSTEM_DEFAULT) "system" else "frequency"
+        val kind = when (request.mode) {
+            P2pCreationMode.SYSTEM_DEFAULT -> "system"
+            P2pCreationMode.BAND_5_GHZ -> "band5"
+            P2pCreationMode.BAND_2_GHZ -> "band2"
+            else -> "frequency"
+        }
         val encoded = "$kind|${request.frequencyMHz ?: 0}|$actualMHz|${stationMHz ?: 0}|${UUID.randomUUID()}"
         return synchronized(prefs) { prefs.edit().putString("confirmed", encoded).commit() }
     }
@@ -1385,8 +1408,8 @@ class WifiDirectGroupLink(
     }
 
     private fun randomCredentials(): Credentials = Credentials(
-        ssid = "$ssidPrefix${randomToken(4)}",
-        passphrase = randomToken(16),
+        ssid = "$ssidPrefix${randomToken(2).uppercase()}",
+        passphrase = randomToken(8),
     )
 
     private fun randomToken(length: Int): String =

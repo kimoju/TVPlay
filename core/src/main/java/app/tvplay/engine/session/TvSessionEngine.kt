@@ -50,6 +50,7 @@ import app.tvplay.engine.network.NcmFunctionDiscovery
 import app.tvplay.engine.network.NcmUsbBridge
 import app.tvplay.engine.network.P2pResetRequiredException
 import app.tvplay.engine.network.WifiDirectGroupLink
+import app.tvplay.engine.network.WirelessHotspotBackend
 import app.tvplay.engine.network.WirelessHotspotInfo
 import app.tvplay.engine.network.WirelessHotspotManager
 import app.tvplay.engine.network.WirelessInterfaceDiagnostics
@@ -941,11 +942,20 @@ class TvSessionEngine(
 
     private fun ensureCarLinkHotspotReady() {
         if (closed || config.transport != TvTransportMode.WIRELESS) return
-        if (activeHotspotInfo != null) {
+        val liveHotspot = activeHotspotInfo
+        val hotspotValidForCarLink = liveHotspot != null &&
+            liveHotspot.backend == WirelessHotspotBackend.WIFI_P2P &&
+            liveHotspot.ssid.toByteArray(Charsets.UTF_8).size in 9..32 &&
+            liveHotspot.passphrase.isNotBlank()
+        if (hotspotValidForCarLink) {
             carLinkBleAdvertiser?.notifyPendingClients()
             return
         }
-        if (!config.projectionProtocol.enablesCarPlay || mfiProvider == null || phase != Phase.WIRELESS) {
+        if (!config.projectionProtocol.enablesCarPlay ||
+            config.wirelessMode != TvWirelessMode.WIFI_DIRECT ||
+            mfiProvider == null ||
+            phase != Phase.WIRELESS
+        ) {
             startStandaloneCarLinkWireless()
         }
     }
@@ -967,7 +977,10 @@ class TvSessionEngine(
                     while (!closed && !isStaleWirelessRun(generation) && attempt < 4) {
                         attempt++
                         try {
-                            val hotspotInfo = startWirelessHotspot(generation)
+                            val hotspotInfo = startWirelessHotspot(
+                                generation = generation,
+                                modeOverride = TvWirelessMode.WIFI_DIRECT,
+                            )
                             activeHotspotInfo = hotspotInfo
                             carLinkBleAdvertiser?.notifyPendingClients()
                             val hostAddr = hotspotInfo.hostAddress ?: hotspotInfo.hostAddresses.firstOrNull()
@@ -1060,40 +1073,38 @@ class TvSessionEngine(
             }
         }
         if (config.transport == TvTransportMode.WIRELESS) {
+            val carDisplayName = config.label.ifBlank { "TVPlay" }
             val advertiser = CarLinkBleAdvertiser(
                 context = appContext,
                 carIdHex12 = carMacHex12,
-                carName = CarLinkProtoCodec.DEFAULT_CAR_PRODUCT_NAME,
-                carShortName = CarLinkProtoCodec.DEFAULT_CAR_SHORT_NAME,
+                carName = carDisplayName,
+                carShortName = carDisplayName,
                 modelIdHex8 = config.carLinkModelId,
                 vendorDataHex4 = config.carLinkVendorData,
                 pinCodeProvider = { config.carLinkPinCode },
                 isSessionActiveProvider = { session.isActive() },
                 serverInfoProvider = serverInfo@{
-                    val liveHotspot = activeHotspotInfo
-                    if (config.wirelessMode == TvWirelessMode.WIFI_DIRECT) {
-                        if (liveHotspot == null || liveHotspot.ssid.isBlank() || liveHotspot.passphrase.isBlank()) {
-                            return@serverInfo null
-                        }
+                    val liveHotspot = activeHotspotInfo ?: return@serverInfo null
+                    if (liveHotspot.backend != WirelessHotspotBackend.WIFI_P2P) {
+                        return@serverInfo null
                     }
-                    val ssid = liveHotspot?.ssid?.takeIf { it.isNotBlank() }
-                        ?: config.lanWifiSsid.ifBlank { config.label }
-                    val psk = liveHotspot?.passphrase?.takeIf { it.isNotBlank() }
-                        ?: config.lanWifiPassphrase
-                    val freq = (liveHotspot?.frequencyMHz?.takeIf { it > 0 })
-                        ?: if ((liveHotspot?.channel ?: 149) >= 36) 5180 else 2412
+                    val ssid = liveHotspot.ssid.trim()
+                    val psk = liveHotspot.passphrase.trim()
+                    // ICCOA CarLink requires a valid P2P/SoftAP SSID (9..32 UTF-8 bytes, e.g. "DIRECT-vs-XXXXXX")
+                    // and an 8+ char passphrase. Wait until the hotspot is ready before sending Message 102.
+                    if (ssid.toByteArray(Charsets.UTF_8).size !in 9..32 || psk.isBlank()) {
+                        return@serverInfo null
+                    }
+                    val freq = (liveHotspot.frequencyMHz?.takeIf { it > 0 })
+                        ?: if (liveHotspot.channel >= 36) 5180 else 2412
                     CarLinkBleSpec.ServerConnectionInfo(
-                        name = CarLinkProtoCodec.DEFAULT_CAR_PRODUCT_NAME,
+                        name = carDisplayName,
                         ssid = ssid,
                         psk = psk,
                         mac = CarLinkBleSpec.WIFI_DEFAULT_MAC_ADDRESS,
                         freq = freq,
                         port = 0,
-                        type = if (config.wirelessMode == TvWirelessMode.WIFI_DIRECT) {
-                            CarLinkBleSpec.WIFI_TYPE_P2P
-                        } else {
-                            CarLinkBleSpec.WIFI_TYPE_SOFT_AP
-                        },
+                        type = CarLinkBleSpec.WIFI_TYPE_P2P,
                     )
                 },
                 onClientConnected = { device, info ->
@@ -2890,8 +2901,15 @@ class TvSessionEngine(
             )
         }
 
-    private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
-        val hotspotMode = config.wirelessMode
+    private fun startWirelessHotspot(
+        generation: Int,
+        modeOverride: TvWirelessMode? = null,
+    ): WirelessHotspotInfo {
+        val hotspotMode = modeOverride ?: if (config.projectionProtocol == TvProjectionProtocol.ICCOA_CARLINK) {
+            TvWirelessMode.WIFI_DIRECT
+        } else {
+            config.wirelessMode
+        }
         val manager = createHotspotManager(hotspotMode, generation)
         synchronized(wirelessResourceLock) {
             if (isStaleWirelessRun(generation)) {
